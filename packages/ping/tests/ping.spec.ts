@@ -31,7 +31,7 @@ describe('dsh-plugin-ping', () => {
 
   it('registers /ping and replies pong without a model', async () => {
     const { ctx, registered, disposers } = fakeContext()
-    apply(ctx)
+    apply(ctx as never)
     expect(registered).toHaveLength(1)
     expect(registered[0].name).toBe('ping')
     await expect(registered[0].handler({ rawInput: '' })).resolves.toEqual({ kind: 'success', text: 'pong' })

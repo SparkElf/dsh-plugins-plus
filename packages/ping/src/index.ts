@@ -1,18 +1,12 @@
 /**
  * `/ping` connectivity smoke command for DeepSeek Harness. Replies `pong`
  * without a model call, so it is keyless and safe in any composition.
- * Types are self-contained because upstream dsh packages are not reliably
- * published to npm; the runtime supplies the real seams at composition time.
+ * Command types are self-contained because upstream dsh interaction packages
+ * are not reliably published to npm; the runtime supplies the real seams.
  * @module @sparkelf/dsh-plugin-ping
  */
 
-/** Cordis context surface used by this plugin (structural, runtime-supplied). */
-export interface PingContext {
-  effect(generator: () => Generator<() => unknown>, label: string): void
-  commands: {
-    register(definition: PingCommandDefinition): () => unknown
-  }
-}
+import type { Context } from '@deepseek-ai/cordis'
 
 /** Invocation passed by the human-command adapter. */
 export interface PingCommandInvocation {
@@ -43,9 +37,9 @@ export const inject = ['commands']
  * Register `/ping` for every composed human-command adapter.
  * @param ctx - context carrying the command registry.
  */
-export function apply(ctx: PingContext): void {
+export function apply(ctx: Context): void {
   ctx.effect(function* () {
-    yield ctx.commands.register({
+    yield (ctx as Context & { commands: { register: (definition: PingCommandDefinition) => () => unknown } }).commands.register({
       name: 'ping',
       description: 'Reply with pong; connectivity smoke command',
       handler: async (_invocation: PingCommandInvocation): Promise<PingCommandResult> => ({ kind: 'success', text: 'pong' }),
