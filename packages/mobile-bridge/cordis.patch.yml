@@ -1,0 +1,7 @@
+- insert:
+    - id: mobile-bridge
+      name: '@sparkelf/dsh-mobile-bridge'
+      config:
+        serverUrl: ''
+        secret: ''
+        localPort: 3080
