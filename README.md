@@ -10,6 +10,8 @@ SparkElf-maintained independent plugins for [DeepSeek Harness](https://github.co
 ## Plugins
 
 - `@sparkelf/dsh-plugin-ping` — `/ping` connectivity smoke command; replies `pong` without a model call.
+- `@sparkelf/dsh-mobile-bridge` — outbound tunnel to the mobile bridge server plus a narrow-width mobile overlay that reuses the stock design system.
+- `@sparkelf/dsh-mobile-bridge-server` — multi-user bridge server (username/password registration, session tokens, user-to-bridge binding, WebSocket relay) so phones reach a local Harness through your server.
 
 ## CI / CD
 
