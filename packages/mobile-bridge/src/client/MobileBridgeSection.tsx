@@ -52,6 +52,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   const [status, setStatus] = useState<MobileBridgeStatus | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [qrSource, setQrSource] = useState<string | null>(null)
@@ -96,6 +97,19 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     setValues(current => ({ ...current, [key]: value }))
   }
 
+  const refreshStatus = async (): Promise<void> => {
+    setRefreshing(true)
+    setError(null)
+    try {
+      setStatus(await loadStatus())
+    } catch (caught) {
+      console.error('[dsh-mobile-bridge] status refresh failed', caught)
+      setError(t('statusFailed'))
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
     setSaving(true)
@@ -104,6 +118,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     try {
       await saveValues(values)
       setMessage(t('saved'))
+      void refreshStatus()
     } catch (caught) {
       console.error('[dsh-mobile-bridge] settings save failed', caught)
       setError(t('saveFailed'))
@@ -123,7 +138,10 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
       <form className={css.form} onSubmit={event => { void save(event) }}>
         <div className={css.row}>
           <span className={css.label}>{t('status')}</span>
-          <span className={status?.connected === true ? `${css.badge} ${css.badgeConnected}` : css.badge} role="status">{statusLabel}</span>
+          <span className={css.statusControls}>
+            <span className={status?.connected === true ? `${css.badge} ${css.badgeConnected}` : css.badge} role="status">{statusLabel}</span>
+            <button className={css.refresh} type="button" disabled={refreshing} onClick={() => { void refreshStatus() }}>{refreshing ? t('refreshing') : t('refresh')}</button>
+          </span>
         </div>
         <label className={css.row} htmlFor="dshmb-server-url">
           <span className={css.fieldCopy}><span className={css.label}>{t('serverUrl')}</span><span className={css.hint}>{t('serverUrlHint')}</span></span>
