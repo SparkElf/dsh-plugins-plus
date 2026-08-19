@@ -22,6 +22,9 @@ export interface MobileBridgeConfig {
   userKey: string
   autoConnect: boolean
   autoReconnect: boolean
+  /** Optional owner email; when set with emailTwoFactor, scans need an inbox code. */
+  ownerEmail: string
+  emailTwoFactor: boolean
 }
 
 /** Settings namespace owning the mobile bridge section. */
@@ -34,6 +37,8 @@ export const Config: z<MobileBridgeConfig> = z.object({
   userKey: z.string().role('secret').default(''),
   autoConnect: z.boolean().default(true),
   autoReconnect: z.boolean().default(true),
+  ownerEmail: z.string().default(''),
+  emailTwoFactor: z.boolean().default(false),
 })
 
 /** Cordis 装配必须先提供 WebServer，插件才可注册移动端路由。 */
@@ -162,7 +167,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       const started = await fetch(`${live.serverUrl}/bridge/api/bridge/start`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify({ ...live.emailTwoFactor && live.ownerEmail ? { email2fa: live.ownerEmail } : {} }),
       }).then(response => response.json()) as { code: string }
       const secret = randomBytes(16).toString('hex')
       state.codes.set(started.code, secret)

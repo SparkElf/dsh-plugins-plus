@@ -139,6 +139,31 @@ describe('bridge server end to end', () => {
     expect(offline.status).toBe(401)
   })
 
+  it('optionally challenges a scan with an owner email code', async () => {
+    const base = `http://127.0.0.1:${bridgePort}`
+    const start = await fetch(base + '/bridge/api/bridge/start', {
+      method: 'POST',
+      body: JSON.stringify({ email2fa: 'owner@example.com' }),
+    }).then(response => response.json()) as { code: string }
+    const challenged = await fetch(base + '/bridge/api/login/bridge', {
+      method: 'POST',
+      body: JSON.stringify({ code: start.code }),
+    }).then(response => response.json()) as { challenge?: string }
+    expect(challenged.challenge).toBe('email')
+    const mail = sentCodes.filter(entry => entry.email === 'owner@example.com').at(-1)
+    const verified = await fetch(base + '/bridge/api/login/bridge/verify', {
+      method: 'POST',
+      body: JSON.stringify({ code: start.code, emailCode: mail?.code ?? '' }),
+    })
+    expect(verified.status).toBe(200)
+    expect(verified.headers.get('set-cookie')).toContain('mbs=')
+    const replay = await fetch(base + '/bridge/api/login/bridge/verify', {
+      method: 'POST',
+      body: JSON.stringify({ code: start.code, emailCode: mail?.code ?? '' }),
+    })
+    expect(replay.status).toBe(401)
+  })
+
   it('rejects wrong codes and unknown providers', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
     await fetch(base + '/bridge/api/email/code', { method: 'POST', body: JSON.stringify({ email: 'x@example.com' }) })

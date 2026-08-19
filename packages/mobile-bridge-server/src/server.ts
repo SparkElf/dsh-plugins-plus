@@ -74,7 +74,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
   const mailer = options.mailer
   const ticketTtlMs = options.ticketTtlMs ?? 5 * 60_000
   const bridges = new Map<string, WebSocket>()
-  const tickets = new Map<string, { createdAt: number; used: boolean }>()
+  const tickets = new Map<string, { createdAt: number; used: boolean; email2fa?: string }>()
 
   const http = createServer((req, res) => {
     void (async () => {
@@ -136,6 +136,28 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           if (ticket === undefined || !bridges.has(code)) throw new Error('unknown or offline pairing code')
           if (ticket.used) throw new Error('pairing code already used')
           if (Date.now() - ticket.createdAt > ticketTtlMs) throw new Error('pairing code expired')
+          if (ticket.email2fa !== undefined && mailer !== undefined) {
+            // Optional second factor: the owner's inbox must confirm the scan.
+            await mailer(ticket.email2fa, store.issueEmailCode(ticket.email2fa))
+            json(res, 200, { challenge: 'email' })
+            return
+          }
+          ticket.used = true
+          const token = store.loginExternal('bridge', code)
+          store.bind(token, code)
+          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`] })
+          res.end(JSON.stringify({ token }))
+        } catch (error) { json(res, 401, { error: error instanceof Error ? error.message : String(error) }) }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/bridge/api/login/bridge/verify') {
+        try {
+          const { code, emailCode } = JSON.parse(await readBody(req)) as { code: string; emailCode: string }
+          const ticket = tickets.get(code)
+          if (ticket === undefined || !bridges.has(code) || ticket.email2fa === undefined) throw new Error('no pending challenge')
+          if (ticket.used) throw new Error('pairing code already used')
+          if (Date.now() - ticket.createdAt > ticketTtlMs) throw new Error('pairing code expired')
+          store.consumeEmailCode(ticket.email2fa, emailCode)
           ticket.used = true
           const token = store.loginExternal('bridge', code)
           store.bind(token, code)
@@ -186,9 +208,10 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
         return
       }
       if (req.method === 'POST' && url.pathname === '/bridge/api/bridge/start') {
+        const { email2fa } = JSON.parse(await readBody(req) || '{}') as { email2fa?: string }
         const code = randomBytes(3).toString('hex')
         bridges.set(code, null as unknown as WebSocket)
-        tickets.set(code, { createdAt: Date.now(), used: false })
+        tickets.set(code, { createdAt: Date.now(), used: false, ...typeof email2fa === 'string' && email2fa.length > 0 ? { email2fa } : {} })
         json(res, 200, { code })
         return
       }

@@ -127,6 +127,14 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
       var proceed = function () {
         localStorage.setItem('dshmb-pair', JSON.stringify(pair))
         api('/api/login/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pair.b || pair.c }) })
+          .then(function (res) {
+            if (res && res.challenge === 'email') {
+              var mailCode = prompt('桌面所有者邮箱收到验证码，请输入')
+              if (mailCode === null) throw new Error('已取消')
+              return api('/api/login/bridge/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pair.b || pair.c, emailCode: mailCode }) })
+            }
+            return res
+          })
           .then(function () { history.replaceState(null, '', '/'); registerSw(pair) })
           .catch(function (e) { var m = document.querySelector('main'); if (m) m.insertAdjacentHTML('beforeend', '<p class=err>' + e.message + '</p>') })
       }
