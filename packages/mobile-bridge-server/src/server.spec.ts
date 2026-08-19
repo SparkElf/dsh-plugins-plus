@@ -68,6 +68,15 @@ describe('bridge server end to end', () => {
     bridgeSocket.close()
   })
 
+  it('accepts external logins through configured verifiers only', async () => {
+    const base = `http://127.0.0.1:${bridgePort}`
+    const unknown = await fetch(base + '/api/login/external', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'wechat', payload: { code: 'c1' } }),
+    })
+    expect(unknown.status).toBe(401)
+  })
+
   it('rejects unbound or unknown clients on the client socket', async () => {
     const refused = new Promise<boolean>(resolve => {
       const socket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/client?token=bogus`)

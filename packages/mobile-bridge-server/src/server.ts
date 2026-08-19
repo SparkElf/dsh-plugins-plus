@@ -45,13 +45,24 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8')
 }
 
+/** Verifies one external login payload and returns the stable identity. */
+export type ExternalAuthVerifier = (payload: Record<string, unknown>) => Promise<string>
+
+/** Options for the bridge server. */
+export interface BridgeServerOptions {
+  /** Enabled external login providers (e.g. wechat) with their verifiers. */
+  externalAuth?: Record<string, ExternalAuthVerifier>
+}
+
 /**
  * Build the bridge server: HTTP auth/bind/landing routes plus two WebSocket
  * endpoints (`/ws/bridge` for local plugins, `/ws/client` for browsers).
  * @param store - user/token/binding store.
+ * @param options - external auth provider verifiers; empty by default.
  * @returns the node HTTP server (listen owned by the caller).
  */
-export function createBridgeServer(store: UserStore) {
+export function createBridgeServer(store: UserStore, options: BridgeServerOptions = {}) {
+  const externalAuth = options.externalAuth ?? {}
   const bridges = new Map<string, WebSocket>()
   const pending = new Map<string, (response: RelayResponse) => void>()
 
@@ -74,6 +85,16 @@ export function createBridgeServer(store: UserStore) {
         try {
           const { name, password } = JSON.parse(await readBody(req)) as { name: string; password: string }
           json(res, 200, { token: store.login(name, password) })
+        } catch (error) { json(res, 401, { error: error instanceof Error ? error.message : String(error) }) }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/api/login/external') {
+        try {
+          const { provider, payload } = JSON.parse(await readBody(req)) as { provider: string; payload: Record<string, unknown> }
+          const verify = externalAuth[provider]
+          if (!verify) throw new Error('unknown provider')
+          const externalId = await verify(payload ?? {})
+          json(res, 200, { token: store.loginExternal(provider, externalId) })
         } catch (error) { json(res, 401, { error: error instanceof Error ? error.message : String(error) }) }
         return
       }

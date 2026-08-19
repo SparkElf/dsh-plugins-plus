@@ -13,7 +13,7 @@ describe('user store', () => {
   it('registers, logs in, and rejects bad passwords', () => {
     const store = freshStore()
     const token = store.register('alice', 'longpassword')
-    expect(store.userFor(token)).toBe('alice')
+    expect(store.userFor(token)).toBe('password:alice')
     expect(() => store.login('alice', 'wrongpass')).toThrow(/invalid/)
     expect(() => store.register('alice', 'longpassword')).toThrow(/exists/)
     expect(() => store.register('x', 'short')).toThrow(/8\+/)
@@ -25,6 +25,16 @@ describe('user store', () => {
     expect(store.bridgeFor(token)).toBeNull()
     store.bind(token, 'abc123')
     expect(store.bridgeFor(token)).toBe('abc123')
+  })
+
+  it('logs in external providers and creates the user on first sight', () => {
+    const store = freshStore()
+    const token = store.loginExternal('wechat', 'wx-open-1')
+    expect(store.userFor(token)).toBe('wechat:wx-open-1')
+    const again = store.loginExternal('wechat', 'wx-open-1')
+    expect(store.userFor(again)).toBe('wechat:wx-open-1')
+    store.bind(token, 'ff00ff')
+    expect(store.bridgeFor(token)).toBe('ff00ff')
   })
 
   it('hashes deterministically per salt', () => {

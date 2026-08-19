@@ -1,7 +1,8 @@
 /**
- * Zero-dependency user store: scrypt-hashed credentials, HMAC session
- * tokens, and user-to-bridge bindings, persisted as one JSON document with
- * atomic replacement.
+ * Zero-dependency user store: scrypt-hashed password credentials or external
+ * provider identities (the seam third-party logins such as WeChat plug into),
+ * HMAC session tokens, and user-to-bridge bindings, persisted as one JSON
+ * document with atomic replacement.
  * @module @sparkelf/dsh-mobile-bridge-server/store
  */
 
@@ -9,11 +10,13 @@ import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** One registered user record. */
+/** One registered user record, keyed by provider plus external id. */
 export interface UserRecord {
-  name: string
-  salt: string
-  hash: string
+  key: string
+  provider: string
+  externalId: string
+  salt: string | null
+  hash: string | null
   /** Bridge code this user is bound to, when paired. */
   bridge: string | null
 }
@@ -47,48 +50,74 @@ export class UserStore {
     renameSync(tmp, this.file)
   }
 
-  /** Register a new user; rejects duplicates and weak input loudly. */
-  register(name: string, password: string): string {
-    const key = name.trim()
-    if (key.length < 2 || password.length < 8) throw new Error('name needs 2+ chars and password 8+')
-    if (this.doc.users[key]) throw new Error('user already exists')
-    const salt = randomBytes(8).toString('hex')
-    this.doc.users[key] = { name: key, salt, hash: hashPassword(password, salt), bridge: null }
-    this.save()
-    return this.login(key, password)
-  }
-
-  /** Verify credentials and mint a session token. */
-  login(name: string, password: string): string {
-    const user = this.doc.users[name.trim()]
-    if (!user) throw new Error('invalid credentials')
-    const attempt = Buffer.from(hashPassword(password, user.salt), 'hex')
-    const expected = Buffer.from(user.hash, 'hex')
-    if (attempt.length !== expected.length || !timingSafeEqual(attempt, expected)) throw new Error('invalid credentials')
-    const token = createHmac('sha256', this.tokenSecret).update(user.name + ':' + randomBytes(8).toString('hex')).digest('hex')
-    this.doc.tokens[token] = user.name
+  private mintToken(key: string): string {
+    const token = createHmac('sha256', this.tokenSecret).update(key + ':' + randomBytes(8).toString('hex')).digest('hex')
+    this.doc.tokens[token] = key
     this.save()
     return token
   }
 
-  /** Resolve a session token to its user name. */
+  /** Register a password user; rejects duplicates and weak input loudly. */
+  register(name: string, password: string): string {
+    const key = name.trim()
+    if (key.length < 2 || password.length < 8) throw new Error('name needs 2+ chars and password 8+')
+    if (this.doc.users['password:' + key]) throw new Error('user already exists')
+    const salt = randomBytes(8).toString('hex')
+    this.doc.users['password:' + key] = {
+      key: 'password:' + key,
+      provider: 'password',
+      externalId: key,
+      salt,
+      hash: hashPassword(password, salt),
+      bridge: null,
+    }
+    return this.mintToken('password:' + key)
+  }
+
+  /** Verify password credentials and mint a session token. */
+  login(name: string, password: string): string {
+    const user = this.doc.users['password:' + name.trim()]
+    if (!user || !user.salt || !user.hash) throw new Error('invalid credentials')
+    const attempt = Buffer.from(hashPassword(password, user.salt), 'hex')
+    const expected = Buffer.from(user.hash, 'hex')
+    if (attempt.length !== expected.length || !timingSafeEqual(attempt, expected)) throw new Error('invalid credentials')
+    return this.mintToken(user.key)
+  }
+
+  /**
+   * Log in through an external provider, creating the user on first sight.
+   * The server only calls this after the provider verifier confirmed the
+   * payload, so the external id is trusted here.
+   * @param provider - provider kind (e.g. wechat).
+   * @param externalId - provider-verified stable identity.
+   * @returns a fresh session token.
+   */
+  loginExternal(provider: string, externalId: string): string {
+    const key = provider + ':' + externalId
+    if (!this.doc.users[key]) {
+      this.doc.users[key] = { key, provider, externalId, salt: null, hash: null, bridge: null }
+    }
+    return this.mintToken(key)
+  }
+
+  /** Resolve a session token to its user key. */
   userFor(token: string): string | undefined {
     return this.doc.tokens[token]
   }
 
   /** Bind a user to a bridge code. */
   bind(token: string, bridge: string): string {
-    const name = this.userFor(token)
-    if (!name) throw new Error('unknown token')
-    this.doc.users[name].bridge = bridge.trim()
+    const key = this.userFor(token)
+    if (!key) throw new Error('unknown token')
+    this.doc.users[key].bridge = bridge.trim()
     this.save()
-    return name
+    return key
   }
 
   /** The bridge code a user is bound to. */
   bridgeFor(token: string): string | null {
-    const name = this.userFor(token)
-    return name ? this.doc.users[name].bridge : null
+    const key = this.userFor(token)
+    return key ? this.doc.users[key].bridge : null
   }
 
   /** Stable fingerprint for integrity checks in tests. */
