@@ -12,7 +12,7 @@ import { dirname } from 'node:path'
 import nodemailer from 'nodemailer'
 import { createBridgeServer } from './server.ts'
 import { UserStore } from './store.ts'
-import { wechatConfigFromEnv, wechatVerifier } from './wechat.ts'
+import { wechatConfigFromEnv, wechatMiniprogramVerifier, wechatVerifier } from './wechat.ts'
 
 const secret = process.env.MOBILE_BRIDGE_SECRET ?? ''
 if (secret.length < 16) {
@@ -46,11 +46,17 @@ const mailer = smtpHost.length > 0
 if (mailer === undefined) console.log('[mobile-bridge] email login disabled (no SMTP_HOST)')
 
 const wechat = wechatConfigFromEnv()
+const wechatKind = (process.env.WECHAT_KIND ?? 'miniprogram').trim()
 if (wechat === undefined) console.log('[mobile-bridge] wechat login disabled (no WECHAT_APP_ID/SECRET)')
 
 const server = createBridgeServer(new UserStore(data, secret), {
   ...mailer === undefined ? {} : { mailer },
-  ...wechat === undefined ? {} : { externalAuth: { wechat: wechatVerifier(wechat) } },
+  ...wechat === undefined ? {} : {
+    externalAuth: {
+      wechat: wechatKind === 'open' ? wechatVerifier(wechat) : wechatMiniprogramVerifier(wechat),
+    },
+    wechatScheme: wechat,
+  },
 })
 server.listen(port, () => {
   console.log(`[mobile-bridge] listening on :${port}`)

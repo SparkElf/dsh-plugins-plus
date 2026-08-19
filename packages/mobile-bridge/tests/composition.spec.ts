@@ -11,7 +11,7 @@ interface CapturedRoute {
 
 /** Real cordis composition: the web server seam is stubbed, the runtime is real. */
 describe('dsh-mobile-bridge composition', () => {
-  it('registers the /mobile/ overlay route and disposes cleanly', async () => {
+  it('registers the /mobile overlay route and disposes cleanly', async () => {
     const routes: CapturedRoute[] = []
     const ctx = new Context()
     ctx.provide('webServer', {
@@ -26,7 +26,7 @@ describe('dsh-mobile-bridge composition', () => {
     const config: MobileBridgeConfig = { serverUrl: '', localPort: 3080, userKey: '', autoConnect: false, autoReconnect: false }
     const fiber = ctx.plugin(mobileBridge, config)
     await fiber
-    expect(routes.map(route => route.path)).toEqual(['/mobile/'])
+    expect(routes.map(route => route.path)).toEqual(['/mobile'])
 
     let status = 0
     let body = ''

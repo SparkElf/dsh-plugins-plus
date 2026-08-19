@@ -13,6 +13,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { WebSocket, WebSocketServer } from 'ws'
 import { SW_SOURCE, CLIENT_SOURCE } from './phone.ts'
 import { UserStore } from './store.ts'
+import type { WechatConfig } from './wechat.ts'
+import { generateScheme } from './wechat-scheme.ts'
 
 /** Verifies one external login payload and returns the stable identity. */
 export type ExternalAuthVerifier = (payload: Record<string, unknown>) => Promise<string>
@@ -26,6 +28,8 @@ export interface BridgeServerOptions {
   externalAuth?: Record<string, ExternalAuthVerifier>
   /** Delivers email verification codes; required for email login. */
   mailer?: CodeMailer
+  /** WeChat credentials enabling URL Scheme generation for mini-program QRs. */
+  wechatScheme?: WechatConfig
 }
 
 const COOKIE = 'mbs'
@@ -152,6 +156,33 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           const { bridge } = JSON.parse(await readBody(req)) as { bridge: string }
           json(res, 200, { name: store.bind(token, bridge) })
         } catch (error) { json(res, 400, { error: error instanceof Error ? error.message : String(error) }) }
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/bridge/wxauth') {
+        // Mini-program web-view entry: wx.login code plus optional pairing.
+        const code = url.searchParams.get('code') ?? ''
+        const pair = url.searchParams.get('pair') ?? ''
+        const verify = externalAuth.wechat
+        if (verify === undefined) { json(res, 503, { error: 'wechat not configured' }); return }
+        try {
+          const externalId = await verify({ code })
+          const token = store.loginExternal('wechat', externalId)
+          if (pair.length > 0) store.bind(token, pair)
+          res.writeHead(302, {
+            'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`],
+            location: '/',
+          })
+          res.end()
+        } catch (error) { json(res, 401, { error: error instanceof Error ? error.message : String(error) }) }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/bridge/api/scheme') {
+        if (options.wechatScheme === undefined) { json(res, 503, { error: 'wechat not configured' }); return }
+        try {
+          const { query } = JSON.parse(await readBody(req)) as { query: string }
+          const openlink = await generateScheme(options.wechatScheme, String(query ?? '').slice(0, 512))
+          json(res, 200, { openlink })
+        } catch (error) { json(res, 502, { error: error instanceof Error ? error.message : String(error) }) }
         return
       }
       if (req.method === 'POST' && url.pathname === '/bridge/api/bridge/start') {

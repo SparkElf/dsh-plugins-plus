@@ -1,0 +1,10 @@
+{
+  "pages": [
+    "pages/bridge/bridge"
+  ],
+  "window": {
+    "navigationBarTitleText": "DeepSeek Harness"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

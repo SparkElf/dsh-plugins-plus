@@ -1,0 +1,11 @@
+{
+  "miniprogramRoot": "./",
+  "compileType": "miniprogram",
+  "appid": "wx071a2e8b9e7542b9",
+  "projectname": "dsh-mobile-bridge",
+  "setting": {
+    "es6": true,
+    "postcss": true,
+    "minified": true
+  }
+}

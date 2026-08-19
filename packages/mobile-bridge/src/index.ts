@@ -1,6 +1,6 @@
 /**
  * Mobile bridge plugin: dials OUT to the public bridge server, serves the
- * narrow-width overlay under `/mobile/`, and answers the paired phone's
+ * narrow-width overlay under `/mobile`, and answers the paired phone's
  * end-to-end encrypted relay frames against the local loopback web. The
  * pairing secret and optional user passphrase never leave the desktop except
  * inside the one-time QR payload; the server only forwards ciphertext.
@@ -35,6 +35,9 @@ export const Config: z<MobileBridgeConfig> = z.object({
   autoConnect: z.boolean().default(true),
   autoReconnect: z.boolean().default(true),
 })
+
+/** Cordis 装配必须先提供 WebServer，插件才可注册移动端路由。 */
+export const inject = ['webServer']
 
 /** One relayed request, decrypted from the phone. */
 export interface RelayRequest {
@@ -125,9 +128,10 @@ const MOBILE_CSS = `/* narrow-width overlay: fixes occlusion via semantic select
 }
 `
 
+// v12-M 可容纳当前加密配对 URL，并保留适合手机扫描的中等纠错能力。
 const PANEL_HTML = `<!doctype html><meta charset=utf-8><title>移动连接</title>
 <style>body{font:14px/1.6 system-ui,sans-serif;background:#14161a;color:#e8eaed;margin:0;padding:24px}main{max-width:560px;margin:auto;background:#1d2127;border-radius:12px;padding:24px}h1{font-size:17px}#st{padding:4px 10px;border-radius:99px;background:#2a3038}#st.on{background:#1f4d2e;color:#8ce99a}pre{background:#14161a;padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-all}button{margin-top:10px;padding:8px 14px;border:0;border-radius:8px;background:#4c8dff;color:#fff}</style>
-<main><h1>移动连接 <span id=st>未连接</span></h1><p>手机扫描下方二维码（或打开链接输入绑定码）即自动登录并连接，全程端到端加密，服务器只做盲转发。</p><div id=qr></div><pre id=url>…</pre><button onclick="navigator.clipboard.writeText(document.getElementById('url').textContent)">复制链接</button><script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script><script>fetch('/mobile/bridge/status').then(r=>r.json()).then(s=>{const st=document.getElementById('st');st.textContent=s.connected?'已连接':'未连接';if(s.connected)st.className='on';document.getElementById('url').textContent=s.qrUrl||'（等待配对码）';if(window.QRCode&&s.qrUrl)new QRCode(document.getElementById('qr'),{text:s.qrUrl,width:220,height:220})});</script></main>`
+<main><h1>移动连接 <span id=st>未连接</span></h1><p>手机扫描下方二维码（或打开链接输入绑定码）即自动登录并连接，全程端到端加密，服务器只做盲转发。</p><div id=qr></div><pre id=url>…</pre><button onclick="navigator.clipboard.writeText(document.getElementById('url').textContent)">复制链接</button><script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script><script>fetch('/mobile/bridge/status').then(r=>r.json()).then(s=>{const st=document.getElementById('st');st.textContent=s.connected?'已连接':'未连接';if(s.connected)st.className='on';document.getElementById('url').textContent=s.qrUrl||'（等待配对码）';if(window.QRCode&&s.qrUrl)new QRCode(document.getElementById('qr'),{text:s.qrUrl,width:220,height:220,typeNumber:12,correctLevel:QRCode.CorrectLevel.M})});</script></main>`
 
 interface MobileWebServer {
   register(route: {
@@ -137,11 +141,7 @@ interface MobileWebServer {
   }): () => void
 }
 
-/**
- * Register the `/mobile/` overlay route and the outbound encrypted tunnel.
- * @param ctx - context carrying the web server seam.
- * @param config - server URL, local port, passphrase, and reconnect policy.
- */
+/** 注册 `/mobile` 路由并维护到公网桥接服务的出站加密连接。 */
 export function apply(ctx: Context, config: MobileBridgeConfig): void {
   let current: () => MobileBridgeConfig = () => config
   installSettingsSection(ctx, MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, config, {
@@ -173,8 +173,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       }))
       const qrUrl = `${live.serverUrl}/bridge/#${qrPayload}`
       state.lastQrUrl = qrUrl
-      console.log('[mobile-bridge] pairing code:', started.code)
-      console.log('[mobile-bridge] phone QR url:', qrUrl)
+      console.log('[mobile-bridge] phone panel: /mobile/bridge/panel')
       const wsUrl = live.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
       const socket = new WebSocket(wsUrl)
       state.socket = socket
@@ -209,7 +208,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     const web = (ctx as Context & { webServer: MobileWebServer }).webServer
     const dispose = web.register({
       kind: 'prefix',
-      path: '/mobile/',
+      path: '/mobile',
       handler: (req: unknown, res: { writeHead(code: number, headers: Record<string, string>): void; end(body: string): void }) => {
         const path = String((req as { url?: string }).url ?? '/mobile/')
         if (path.startsWith('/mobile/bridge/status')) {
