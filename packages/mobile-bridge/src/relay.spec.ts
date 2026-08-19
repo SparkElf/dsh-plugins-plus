@@ -1,3 +1,4 @@
+import { gunzipSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { relayToLocalWeb, type RelayFrame, type RelayRequest } from './index.ts'
 
@@ -9,7 +10,8 @@ describe('relayToLocalWeb', () => {
     const fake = (async () => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } })) as typeof fetch
     const response = await relayToLocalWeb(request, 3080, noop, fake)
     expect(response.status).toBe(200)
-    expect(Buffer.from(response.body ?? '', 'base64').toString('utf8')).toBe('hello')
+    expect(response.compression).toBe('gzip')
+    expect(gunzipSync(Buffer.from(response.body ?? '', 'base64')).toString('utf8')).toBe('hello')
   })
 
   it('round-trips binary payloads as base64', async () => {

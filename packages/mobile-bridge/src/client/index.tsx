@@ -79,6 +79,22 @@ export function apply(ctx: MobileBridgeClientContext): void {
       if (!response.ok) throw new Error(`Mobile Bridge status failed with HTTP ${response.status}`)
       return await response.json() as MobileBridgeStatus
     },
+    subscribeStatus: listener => {
+      const source = new EventSource('/mobile/bridge/events')
+      source.onmessage = event => {
+        try {
+          listener(JSON.parse(event.data) as MobileBridgeStatus)
+        } catch (error) {
+          console.error('[dsh-mobile-bridge] live status event failed', error)
+        }
+      }
+      return () => { source.close() }
+    },
+    disconnectDevice: async deviceId => {
+      const response = await fetch('/mobile/bridge/devices/' + encodeURIComponent(deviceId), { method: 'DELETE' })
+      if (!response.ok) throw new Error(`Mobile Bridge device disconnect failed with HTTP ${response.status}: ${await response.text()}`)
+      return await response.json() as MobileBridgeStatus
+    },
   }
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
