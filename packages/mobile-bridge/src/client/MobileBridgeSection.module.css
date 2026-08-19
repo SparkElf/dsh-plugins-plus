@@ -119,6 +119,41 @@
   gap: 8px;
 }
 
+.pairingDisplay {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.pairingCodeBlock {
+  display: flex;
+  width: min(188px, 100%);
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pairingCode {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.pairingCode > span {
+  display: grid;
+  height: 36px;
+  place-items: center;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-markdown-code);
+}
+
 .qr {
   box-sizing: border-box;
   width: min(180px, 100%);
@@ -165,6 +200,10 @@
 
   .fieldWide {
     grid-column: auto;
+  }
+
+  .pairingDisplay {
+    flex-direction: column;
   }
 
   .actions {

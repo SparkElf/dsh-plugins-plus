@@ -39,11 +39,11 @@ location /ws/ {
 1. Install the complete Host and Client plugin into the Web profile:
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.1.4
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.1.5
 ```
 
-2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and confirm that the status is Connected.
-3. Scan the displayed QR from the phone. An unused one-time QR renews before its five-minute ticket expires, while a successful scan stops renewal. The server cannot rotate a ticket without the private refresh token held by the desktop plugin.
+2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and wait for the new six-character pairing code and QR to appear with Connected status.
+3. Scan the displayed QR from the phone, or enter the same pairing code manually. An unused one-time QR renews before its five-minute ticket expires, while a successful scan stops renewal. The server cannot rotate a ticket without the private refresh token held by the desktop plugin.
 4. Disabling or removing the bundle removes the Host routes, outbound connection, narrow-screen style, and Settings entry together. There is no standalone HTML configuration panel.
 
 ## Authentication

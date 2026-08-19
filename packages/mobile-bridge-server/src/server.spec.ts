@@ -39,6 +39,14 @@ afterAll(async () => {
 })
 
 describe('bridge server end to end', () => {
+  it('serves a narrow-safe aligned phone login form', async () => {
+    const html = await fetch(`http://127.0.0.1:${bridgePort}/bridge/`).then(response => response.text())
+    expect(html).toContain('text-size-adjust:100%')
+    expect(html).toContain('grid-template-columns:minmax(0,1fr) 96px')
+    expect(html).toContain('width:min(100%,420px)')
+    expect(html).not.toContain('width:40%')
+  })
+
   it('emails a code, logs in, and binds', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
     await fetch(base + '/bridge/api/email/code', { method: 'POST', body: JSON.stringify({ email: 'dee@example.com' }) })
@@ -167,6 +175,10 @@ describe('bridge server end to end', () => {
   it('auto-logs in a phone that presents a live pairing code', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
     const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
+    const beforeDesktop = await fetch(base + '/bridge/api/login/bridge', { method: 'POST', body: JSON.stringify({ code: start.code }) })
+    expect(beforeDesktop.status).toBe(401)
+    const socket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
+    await new Promise<void>((resolve, reject) => { socket.on('open', () => resolve()); socket.on('error', reject) })
     const login = await fetch(base + '/bridge/api/login/bridge', {
       method: 'POST',
       body: JSON.stringify({ code: start.code }),
@@ -177,6 +189,7 @@ describe('bridge server end to end', () => {
     expect(await me.json()).toMatchObject({ bridge: start.code })
     const offline = await fetch(base + '/bridge/api/login/bridge', { method: 'POST', body: JSON.stringify({ code: 'zzzzzz' }) })
     expect(offline.status).toBe(401)
+    socket.close()
   })
 
   it('optionally challenges a scan with an owner email code', async () => {
@@ -185,6 +198,8 @@ describe('bridge server end to end', () => {
       method: 'POST',
       body: JSON.stringify({ email2fa: 'owner@example.com' }),
     }).then(response => response.json()) as { code: string }
+    const socket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
+    await new Promise<void>((resolve, reject) => { socket.on('open', () => resolve()); socket.on('error', reject) })
     const challenged = await fetch(base + '/bridge/api/login/bridge', {
       method: 'POST',
       body: JSON.stringify({ code: start.code }),
@@ -202,6 +217,7 @@ describe('bridge server end to end', () => {
       body: JSON.stringify({ code: start.code, emailCode: mail?.code ?? '' }),
     })
     expect(replay.status).toBe(401)
+    socket.close()
   })
 
   it('rejects wrong codes and unknown providers', async () => {

@@ -111,8 +111,15 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
       return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || r.status); return j })
     })
   }
+  function errorText(message) {
+    if (message === 'unknown or offline pairing code') return '配对码无效或桌面端已离线，请刷新桌面二维码后重试。'
+    if (message === 'pairing code expired') return '配对码已过期，请刷新桌面二维码后重试。'
+    if (message === 'pairing code already used') return '配对码已使用，请刷新桌面二维码后重试。'
+    return message
+  }
+  function showError(error) { var target = $('x'); if (target) target.textContent = errorText(String(error && error.message || error)) }
   function registerSw(pair) {
-    if (!('serviceWorker' in navigator)) { document.querySelector('main').insertAdjacentHTML('beforeend', '<p class=err>此浏览器不支持 service worker</p>'); return }
+    if (!('serviceWorker' in navigator)) { showError(new Error('此浏览器不支持 service worker')); return }
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function () {
       return navigator.serviceWorker.ready
     }).then(function (reg) {
@@ -125,6 +132,7 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
     try {
       var pair = JSON.parse(decodeURIComponent(fragment))
       var proceed = function () {
+        if ($('b')) $('b').value = pair.b || pair.c || ''
         localStorage.setItem('dshmb-pair', JSON.stringify(pair))
         api('/api/login/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pair.b || pair.c }) })
           .then(function (res) {
@@ -136,7 +144,11 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
             return res
           })
           .then(function () { history.replaceState(null, '', '/'); registerSw(pair) })
-          .catch(function (e) { var m = document.querySelector('main'); if (m) m.insertAdjacentHTML('beforeend', '<p class=err>' + e.message + '</p>') })
+          .catch(function (error) {
+            localStorage.removeItem('dshmb-pair')
+            history.replaceState(null, '', '/bridge/')
+            showError(error)
+          })
       }
       if (pair.k === undefined) {
         var k = prompt('输入桌面端设置的加密口令')
@@ -153,7 +165,7 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
   $('s').onclick = function () {
     api('/api/email/code', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: $('e').value }) })
       .then(function () { $('x').textContent = '验证码已发送' })
-      .catch(function (e) { $('x').textContent = e.message })
+      .catch(showError)
   }
   $('l').onclick = function () {
     api('/api/login/email', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: $('e').value, code: $('c').value, bridge: $('b').value }) })
@@ -161,7 +173,7 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
         var pair = JSON.parse(localStorage.getItem('dshmb-pair') || '{"s":""}')
         registerSw(pair)
       })
-      .catch(function (e) { $('x').textContent = e.message })
+      .catch(showError)
   }
 })()
 `
