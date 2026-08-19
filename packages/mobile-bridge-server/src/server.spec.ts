@@ -124,6 +124,46 @@ describe('bridge server end to end', () => {
     bridgeSocket.close()
   })
 
+  it('rotates an unused pairing ticket without replacing the desktop socket', async () => {
+    const base = `http://127.0.0.1:${bridgePort}`
+    const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string; refreshToken: string; expiresAt: number }
+    const socket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
+    await new Promise<void>((resolve, reject) => { socket.on('open', () => resolve()); socket.on('error', reject) })
+
+    const denied = await fetch(base + '/bridge/api/bridge/rotate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: start.code, refreshToken: 'wrong' }),
+    })
+    expect(denied.status).toBe(401)
+
+    const rotatedResponse = await fetch(base + '/bridge/api/bridge/rotate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: start.code, refreshToken: start.refreshToken }),
+    })
+    const rotated = await rotatedResponse.json() as { code: string; refreshToken: string; expiresAt: number }
+    expect(rotatedResponse.status).toBe(200)
+    expect(rotated.code).not.toBe(start.code)
+    expect(rotated.refreshToken).not.toBe(start.refreshToken)
+    expect(rotated.expiresAt).toBeGreaterThanOrEqual(start.expiresAt)
+
+    const expired = await fetch(base + '/bridge/api/login/bridge', { method: 'POST', body: JSON.stringify({ code: start.code }) })
+    expect(expired.status).toBe(401)
+    const pairedNotice = new Promise<unknown>(resolve => { socket.once('message', raw => resolve(JSON.parse(String(raw)))) })
+    const login = await fetch(base + '/bridge/api/login/bridge', { method: 'POST', body: JSON.stringify({ code: rotated.code }) })
+    expect(login.status).toBe(200)
+    expect(await pairedNotice).toEqual({ control: 'paired' })
+    const paired = await fetch(base + '/bridge/api/bridge/rotate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: rotated.code, refreshToken: rotated.refreshToken }),
+    })
+    expect(paired.status).toBe(409)
+    expect(await paired.json()).toEqual({ paired: true })
+    socket.close()
+  })
+
   it('auto-logs in a phone that presents a live pairing code', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
     const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
