@@ -21,6 +21,7 @@ export const zh = {
   twoFactor: '扫码邮箱二因子',
   autoConnect: '启动自动连接与断线重连',
   pair: '手机配对',
+  pairingCode: '配对码',
   pairHint: '未配对时自动续签一次性二维码。',
   qrAlt: '移动连接配对二维码',
   qrUnavailable: '正在等待配对地址',
@@ -32,6 +33,7 @@ export const zh = {
   saveFailed: '保存移动连接配置失败。',
   qrFailed: '生成配对二维码失败。',
   statusFailed: '读取移动连接状态失败。',
+  reconnectFailed: '配置已保存，但新配对码未在 10 秒内就绪。',
 } as const
 
 /** Keys of the section dictionary. */
@@ -58,6 +60,7 @@ export const en: Record<SettingsMobileBridgeKey, string> = {
   twoFactor: 'Email two-factor on scan',
   autoConnect: 'Connect on startup and reconnect',
   pair: 'Phone pairing',
+  pairingCode: 'Pairing code',
   pairHint: 'The one-time QR renews automatically until a phone pairs.',
   qrAlt: 'Mobile Bridge pairing QR code',
   qrUnavailable: 'Waiting for a pairing URL',
@@ -69,4 +72,5 @@ export const en: Record<SettingsMobileBridgeKey, string> = {
   saveFailed: 'Could not save the Mobile Bridge configuration.',
   qrFailed: 'Could not generate the pairing QR code.',
   statusFailed: 'Could not load the Mobile Bridge status.',
+  reconnectFailed: 'Saved, but a fresh pairing code was not ready within 10 seconds.',
 }

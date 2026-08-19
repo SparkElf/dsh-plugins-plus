@@ -34,10 +34,31 @@ export interface BridgeServerOptions {
 
 const COOKIE = 'mbs'
 
-const LANDING = `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>DSH Mobile Bridge</title>
-<style>body{font:15px/1.6 system-ui,sans-serif;margin:0;background:#14161a;color:#e8eaed;display:grid;place-items:center;min-height:100vh}main{width:min(92vw,380px);background:#1d2127;border-radius:14px;padding:24px}h1{font-size:18px;margin:0 0 12px}input{width:100%;box-sizing:border-box;margin:6px 0;padding:10px;border-radius:8px;border:1px solid #333a44;background:#14161a;color:inherit}button{width:100%;margin-top:10px;padding:10px;border:0;border-radius:8px;background:#4c8dff;color:#fff;font-weight:600}button.ghost{background:#2a3038}p.err{color:#ff8080;min-height:1.2em}</style>
-<main><h1>DeepSeek Harness Mobile</h1><input id=e type=email placeholder=邮箱><div style=display:flex;gap:8px><input id=c placeholder=验证码 style=margin:6px 0><button id=s class=ghost style=margin:6px 0;width:40%>发送</button></div><input id=b placeholder=绑定码（扫码可免填）><p class=err id=x></p><button id=l>登录并连接</button></main>
-<script src="/bridge/client.js"></script>`
+const LANDING = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>DeepSeek Harness Mobile</title>
+<style>
+:root{color-scheme:dark;--page:#111318;--surface:#1b1e24;--field:#121419;--border:#343942;--label:#f4f6f8;--muted:#a7adb6;--primary:#2f80ed;--primary-hover:#4a91ee;--danger:#ff777d}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%;background:var(--page)}
+body{min-height:100dvh;margin:0;padding:max(24px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom));background:var(--page);color:var(--label);font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{width:min(100%,420px);margin:clamp(8px,8vh,72px) auto 0;padding:24px;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+h1{margin:0 0 20px;font-size:18px;line-height:1.35;font-weight:650}
+input,button{width:100%;min-width:0;height:44px;border-radius:8px;font:inherit}
+input{padding:0 12px;border:1px solid var(--border);outline:none;background:var(--field);color:var(--label);font-size:16px}
+input::placeholder{color:var(--muted)}
+input:focus{border-color:var(--primary)}
+.codeRow{display:grid;grid-template-columns:minmax(0,1fr) 96px;gap:8px;margin-top:12px}
+#b{margin-top:12px}
+button{border:0;background:var(--primary);color:white;font-weight:600;cursor:pointer}
+button:hover{background:var(--primary-hover)}
+button.ghost{background:#292e36;color:var(--label)}
+button.ghost:hover{background:#343a44}
+#l{margin-top:16px}
+p.err{min-height:20px;margin:12px 0 0;color:var(--danger);font-size:13px;line-height:20px}
+@media(max-width:340px){main{padding:18px}.codeRow{grid-template-columns:minmax(0,1fr) 84px}}
+</style></head><body>
+<main aria-labelledby="title"><h1 id="title">DeepSeek Harness Mobile</h1><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="邮箱"><div class="codeRow"><input id="c" inputmode="numeric" autocomplete="one-time-code" placeholder="验证码"><button id="s" class="ghost" type="button">发送</button></div><input id="b" autocomplete="off" placeholder="配对码（扫码可免填）"><p class="err" id="x" role="alert"></p><button id="l" type="button">登录并连接</button></main>
+<script src="/bridge/client.js"></script></body></html>`
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -153,7 +174,8 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
         try {
           const { code } = JSON.parse(await readBody(req)) as { code: string }
           const ticket = tickets.get(code)
-          if (ticket === undefined || !bridges.has(code)) throw new Error('unknown or offline pairing code')
+          const bridgeSocket = bridges.get(code)
+          if (ticket === undefined || bridgeSocket?.readyState !== WebSocket.OPEN) throw new Error('unknown or offline pairing code')
           if (ticket.used) throw new Error('pairing code already used')
           if (Date.now() - ticket.createdAt > ticketTtlMs) throw new Error('pairing code expired')
           if (ticket.email2fa !== undefined && mailer !== undefined) {
@@ -175,7 +197,8 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
         try {
           const { code, emailCode } = JSON.parse(await readBody(req)) as { code: string; emailCode: string }
           const ticket = tickets.get(code)
-          if (ticket === undefined || !bridges.has(code) || ticket.email2fa === undefined) throw new Error('no pending challenge')
+          const bridgeSocket = bridges.get(code)
+          if (ticket === undefined || bridgeSocket?.readyState !== WebSocket.OPEN || ticket.email2fa === undefined) throw new Error('no pending challenge')
           if (ticket.used) throw new Error('pairing code already used')
           if (Date.now() - ticket.createdAt > ticketTtlMs) throw new Error('pairing code expired')
           store.consumeEmailCode(ticket.email2fa, emailCode)

@@ -260,13 +260,14 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       const pairing = { ...started, secret }
       state.pairing = pairing
       state.paired = false
-      state.lastQrUrl = pairingUrl(live.serverUrl, pairing.code, secret, live.userKey)
+      state.lastQrUrl = ''
       const key = await deriveKey(live.userKey, secret)
       const wsUrl = live.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
       const socket = new WebSocket(wsUrl)
       state.socket = socket
       socket.on('open', () => {
         state.connected = true
+        state.lastQrUrl = pairingUrl(live.serverUrl, pairing.code, secret, live.userKey)
         schedulePairingRotation(Math.max(0, pairing.expiresAt - Date.now() - PAIRING_ROTATE_LEAD_MS))
       })
       socket.on('message', raw => {
@@ -340,7 +341,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         const path = String((req as { url?: string }).url ?? '/mobile/')
         if (path.startsWith('/mobile/bridge/status')) {
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ connected: state.connected, paired: state.paired, serverUrl: current().serverUrl, qrUrl: state.lastQrUrl, qrRefreshAt: state.qrRefreshAt }))
+          res.end(JSON.stringify({ connected: state.connected, paired: state.paired, serverUrl: current().serverUrl, qrUrl: state.lastQrUrl, pairingCode: state.pairing?.code ?? '', qrRefreshAt: state.qrRefreshAt }))
           return
         }
         if (path.startsWith('/mobile/bridge/style.css')) {

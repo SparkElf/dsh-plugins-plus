@@ -1,6 +1,6 @@
 /** Mobile Bridge settings section: connection state, configuration, and pairing QR. */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import QRCode from 'qrcode/lib/browser.js'
 import { Button, Input, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -23,6 +23,7 @@ export interface MobileBridgeStatus {
   connected: boolean
   paired: boolean
   qrUrl: string
+  pairingCode: string
   qrRefreshAt: number
 }
 
@@ -47,6 +48,25 @@ function SettingsLabel({ label, hint }: { label: string; hint: string }): ReactN
   )
 }
 
+function waitForDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    let timer: ReturnType<typeof setTimeout>
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      resolve()
+    }
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, delayMs)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 const DEFAULTS: MobileBridgeValues = {
   serverUrl: '',
   localPort: 3080,
@@ -67,6 +87,13 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [qrSource, setQrSource] = useState<string | null>(null)
+  const saveRefresh = useRef<AbortController | null>(null)
+
+  useEffect(() => () => {
+    const controller = saveRefresh.current
+    saveRefresh.current = null
+    controller?.abort()
+  }, [])
 
   useEffect(() => {
     let live = true
@@ -139,20 +166,48 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     }
   }
 
+  const confirmFreshStatus = async (previousQrUrl: string, expectQr: boolean, signal: AbortSignal): Promise<boolean> => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (signal.aborted) return false
+      const nextStatus = await loadStatus()
+      if (signal.aborted) return false
+      setStatus(nextStatus)
+      if (!expectQr || (nextStatus.connected && nextStatus.qrUrl !== '' && nextStatus.qrUrl !== previousQrUrl && /^[0-9a-f]{6}$/i.test(nextStatus.pairingCode))) return true
+      if (attempt < 19) await waitForDelay(500, signal)
+    }
+    return false
+  }
+
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
+    saveRefresh.current?.abort()
+    const controller = new AbortController()
+    saveRefresh.current = controller
+    const previousQrUrl = status?.qrUrl ?? ''
+    const expectQr = values.autoConnect && values.serverUrl.trim() !== ''
+    let persisted = false
     setSaving(true)
     setMessage(null)
     setError(null)
     try {
       await saveValues(values)
+      persisted = true
+      if (expectQr) setStatus(current => current === null ? current : { ...current, connected: false, paired: false, qrUrl: '', pairingCode: '', qrRefreshAt: 0 })
+      const ready = await confirmFreshStatus(previousQrUrl, expectQr, controller.signal)
+      if (controller.signal.aborted) return
+      if (!ready) {
+        setError(t('reconnectFailed'))
+        return
+      }
       setMessage(t('saved'))
-      void refreshStatus()
     } catch (caught) {
-      console.error('[dsh-mobile-bridge] settings save failed', caught)
-      setError(t('saveFailed'))
+      console.error('[dsh-mobile-bridge] settings save confirmation failed', caught)
+      if (!controller.signal.aborted) setError(t(persisted ? 'reconnectFailed' : 'saveFailed'))
     } finally {
-      setSaving(false)
+      if (saveRefresh.current === controller) {
+        saveRefresh.current = null
+        setSaving(false)
+      }
     }
   }
 
@@ -201,7 +256,19 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
         </div>
         <div className={css.pairing}>
           <SettingsLabel label={t('pair')} hint={t('pairHint')} />
-          {qrSource === null ? <span className={css.qrEmpty}>{status?.paired === true ? t('paired') : t('qrUnavailable')}</span> : <img className={css.qr} src={qrSource} alt={t('qrAlt')} width={180} height={180} />}
+          {qrSource === null
+            ? <span className={css.qrEmpty}>{status?.paired === true ? t('paired') : t('qrUnavailable')}</span>
+            : (
+                <div className={css.pairingDisplay}>
+                  <img className={css.qr} src={qrSource} alt={t('qrAlt')} width={180} height={180} />
+                  <div className={css.pairingCodeBlock}>
+                    <span className={css.label}>{t('pairingCode')}</span>
+                    <output className={css.pairingCode} aria-label={t('pairingCode')}>
+                      {status?.pairingCode.toUpperCase().split('').map((character, index) => <span key={index}>{character}</span>)}
+                    </output>
+                  </div>
+                </div>
+              )}
         </div>
         <div className={css.actions}>
           {message !== null ? <p className={css.message} role="status">{message}</p> : null}
