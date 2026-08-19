@@ -10,13 +10,13 @@ SparkElf-maintained independent plugins for [DeepSeek Harness](https://github.co
 ## Plugins
 
 - `@sparkelf/dsh-plugin-ping` — `/ping` connectivity smoke command; replies `pong` without a model call.
-- `@sparkelf/dsh-mobile-bridge` — outbound tunnel to the mobile bridge server plus a narrow-width mobile overlay that reuses the stock design system.
-- `@sparkelf/dsh-mobile-bridge-server` — multi-user bridge server (username/password registration, session tokens, user-to-bridge binding, WebSocket relay) so phones reach a local Harness through your server.
+- `@sparkelf/dsh-mobile-bridge` — complete Host and Client plugin: outbound E2EE tunnel, narrow-width presentation, and a first-class Mobile Bridge settings section with pairing QR.
+- `@sparkelf/dsh-mobile-bridge-server` — multi-user blind relay with email-code and optional WeChat identity channels so phones reach a local Harness through your server.
 
 ## CI / CD
 
-- CI (`ci.yml`): pnpm install, `tsc --noEmit`, vitest unit tests on every push and PR.
-- CD (`publish.yml`): on `v*` tags, publishes packages to npm using the `NPM_TOKEN` secret; add the secret before the first tag.
+- CI (`ci.yml`): pnpm install, `tsc --noEmit`, vitest unit tests, and publishable artifact builds on every push and PR.
+- CD (`publish.yml`): on `v*` tags, repeats typecheck, tests, and builds before publishing packages to npm with the `NPM_TOKEN` secret.
 
 ## Adding a plugin
 
