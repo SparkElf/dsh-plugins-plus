@@ -37,7 +37,7 @@ User=dshbridge
 ```
 
 2. Restart Harness; the plugin logs `pairing code: <6 hex>`.
-3. On the phone: open `https://<host>/`, register (username/password), log in, paste the pairing code, bind. The client then relays HTTP through the tunnel to the local web; the mobile overlay stylesheet loads at `/mobile/bridge/style.css`.
+3. On the phone: open `https://<host>/bridge/`, register (username/password), log in (sets an HttpOnly cookie), paste the pairing code, bind. After that `https://<host>/` serves the stock Harness web itself, reverse-proxied through the tunnel; HTML responses get the narrow-width overlay injected automatically, and binary assets (fonts/images) ride the tunnel base64-safe.
 
 ## Third-party login (later)
 

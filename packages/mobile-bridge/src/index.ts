@@ -33,14 +33,20 @@ export interface RelayRequest {
   path: string
   headers: Record<string, string>
   body: string
+  /** 'text' carries utf-8; 'base64' carries binary-safe payloads. */
+  bodyEncoding?: 'text' | 'base64'
 }
 
+const TEXTUAL = /^(text\/|application\/(json|.*\+json))/
+
 /**
- * Handle one relayed request against the local loopback web.
+ * Handle one relayed request against the local loopback web, binary-safe:
+ * binary request bodies arrive base64 and binary responses return base64 so
+ * fonts, images, and attachments survive the tunnel.
  * @param request - relayed request.
  * @param localPort - local Harness web port.
  * @param fetchImpl - fetch seam for tests.
- * @returns the relay response.
+ * @returns the relay response with a matching bodyEncoding.
  */
 export async function relayToLocalWeb(
   request: RelayRequest,
@@ -48,19 +54,24 @@ export async function relayToLocalWeb(
   fetchImpl: typeof fetch = fetch,
 ) {
   try {
+    const decoded = request.bodyEncoding === 'base64' ? Buffer.from(request.body, 'base64') : Buffer.from(request.body, 'utf8')
     const response = await fetchImpl(`http://127.0.0.1:${localPort}${request.path}`, {
       method: request.method,
       headers: { ...request.headers, host: `127.0.0.1:${localPort}` },
-      body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
+      body: request.method === 'GET' || request.method === 'HEAD' ? undefined : decoded,
     })
+    const contentType = response.headers.get('content-type') ?? ''
+    const bytes = Buffer.from(await response.arrayBuffer())
+    const textual = TEXTUAL.test(contentType)
     return {
       id: request.id,
       status: response.status,
-      headers: { 'content-type': response.headers.get('content-type') ?? '' },
-      body: await response.text(),
+      headers: { 'content-type': contentType },
+      body: textual ? bytes.toString('utf8') : bytes.toString('base64'),
+      bodyEncoding: (textual ? 'text' : 'base64') as 'text' | 'base64',
     }
   } catch (error) {
-    return { id: request.id, status: 502, headers: {}, body: error instanceof Error ? error.message : String(error) }
+    return { id: request.id, status: 502, headers: {}, body: error instanceof Error ? error.message : String(error), bodyEncoding: 'text' as const }
   }
 }
 
@@ -89,7 +100,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     if (!config.serverUrl) return
     try {
       if (!state.code) {
-        const started = await fetch(`${config.serverUrl}/api/bridge/start`, {
+        const started = await fetch(`${config.serverUrl}/bridge/api/bridge/start`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ secret: config.secret }),
