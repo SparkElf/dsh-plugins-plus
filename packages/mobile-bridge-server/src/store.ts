@@ -1,12 +1,12 @@
 /**
- * Zero-dependency user store: scrypt-hashed password credentials or external
- * provider identities (the seam third-party logins such as WeChat plug into),
- * HMAC session tokens, and user-to-bridge bindings, persisted as one JSON
+ * Zero-dependency user store: identities are email addresses or external
+ * provider ids (WeChat), never passwords; HMAC session tokens; user-to-bridge
+ * bindings; and short-lived email verification codes. Persisted as one JSON
  * document with atomic replacement.
  * @module @sparkelf/dsh-mobile-bridge-server/store
  */
 
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -15,22 +15,24 @@ export interface UserRecord {
   key: string
   provider: string
   externalId: string
-  salt: string | null
-  hash: string | null
-  /** Bridge code this user is bound to, when paired. */
   bridge: string | null
+}
+
+/** One pending email verification code. */
+interface CodeRecord {
+  code: string
+  expiresAt: number
 }
 
 /** Persisted store document. */
 interface StoreDocument {
   users: Record<string, UserRecord>
   tokens: Record<string, string>
+  codes: Record<string, CodeRecord>
 }
 
-/** Hash one password with a salt for storage. */
-export function hashPassword(password: string, salt: string): string {
-  return scryptSync(password, Buffer.from(salt, 'hex'), 32).toString('hex')
-}
+/** Verification code lifetime in milliseconds. */
+export const CODE_TTL_MS = 5 * 60_000
 
 /** File-backed user/token store with atomic writes. */
 export class UserStore {
@@ -40,8 +42,9 @@ export class UserStore {
     try {
       this.doc = JSON.parse(readFileSync(file, 'utf8')) as StoreDocument
     } catch {
-      this.doc = { users: {}, tokens: {} }
+      this.doc = { users: {}, tokens: {}, codes: {} }
     }
+    this.doc.codes ??= {}
   }
 
   private save(): void {
@@ -57,45 +60,34 @@ export class UserStore {
     return token
   }
 
-  /** Register a password user; rejects duplicates and weak input loudly. */
-  register(name: string, password: string): string {
-    const key = name.trim()
-    if (key.length < 2 || password.length < 8) throw new Error('name needs 2+ chars and password 8+')
-    if (this.doc.users['password:' + key]) throw new Error('user already exists')
-    const salt = randomBytes(8).toString('hex')
-    this.doc.users['password:' + key] = {
-      key: 'password:' + key,
-      provider: 'password',
-      externalId: key,
-      salt,
-      hash: hashPassword(password, salt),
-      bridge: null,
-    }
-    return this.mintToken('password:' + key)
+  /** Mint a six-digit verification code for one email, replacing any pending one. */
+  issueEmailCode(email: string): string {
+    const key = email.trim().toLowerCase()
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(key)) throw new Error('invalid email')
+    const code = String(randomInt(0, 1_000_000)).padStart(6, '0')
+    this.doc.codes[key] = { code, expiresAt: Date.now() + CODE_TTL_MS }
+    this.save()
+    return code
   }
 
-  /** Verify password credentials and mint a session token. */
-  login(name: string, password: string): string {
-    const user = this.doc.users['password:' + name.trim()]
-    if (!user || !user.salt || !user.hash) throw new Error('invalid credentials')
-    const attempt = Buffer.from(hashPassword(password, user.salt), 'hex')
-    const expected = Buffer.from(user.hash, 'hex')
-    if (attempt.length !== expected.length || !timingSafeEqual(attempt, expected)) throw new Error('invalid credentials')
-    return this.mintToken(user.key)
+  /** Verify and consume one email code; wrong or expired codes fail loudly. */
+  consumeEmailCode(email: string, code: string): void {
+    const key = email.trim().toLowerCase()
+    const pending = this.doc.codes[key]
+    const expected = Buffer.from(pending?.code ?? '------')
+    const attempt = Buffer.from(code.padEnd(6, '-'))
+    const valid = pending !== undefined && pending.expiresAt > Date.now()
+      && expected.length === attempt.length && timingSafeEqual(expected, attempt)
+    if (!valid) throw new Error('invalid or expired code')
+    delete this.doc.codes[key]
+    this.save()
   }
 
-  /**
-   * Log in through an external provider, creating the user on first sight.
-   * The server only calls this after the provider verifier confirmed the
-   * payload, so the external id is trusted here.
-   * @param provider - provider kind (e.g. wechat).
-   * @param externalId - provider-verified stable identity.
-   * @returns a fresh session token.
-   */
+  /** Log in through a verified identity, creating the user on first sight. */
   loginExternal(provider: string, externalId: string): string {
     const key = provider + ':' + externalId
     if (!this.doc.users[key]) {
-      this.doc.users[key] = { key, provider, externalId, salt: null, hash: null, bridge: null }
+      this.doc.users[key] = { key, provider, externalId, bridge: null }
     }
     return this.mintToken(key)
   }

@@ -28,10 +28,13 @@ try {
 
 let bridge: Server
 let bridgePort: number
+let liveCodes: string[] = []
 
 if (reachable) {
   const store = new UserStore(join(mkdtempSync(join(tmpdir(), 'mbs-live-')), 'u.json'), '0123456789abcdef')
-  bridge = createBridgeServer(store)
+  const codes: string[] = []
+  bridge = createBridgeServer(store, { mailer: async (_email, code) => { codes.push(code) } })
+  liveCodes = codes
   await new Promise<void>(resolve => bridge.listen(0, resolve))
   bridgePort = (bridge.address() as AddressInfo).port
 }
@@ -41,21 +44,25 @@ afterAll(async () => {
 })
 
 describe.skipIf(!reachable)('live rehearsal against the real Harness web', () => {
-  it('serves the stock UI through the tunnel with the overlay injected', async () => {
+  it('serves the stock UI through the tunnel after email login', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
-    const register = await fetch(base + '/bridge/api/register', {
+    await fetch(base + '/bridge/api/email/code', {
       method: 'POST',
-      body: JSON.stringify({ name: 'rehearsal', password: 'longpassword' }),
+      body: JSON.stringify({ email: 'rehearsal@example.com' }),
     })
-    expect(register.status).toBe(200)
-    const cookie = register.headers.get('set-cookie')?.split(';')[0] ?? ''
+    const login = await fetch(base + '/bridge/api/login/email', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'rehearsal@example.com', code: liveCodes.at(-1) ?? '' }),
+    })
+    expect(login.status).toBe(200)
+    const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? ''
 
     const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
     const bridgeSocket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
     await new Promise<void>((resolve, reject) => { bridgeSocket.on('open', () => resolve()); bridgeSocket.on('error', reject) })
     bridgeSocket.on('message', raw => {
       const request = JSON.parse(String(raw)) as RelayRequest
-      void relayToLocalWeb(request, LIVE_PORT).then(response => bridgeSocket.send(JSON.stringify(response)))
+      void relayToLocalWeb(request, LIVE_PORT, frame => bridgeSocket.send(JSON.stringify(frame)))
     })
 
     const bind = await fetch(base + '/bridge/api/bind', {
@@ -69,7 +76,6 @@ describe.skipIf(!reachable)('live rehearsal against the real Harness web', () =>
     expect(page.status).toBe(200)
     const html = await page.text()
     expect(html).toContain('__DSH_BOOT__')
-    expect(html).toContain('/mobile/bridge/style.css')
 
     // The overlay stylesheet lives on the plugin's /mobile/ route; it only
     // exists once the plugin is installed in the target runtime (deployment

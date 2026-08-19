@@ -1,10 +1,10 @@
 /**
- * Multi-user bridge server: phones authenticate with a session cookie, bind
- * to a pairing code, and then the server reverse-proxies every other request
- * through the outbound tunnel into the owner's local DeepSeek Harness web —
- * the stock responsive UI, design system and all, with the narrow-width
- * overlay stylesheet injected into HTML responses. Bridges dial OUT from the
- * local network, so no inbound port or NAT rule is needed at home.
+ * Multi-user bridge server: phones and desktops authenticate with email
+ * verification codes or WeChat, bind to a pairing code, and every other
+ * request reverse-proxies through the outbound tunnel into the owner's local
+ * Harness web. Relay bodies stay opaque base64 so the server never reads
+ * client payload bytes (the E2EE layer encrypts them client-side). Bridges
+ * dial OUT from the local network, so no inbound port or NAT rule is needed.
  * @module @sparkelf/dsh-mobile-bridge-server/server
  */
 
@@ -31,25 +31,32 @@ export interface RelayResponse {
   status: number
   headers: Record<string, string>
   body: string
-  /** 'text' carries utf-8; 'base64' carries binary-safe payloads. */
   bodyEncoding?: 'text' | 'base64'
+  stream?: boolean
+  chunk?: string
+  end?: boolean
 }
 
 /** Verifies one external login payload and returns the stable identity. */
 export type ExternalAuthVerifier = (payload: Record<string, unknown>) => Promise<string>
 
+/** Sends one verification code email; injected so tests never touch SMTP. */
+export type CodeMailer = (email: string, code: string) => Promise<void>
+
 /** Options for the bridge server. */
 export interface BridgeServerOptions {
   /** Enabled external login providers (e.g. wechat) with their verifiers. */
   externalAuth?: Record<string, ExternalAuthVerifier>
+  /** Delivers email verification codes; required for email login. */
+  mailer?: CodeMailer
 }
 
 const COOKIE = 'mbs'
 
 const LANDING = `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>DSH Mobile Bridge</title>
-<style>body{font:15px/1.6 system-ui,sans-serif;margin:0;background:#14161a;color:#e8eaed;display:grid;place-items:center;min-height:100vh}main{width:min(92vw,380px);background:#1d2127;border-radius:14px;padding:24px}h1{font-size:18px;margin:0 0 12px}input{width:100%;box-sizing:border-box;margin:6px 0;padding:10px;border-radius:8px;border:1px solid #333a44;background:#14161a;color:inherit}button{width:100%;margin-top:10px;padding:10px;border:0;border-radius:8px;background:#4c8dff;color:#fff;font-weight:600}p.err{color:#ff8080;min-height:1.2em}</style>
-<main><h1>DeepSeek Harness Mobile</h1><input id=u placeholder=用户名><input id=p type=password placeholder=密码><input id=b placeholder=绑定码（登录后填，首次）><p class=err id=e></p><button id=r>注册</button><button id=l>登录</button><button id=g>绑定并进入</button></main>
-<script>const $=id=>document.getElementById(id);const api=async(p,o)=>{const r=await fetch('/bridge'+p,Object.assign({credentials:'same-origin'},o));const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};$('r').onclick=async()=>{try{await api('/api/register',{method:'POST',body:JSON.stringify({name:$('u').value,password:$('p').value})});$('e').textContent='已注册，请登录'}catch(e){$('e').textContent=e.message}};$('l').onclick=async()=>{try{await api('/api/login',{method:'POST',body:JSON.stringify({name:$('u').value,password:$('p').value})});$('e').textContent='已登录；未绑定请填绑定码，已绑定刷新即进入'}catch(e){$('e').textContent=e.message}};$('g').onclick=async()=>{try{await api('/api/bind',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({bridge:$('b').value})});location.href='/'}catch(e){$('e').textContent=e.message}};</script>`
+<style>body{font:15px/1.6 system-ui,sans-serif;margin:0;background:#14161a;color:#e8eaed;display:grid;place-items:center;min-height:100vh}main{width:min(92vw,380px);background:#1d2127;border-radius:14px;padding:24px}h1{font-size:18px;margin:0 0 12px}input{width:100%;box-sizing:border-box;margin:6px 0;padding:10px;border-radius:8px;border:1px solid #333a44;background:#14161a;color:inherit}button{width:100%;margin-top:10px;padding:10px;border:0;border-radius:8px;background:#4c8dff;color:#fff;font-weight:600}button.ghost{background:#2a3038}p.err{color:#ff8080;min-height:1.2em}</style>
+<main><h1>DeepSeek Harness Mobile</h1><input id=e type=email placeholder=邮箱><div style=display:flex;gap:8px><input id=c placeholder=验证码 style=margin:6px 0><button id=s class=ghost style=margin:6px 0;width:40%>发送</button></div><input id=b placeholder=绑定码（可选，扫码免填）><p class=err id=x></p><button id=l>登录</button></main>
+<script>const $=id=>document.getElementById(id);const api=async(p,o)=>{const r=await fetch('/bridge'+p,Object.assign({credentials:'same-origin'},o));const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};$('s').onclick=async()=>{try{await api('/api/email/code',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('e').value})});$('x').textContent='验证码已发送'}catch(e){$('x').textContent=e.message}};$('l').onclick=async()=>{try{await api('/api/login/email',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('e').value,code:$('c').value,bridge:$('b').value})});location.href='/'}catch(e){$('x').textContent=e.message}};</script>`
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -78,37 +85,34 @@ function cookieToken(req: IncomingMessage): string {
  * Build the bridge server: `/bridge/*` owns auth/bind/landing; everything else
  * reverse-proxies through the paired bridge tunnel for bound cookie sessions.
  * @param store - user/token/binding store.
- * @param options - external auth provider verifiers; empty by default.
+ * @param options - mailer and external auth provider verifiers.
  * @returns the node HTTP server (listen owned by the caller).
  */
 export function createBridgeServer(store: UserStore, options: BridgeServerOptions = {}) {
   const externalAuth = options.externalAuth ?? {}
+  const mailer = options.mailer
   const bridges = new Map<string, WebSocket>()
   const pending = new Map<string, { settle?: (response: RelayResponse) => void; timer?: ReturnType<typeof setTimeout>; res?: ServerResponse }>()
 
-  interface PendingEntry {
-    settle?: (response: RelayResponse) => void
-    timer?: ReturnType<typeof setTimeout>
-    res?: ServerResponse
-  }
+  interface PendingEntry { settle?: (response: RelayResponse) => void; timer?: ReturnType<typeof setTimeout>; res?: ServerResponse }
 
   const relay = (socket: WebSocket, request: Omit<RelayRequest, 'id'>): Promise<RelayResponse> =>
     new Promise((resolve, reject) => {
       const id = randomBytes(8).toString('hex')
       const timer = setTimeout(() => { pending.delete(id); reject(new Error('relay timeout')) }, 30_000)
-      pending.set(id, { settle: response => { clearTimeout(timer); pending.delete(id); resolve(response) }, timer })
+      const entry: PendingEntry = { settle: response => { clearTimeout(timer); pending.delete(id); resolve(response) }, timer }
+      pending.set(id, entry)
       socket.send(JSON.stringify({ id, ...request }))
     })
 
   /** Stream one event-stream request straight into the phone response. */
   const relayStream = (socket: WebSocket, request: Omit<RelayRequest, 'id'>, res: ServerResponse): Promise<void> =>
-    new Promise((resolve, reject) => {
+    new Promise(resolve => {
       const id = randomBytes(8).toString('hex')
       const entry: PendingEntry = { res }
       pending.set(id, entry)
       res.on('close', () => { pending.delete(id); resolve() })
       socket.send(JSON.stringify({ id, ...request }))
-      void reject
     })
 
   const http = createServer((req, res) => {
@@ -119,19 +123,22 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
         res.end(LANDING)
         return
       }
-      if (req.method === 'POST' && url.pathname === '/bridge/api/register') {
+      if (req.method === 'POST' && url.pathname === '/bridge/api/email/code') {
+        if (mailer === undefined) { json(res, 503, { error: 'email login not configured' }); return }
         try {
-          const { name, password } = JSON.parse(await readBody(req)) as { name: string; password: string }
-          const token = store.register(name, password)
-          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`] })
-          res.end(JSON.stringify({ token }))
+          const { email } = JSON.parse(await readBody(req)) as { email: string }
+          const code = store.issueEmailCode(email)
+          await mailer(email, code)
+          json(res, 200, { sent: true })
         } catch (error) { json(res, 400, { error: error instanceof Error ? error.message : String(error) }) }
         return
       }
-      if (req.method === 'POST' && url.pathname === '/bridge/api/login') {
+      if (req.method === 'POST' && url.pathname === '/bridge/api/login/email') {
         try {
-          const { name, password } = JSON.parse(await readBody(req)) as { name: string; password: string }
-          const token = store.login(name, password)
+          const { email, code, bridge } = JSON.parse(await readBody(req)) as { email: string; code: string; bridge?: string }
+          store.consumeEmailCode(email, code)
+          const token = store.loginExternal('email', email.trim().toLowerCase())
+          if (typeof bridge === 'string' && bridge.trim().length > 0) store.bind(token, bridge)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`] })
           res.end(JSON.stringify({ token }))
         } catch (error) { json(res, 401, { error: error instanceof Error ? error.message : String(error) }) }
@@ -191,20 +198,13 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
         bodyEncoding: 'base64' as const,
       }
       if ((req.headers.accept ?? '').includes('text/event-stream')) {
-        try {
-          await relayStream(socket, requestFrame, res)
-        } catch (error) {
-          json(res, 502, { error: error instanceof Error ? error.message : String(error) })
-        }
+        await relayStream(socket, requestFrame, res)
         return
       }
       try {
         const response = await relay(socket, requestFrame)
         const contentType = response.headers['content-type'] ?? ''
-        let out = response.bodyEncoding === 'base64' ? Buffer.from(response.body, 'base64') : Buffer.from(response.body, 'utf8')
-        if (response.bodyEncoding !== 'base64' && contentType.includes('text/html')) {
-          out = Buffer.from(out.toString('utf8').replace('</head>', '<link rel="stylesheet" href="/mobile/bridge/style.css"></head>'), 'utf8')
-        }
+        const out = response.bodyEncoding === 'base64' ? Buffer.from(response.body, 'base64') : Buffer.from(response.body, 'utf8')
         res.writeHead(response.status, { 'content-type': contentType || 'application/octet-stream' })
         res.end(out)
       } catch (error) {
@@ -222,7 +222,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
       wss.handleUpgrade(req, socket, head, ws => {
         bridges.set(code, ws)
         ws.on('message', raw => {
-          const frame = JSON.parse(String(raw)) as RelayResponse & { stream?: boolean; chunk?: string; end?: boolean }
+          const frame = JSON.parse(String(raw)) as RelayResponse
           const entry = pending.get(frame.id)
           if (!entry) return
           if (frame.stream && entry.res) {

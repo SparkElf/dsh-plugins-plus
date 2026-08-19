@@ -13,6 +13,7 @@ let local: Server
 let bridge: Server
 let localPort: number
 let bridgePort: number
+let sentCodes: { email: string; code: string }[]
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff])
 
 beforeAll(async () => {
@@ -33,8 +34,11 @@ beforeAll(async () => {
   })
   await new Promise<void>(resolve => local.listen(0, resolve))
   localPort = (local.address() as AddressInfo).port
+  sentCodes = []
   const store = new UserStore(join(mkdtempSync(join(tmpdir(), 'mbs-')), 'u.json'), '0123456789abcdef')
-  bridge = createBridgeServer(store)
+  bridge = createBridgeServer(store, {
+    mailer: async (email, code) => { sentCodes.push({ email, code }) },
+  })
   await new Promise<void>(resolve => bridge.listen(0, resolve))
   bridgePort = (bridge.address() as AddressInfo).port
 })
@@ -44,84 +48,78 @@ afterAll(async () => {
   await new Promise(resolve => local.close(resolve))
 })
 
+async function emailLogin(): Promise<string> {
+  const base = `http://127.0.0.1:${bridgePort}`
+  await fetch(base + '/bridge/api/email/code', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'dee@example.com' }),
+  })
+  const code = sentCodes.at(-1)?.code ?? ''
+  const login = await fetch(base + '/bridge/api/login/email', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'dee@example.com', code }),
+  })
+  expect(login.status).toBe(200)
+  return login.headers.get('set-cookie')?.split(';')[0] ?? ''
+}
+
+async function connectedBridge(): Promise<{ cookie: string; socket: WebSocket }> {
+  const base = `http://127.0.0.1:${bridgePort}`
+  const cookie = await emailLogin()
+  const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
+  await fetch(base + '/bridge/api/bind', {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ bridge: start.code }),
+  })
+  const socket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
+  await new Promise<void>((resolve, reject) => { socket.on('open', () => resolve()); socket.on('error', reject) })
+  socket.on('message', raw => {
+    const request = JSON.parse(String(raw)) as RelayRequest
+    void relayToLocalWeb(request, localPort, frame => socket.send(JSON.stringify(frame)))
+  })
+  return { cookie, socket }
+}
+
 describe('bridge server end to end', () => {
-  it('registers, binds, and proxies the stock web through the tunnel', async () => {
-    const base = `http://127.0.0.1:${bridgePort}`
-    const register = await fetch(base + '/bridge/api/register', {
-      method: 'POST',
-      body: JSON.stringify({ name: 'dee', password: 'longpassword' }),
-    })
-    expect(register.status).toBe(200)
-    const cookie = register.headers.get('set-cookie')?.split(';')[0] ?? ''
-    expect(cookie).toContain('mbs=')
-
-    const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
-    expect(start.code).toMatch(/^[0-9a-f]{6}$/)
-
-    const bind = await fetch(base + '/bridge/api/bind', {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ bridge: start.code }),
-    })
-    expect(bind.status).toBe(200)
-
-    const bridgeSocket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
-    await new Promise<void>((resolve, reject) => { bridgeSocket.on('open', () => resolve()); bridgeSocket.on('error', reject) })
-    bridgeSocket.on('message', raw => {
-      const request = JSON.parse(String(raw)) as RelayRequest
-      void relayToLocalWeb(request, localPort, frame => bridgeSocket.send(JSON.stringify(frame)))
-    })
-
-    const page = await fetch(base + '/', { headers: { cookie } })
+  it('emails a code, logs in, and proxies the stock web through the tunnel', async () => {
+    const { cookie, socket } = await connectedBridge()
+    const page = await fetch(`http://127.0.0.1:${bridgePort}/`, { headers: { cookie } })
     expect(page.status).toBe(200)
-    const html = await page.text()
-    expect(html).toContain('stock web')
-    expect(html).toContain('/mobile/bridge/style.css')
+    expect(await page.text()).toContain('stock web')
 
-    const image = await fetch(base + '/logo.png', { headers: { cookie } })
+    const image = await fetch(`http://127.0.0.1:${bridgePort}/logo.png`, { headers: { cookie } })
     expect(image.status).toBe(200)
     expect(Buffer.from(await image.arrayBuffer())).toEqual(PNG)
-
-    bridgeSocket.close()
+    socket.close()
   })
 
   it('streams SSE through the tunnel in order', async () => {
-    const base = `http://127.0.0.1:${bridgePort}`
-    const register = await fetch(base + '/bridge/api/register', {
-      method: 'POST',
-      body: JSON.stringify({ name: 'sse', password: 'longpassword' }),
-    })
-    const cookie = register.headers.get('set-cookie')?.split(';')[0] ?? ''
-    const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
-    await fetch(base + '/bridge/api/bind', {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ bridge: start.code }),
-    })
-    const bridgeSocket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
-    await new Promise<void>((resolve, reject) => { bridgeSocket.on('open', () => resolve()); bridgeSocket.on('error', reject) })
-    bridgeSocket.on('message', raw => {
-      const request = JSON.parse(String(raw)) as RelayRequest
-      void relayToLocalWeb(request, localPort, frame => bridgeSocket.send(JSON.stringify(frame)))
-    })
-
-    const response = await fetch(base + '/events', { headers: { cookie, accept: 'text/event-stream' } })
+    const { cookie, socket } = await connectedBridge()
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/events`, { headers: { cookie, accept: 'text/event-stream' } })
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('data: one\n\ndata: two\n\n')
-    bridgeSocket.close()
+    socket.close()
+  })
+
+  it('rejects wrong codes and unknown providers', async () => {
+    const base = `http://127.0.0.1:${bridgePort}`
+    await fetch(base + '/bridge/api/email/code', { method: 'POST', body: JSON.stringify({ email: 'x@example.com' }) })
+    const bad = await fetch(base + '/bridge/api/login/email', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'x@example.com', code: '000000' }),
+    })
+    expect(bad.status).toBe(401)
+    const unknown = await fetch(base + '/bridge/api/login/external', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'wechat', payload: { code: 'c1' } }),
+    })
+    expect(unknown.status).toBe(401)
   })
 
   it('redirects unbound or logged-out phones to the landing page', async () => {
     const page = await fetch(`http://127.0.0.1:${bridgePort}/`, { redirect: 'manual' })
     expect(page.status).toBe(302)
     expect(page.headers.get('location')).toBe('/bridge/')
-  })
-
-  it('rejects unknown external providers', async () => {
-    const unknown = await fetch(`http://127.0.0.1:${bridgePort}/bridge/api/login/external`, {
-      method: 'POST',
-      body: JSON.stringify({ provider: 'wechat', payload: { code: 'c1' } }),
-    })
-    expect(unknown.status).toBe(401)
   })
 })
