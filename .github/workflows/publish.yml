@@ -30,8 +30,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
-      - name: Typecheck and test
-        run: pnpm run typecheck && pnpm run test
+      - name: Typecheck, test, and build
+        run: pnpm run typecheck && pnpm run test && pnpm run build
 
       - name: Publish changed packages
         run: pnpm -r publish --no-git-checks --access public

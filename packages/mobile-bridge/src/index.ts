@@ -133,15 +133,6 @@ const MOBILE_CSS = `/* narrow-width overlay: fixes occlusion via semantic select
 }
 `
 
-// v12-M 可容纳当前加密配对 URL，并保留适合手机扫描的中等纠错能力。
-const PANEL_HTML = `<!doctype html><meta charset=utf-8><title>移动连接</title>
-<!-- Config form talks to the exposed mobile-bridge settings namespace over the loopback RPC. -->
-<style>body{font:14px/1.6 system-ui,sans-serif;background:#14161a;color:#e8eaed;margin:0;padding:24px}main{max-width:560px;margin:auto;background:#1d2127;border-radius:12px;padding:24px}h1{font-size:17px}#st{padding:4px 10px;border-radius:99px;background:#2a3038}#st.on{background:#1f4d2e;color:#8ce99a}pre{background:#14161a;padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-all}button{margin-top:10px;padding:8px 14px;border:0;border-radius:8px;background:#4c8dff;color:#fff}</style>
-<main><h1>移动连接 <span id=st>未连接</span></h1><p>手机扫描下方二维码（或打开链接输入绑定码）即自动登录并连接，全程端到端加密，服务器只做盲转发。</p><div id=qr></div><pre id=url>…</pre><button onclick="navigator.clipboard.writeText(document.getElementById('url').textContent)">复制链接</button><h1 style=margin-top:20px>连接配置</h1><label>服务器地址 <input id=f-url style="width:100%;box-sizing:border-box"></label><label>本地端口 <input id=f-port type=number style="width:100%;box-sizing:border-box"></label><label>加密口令（留空=仅配对密钥） <input id=f-key type=password style="width:100%;box-sizing:border-box"></label><label>所有者邮箱 <input id=f-mail style="width:100%;box-sizing:border-box"></label><label><input id=f-2fa type=checkbox> 扫码需邮箱二因子</label><label><input id=f-auto type=checkbox> 启动自动连接</label><p id=msg></p><button id=save>保存配置</button><script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script><script>var NS='mobile-bridge';function rpc(method,payload){var id='r'+Math.random().toString(36).slice(2);return fetch('/api/'+method,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:id,method:method,payload:payload})}).then(function(r){return r.json()}).then(function(d){if(!d.result||!d.result.ok)throw new Error((d.result&&d.result.error&&d.result.error.message)||'rpc failed');return d.result.value})}
-fetch('/mobile/bridge/status').then(r=>r.json()).then(s=>{var st=document.getElementById('st');st.textContent=s.connected?'已连接':'未连接';if(s.connected)st.className='on';document.getElementById('url').textContent=s.qrUrl||'（等待配对码）';if(window.QRCode&&s.qrUrl)new QRCode(document.getElementById('qr'),{text:s.qrUrl,width:220,height:220})});
-rpc('settings.describe',{}).then(function(v){var row=v.namespaces.find(function(n){return n.ns===NS});if(!row)return;var val=row.value||{};document.getElementById('f-url').value=val.serverUrl||'';document.getElementById('f-port').value=val.localPort||3080;document.getElementById('f-key').value=val.userKey||'';document.getElementById('f-mail').value=val.ownerEmail||'';document.getElementById('f-2fa').checked=!!val.emailTwoFactor;document.getElementById('f-auto').checked=val.autoConnect!==false;}).catch(function(e){document.getElementById('msg').textContent=e.message});
-document.getElementById('save').onclick=function(){var patch={serverUrl:document.getElementById('f-url').value,localPort:Number(document.getElementById('f-port').value)||3080,userKey:document.getElementById('f-key').value,ownerEmail:document.getElementById('f-mail').value,emailTwoFactor:document.getElementById('f-2fa').checked,autoConnect:document.getElementById('f-auto').checked,autoReconnect:document.getElementById('f-auto').checked};rpc('settings.update',{ns:NS,patch:patch}).then(function(){document.getElementById('msg').textContent='已保存';location.reload()}).catch(function(e){document.getElementById('msg').textContent=e.message})};</script></main>`
-
 interface MobileWebServer {
   register(route: {
     kind: 'prefix'
@@ -153,18 +144,31 @@ interface MobileWebServer {
 /** 注册 `/mobile` 路由并维护到公网桥接服务的出站加密连接。 */
 export function apply(ctx: Context, config: MobileBridgeConfig): void {
   let current: () => MobileBridgeConfig = () => config
+  let restartConnection = (): void => {}
   installSettingsSection(ctx, MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, config, {
     setSource: source => { current = source },
-    onChange: () => {},
+    onChange: () => { restartConnection() },
   })
   const state = {
     socket: undefined as WebSocket | undefined,
     connected: false,
-    codes: new Map<string, string>(),
+    restartRequested: false,
     lastQrUrl: '',
   }
+  let disposed = false
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
 
-  async function connect() {
+  const scheduleConnect = (delayMs: number): void => {
+    if (disposed) return
+    if (retryTimer !== undefined) clearTimeout(retryTimer)
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined
+      void connect()
+    }, delayMs)
+  }
+
+  async function connect(): Promise<void> {
+    if (disposed) return
     const live = current()
     if (!live.serverUrl || !live.autoConnect) return
     try {
@@ -174,7 +178,6 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         body: JSON.stringify({ ...live.emailTwoFactor && live.ownerEmail ? { email2fa: live.ownerEmail } : {} }),
       }).then(response => response.json()) as { code: string }
       const secret = randomBytes(16).toString('hex')
-      state.codes.set(started.code, secret)
       // With a passphrase set, k stays out of the QR: the phone must type it,
       // turning the scan into possession plus knowledge (two factors).
       const qrPayload = encodeURIComponent(JSON.stringify({
@@ -182,7 +185,6 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       }))
       const qrUrl = `${live.serverUrl}/bridge/#${qrPayload}`
       state.lastQrUrl = qrUrl
-      console.log('[mobile-bridge] phone panel: /mobile/bridge/panel')
       const wsUrl = live.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
       const socket = new WebSocket(wsUrl)
       state.socket = socket
@@ -199,18 +201,34 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
               if (frame.stream) { socket.send(JSON.stringify({ id: frame.id, stream: true, blob: await encryptJSON(key, { stream: true, status: frame.status, headers: frame.headers }) })); return }
               if (frame.chunk !== undefined) { socket.send(JSON.stringify({ id: frame.id, chunk: await encryptJSON(key, { d: frame.chunk }) })); return }
               socket.send(JSON.stringify({ id: frame.id, blob: await encryptJSON(key, { status: frame.status, headers: frame.headers, body: frame.body, bodyEncoding: 'base64' }) }))
-            })()
+            })().catch(error => { console.error('[dsh-mobile-bridge] relay frame failed', error) })
           })
-        })()
+        })().catch(error => { console.error('[dsh-mobile-bridge] relay request failed', error) })
       })
       socket.on('close', () => {
+        if (state.socket === socket) state.socket = undefined
         state.connected = false
-        if (live.autoReconnect) setTimeout(() => void connect(), 5000)
+        const restartNow = state.restartRequested
+        state.restartRequested = false
+        if (restartNow || current().autoReconnect) scheduleConnect(restartNow ? 0 : 5000)
       })
-      socket.on('error', () => { socket.close() })
-    } catch {
-      if (live.autoReconnect) setTimeout(() => void connect(), 5000)
+      socket.on('error', error => {
+        console.error('[dsh-mobile-bridge] websocket failed', error)
+        socket.close()
+      })
+    } catch (error) {
+      console.error('[dsh-mobile-bridge] connection failed', error)
+      if (current().autoReconnect) scheduleConnect(5000)
     }
+  }
+
+  restartConnection = () => {
+    if (state.socket === undefined) {
+      scheduleConnect(0)
+      return
+    }
+    state.restartRequested = true
+    state.socket.close()
   }
 
   ctx.effect(function* () {
@@ -225,17 +243,22 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
           res.end(JSON.stringify({ connected: state.connected, serverUrl: current().serverUrl, qrUrl: state.lastQrUrl }))
           return
         }
-        if (path.startsWith('/mobile/bridge/panel')) {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(PANEL_HTML)
+        if (path.startsWith('/mobile/bridge/style.css')) {
+          res.writeHead(200, { 'content-type': 'text/css; charset=utf-8' })
+          res.end(MOBILE_CSS)
           return
         }
-        res.writeHead(200, { 'content-type': 'text/css; charset=utf-8' })
-        res.end(MOBILE_CSS)
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('not found')
       },
     })
     void connect()
-    yield () => { state.socket?.close(); dispose() }
+    yield () => {
+      disposed = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+      state.socket?.close()
+      dispose()
+    }
   }, 'dsh-mobile-bridge lifecycle')
 }
 

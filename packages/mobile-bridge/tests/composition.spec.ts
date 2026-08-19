@@ -30,12 +30,19 @@ describe('dsh-mobile-bridge composition', () => {
 
     let status = 0
     let body = ''
-    routes[0].handler({}, {
+    routes[0].handler({ url: '/mobile/bridge/style.css' }, {
       writeHead(code) { status = code },
       end(out) { body = out },
     })
     expect(status).toBe(200)
     expect(body).toContain('max-width: 720px')
+
+    routes[0].handler({ url: '/mobile/bridge/panel' }, {
+      writeHead(code) { status = code },
+      end(out) { body = out },
+    })
+    expect(status).toBe(404)
+    expect(body).toBe('not found')
 
     await fiber.dispose()
     expect(routes).toHaveLength(0)

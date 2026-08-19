@@ -1,26 +1,80 @@
 {
   "name": "@sparkelf/dsh-mobile-bridge",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "description": "DeepSeek Harness plugin: an outbound E2EE tunnel, mobile presentation, and first-class Mobile Bridge settings section.",
   "type": "module",
-  "description": "DeepSeek Harness plugin: outbound tunnel to the mobile bridge server plus a narrow-width mobile overlay reusing the stock design system.",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./client": "./src/client.ts"
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": { "inject": [], "platform": "web" }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
+    "bundle": "tsdown",
+    "prepack": "pnpm run build"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SparkElf/dsh-plugins-plus.git",
+    "directory": "packages/mobile-bridge"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc.1 <1",
+    "@deepseek-ai/dsh-settings": ">=0.0.1-rc.1 <1",
+    "react": ">=18.2.0 <20"
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": "0.0.1-rc.1",
     "@deepseek-ai/schemastery": "^3.18.1",
-    "react": "^18.2.0",
+    "qrcode": "^1.5.4",
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/react": "^18.2.0"
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-invariants": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-settings": "0.0.1-rc.1",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "~18.3.1",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2"
   }
 }
