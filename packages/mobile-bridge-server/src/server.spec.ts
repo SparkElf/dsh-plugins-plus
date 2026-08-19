@@ -124,6 +124,21 @@ describe('bridge server end to end', () => {
     bridgeSocket.close()
   })
 
+  it('auto-logs in a phone that presents a live pairing code', async () => {
+    const base = `http://127.0.0.1:${bridgePort}`
+    const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
+    const login = await fetch(base + '/bridge/api/login/bridge', {
+      method: 'POST',
+      body: JSON.stringify({ code: start.code }),
+    })
+    expect(login.status).toBe(200)
+    expect(login.headers.get('set-cookie')).toContain('mbs=')
+    const me = await fetch(base + '/bridge/api/me', { headers: { cookie: login.headers.get('set-cookie')?.split(';')[0] ?? '' } })
+    expect(await me.json()).toMatchObject({ bridge: start.code })
+    const offline = await fetch(base + '/bridge/api/login/bridge', { method: 'POST', body: JSON.stringify({ code: 'zzzzzz' }) })
+    expect(offline.status).toBe(401)
+  })
+
   it('rejects wrong codes and unknown providers', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
     await fetch(base + '/bridge/api/email/code', { method: 'POST', body: JSON.stringify({ email: 'x@example.com' }) })

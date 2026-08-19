@@ -125,6 +125,10 @@ const MOBILE_CSS = `/* narrow-width overlay: fixes occlusion via semantic select
 }
 `
 
+const PANEL_HTML = `<!doctype html><meta charset=utf-8><title>移动连接</title>
+<style>body{font:14px/1.6 system-ui,sans-serif;background:#14161a;color:#e8eaed;margin:0;padding:24px}main{max-width:560px;margin:auto;background:#1d2127;border-radius:12px;padding:24px}h1{font-size:17px}#st{padding:4px 10px;border-radius:99px;background:#2a3038}#st.on{background:#1f4d2e;color:#8ce99a}pre{background:#14161a;padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-all}button{margin-top:10px;padding:8px 14px;border:0;border-radius:8px;background:#4c8dff;color:#fff}</style>
+<main><h1>移动连接 <span id=st>未连接</span></h1><p>手机扫描下方二维码（或打开链接输入绑定码）即自动登录并连接，全程端到端加密，服务器只做盲转发。</p><div id=qr></div><pre id=url>…</pre><button onclick="navigator.clipboard.writeText(document.getElementById('url').textContent)">复制链接</button><script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script><script>fetch('/mobile/bridge/status').then(r=>r.json()).then(s=>{const st=document.getElementById('st');st.textContent=s.connected?'已连接':'未连接';if(s.connected)st.className='on';document.getElementById('url').textContent=s.qrUrl||'（等待配对码）';if(window.QRCode&&s.qrUrl)new QRCode(document.getElementById('qr'),{text:s.qrUrl,width:220,height:220})});</script></main>`
+
 interface MobileWebServer {
   register(route: {
     kind: 'prefix'
@@ -148,6 +152,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     socket: undefined as WebSocket | undefined,
     connected: false,
     codes: new Map<string, string>(),
+    lastQrUrl: '',
   }
 
   async function connect() {
@@ -164,8 +169,10 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       const qrPayload = encodeURIComponent(JSON.stringify({
         u: live.serverUrl, c: started.code, s: secret, k: live.userKey ?? '', b: started.code,
       }))
+      const qrUrl = `${live.serverUrl}/bridge/#${qrPayload}`
+      state.lastQrUrl = qrUrl
       console.log('[mobile-bridge] pairing code:', started.code)
-      console.log('[mobile-bridge] phone QR url:', `${live.serverUrl}/bridge/#${qrPayload}`)
+      console.log('[mobile-bridge] phone QR url:', qrUrl)
       const wsUrl = live.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
       const socket = new WebSocket(wsUrl)
       state.socket = socket
@@ -201,7 +208,18 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     const dispose = web.register({
       kind: 'prefix',
       path: '/mobile/',
-      handler: (_req: unknown, res: { writeHead(code: number, headers: Record<string, string>): void; end(body: string): void }) => {
+      handler: (req: unknown, res: { writeHead(code: number, headers: Record<string, string>): void; end(body: string): void }) => {
+        const path = String((req as { url?: string }).url ?? '/mobile/')
+        if (path.startsWith('/mobile/bridge/status')) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ connected: state.connected, serverUrl: current().serverUrl, qrUrl: state.lastQrUrl }))
+          return
+        }
+        if (path.startsWith('/mobile/bridge/panel')) {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(PANEL_HTML)
+          return
+        }
         res.writeHead(200, { 'content-type': 'text/css; charset=utf-8' })
         res.end(MOBILE_CSS)
       },

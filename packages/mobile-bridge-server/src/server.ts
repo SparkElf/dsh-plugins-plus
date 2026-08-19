@@ -115,6 +115,19 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
         } catch (error) { json(res, 401, { error: error instanceof Error ? error.message : String(error) }) }
         return
       }
+      if (req.method === 'POST' && url.pathname === '/bridge/api/login/bridge') {
+        // QR auto-login: possession of a live pairing code proves the desktop
+        // is online; the phone gets a session without typing credentials.
+        try {
+          const { code } = JSON.parse(await readBody(req)) as { code: string }
+          if (!bridges.has(code)) throw new Error('unknown or offline pairing code')
+          const token = store.loginExternal('bridge', code)
+          store.bind(token, code)
+          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`] })
+          res.end(JSON.stringify({ token }))
+        } catch (error) { json(res, 401, { error: error instanceof Error ? error.message : String(error) }) }
+        return
+      }
       const token = cookieToken(req) || (req.headers.authorization ?? '').replace(/^Bearer /, '')
       if (req.method === 'GET' && url.pathname === '/bridge/api/me') {
         const name = store.userFor(token)

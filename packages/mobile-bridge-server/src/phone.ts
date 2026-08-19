@@ -125,9 +125,9 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
     try {
       var pair = JSON.parse(decodeURIComponent(fragment))
       localStorage.setItem('dshmb-pair', JSON.stringify(pair))
-      if (pair.b) api('/api/bind', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bridge: pair.b }) }).catch(function () {})
-      history.replaceState(null, '', '/')
-      registerSw(pair)
+      api('/api/login/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pair.b || pair.c }) })
+        .then(function () { history.replaceState(null, '', '/'); registerSw(pair) })
+        .catch(function (e) { var m = document.querySelector('main'); if (m) m.insertAdjacentHTML('beforeend', '<p class=err>' + e.message + '</p>') })
       return
     } catch (e) { /* fall through to manual login */ }
   }
