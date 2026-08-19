@@ -1,30 +1,42 @@
 # Mobile bridge deployment runbook
 
-Two halves: the public bridge server (this repo, `@sparkelf/dsh-mobile-bridge-server`) and the local plugin (`@sparkelf/dsh-mobile-bridge`) installed into the owner's Harness profile. Bridges dial OUT, so the home network needs no inbound ports.
+Two halves: the public bridge server (this repo, `@sparkelf/dsh-mobile-bridge-server`) and the local plugin (`@sparkelf/dsh-mobile-bridge`) installed into the owner's Harness profile. Bridges dial OUT, so the home network needs no inbound ports. Accounts are email verification codes or WeChat; there is no password login. Relay bodies stay opaque base64 so the server never reads client payload bytes (the E2EE layer encrypts them client-side).
 
 ## Server
 
-1. Provision a Linux box with Node 22.19+ (or 24+) and a TLS-terminated public hostname (nginx/Caddy in front; the server itself speaks plain HTTP on a loopback port).
-2. `git clone <dsh-plugins-plus> && cd dsh-plugins-plus && corepack enable && pnpm install`.
-3. Create a service env with:
-   - `MOBILE_BRIDGE_SECRET` — 16+ char HMAC secret for session tokens.
-   - `MOBILE_BRIDGE_DATA` — absolute path of the users JSON (mode 0600, e.g. `/var/lib/dsh-mobile-bridge/users.json`).
-   - `MOBILE_BRIDGE_PORT` — loopback port behind the TLS proxy (default 8787).
-4. Run `packages/mobile-bridge-server/src/index.ts` under systemd:
+1. Provision a Linux box with Node 22+ and a TLS-terminated public hostname. When the host already runs another app (e.g. sub2api) behind nginx, split by path: `/bridge/` and `/ws/` go to the bridge port, everything else keeps the existing proxy:
 
-```ini
-[Service]
-ExecStart=node --import tsx/esm /opt/dsh-plugins-plus/packages/mobile-bridge-server/src/index.ts
-EnvironmentFile=/etc/dsh-mobile-bridge.env
-Restart=on-failure
-User=dshbridge
+```nginx
+location /bridge/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+location /ws/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
 ```
 
-5. Verify: `curl https://<host>/` returns the landing page; register/login/bind round-trip works.
+2. Bundle the server to one file: `pnpm dlx esbuild packages/mobile-bridge-server/src/index.ts --bundle --platform=node --format=esm --outfile=bridge-server.mjs` (banner `createRequire` for the CJS deps).
+3. Write `/etc/dsh-mobile-bridge.env` (mode 0600) with:
+   - `MOBILE_BRIDGE_SECRET` — 32-byte hex, HMAC secret for session tokens.
+   - `MOBILE_BRIDGE_DATA` — users JSON path (e.g. `/var/lib/dsh-mobile-bridge/users.json`).
+   - `MOBILE_BRIDGE_PORT` — loopback port behind the TLS proxy (8787).
+   - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` — email verification delivery (QQ/163/Gmail SMTP all work; absent disables email login).
+   - `WECHAT_APP_ID`, `WECHAT_APP_SECRET` — optional WeChat QR login.
+4. systemd unit with `EnvironmentFile` and `ExecStart=/usr/bin/node /opt/dsh-mobile-bridge/bridge-server.mjs`, `Restart=on-failure`; enable and start.
+5. Verify: `https://<host>/bridge/` returns the landing page; `POST /bridge/api/email/code` returns `{"sent":true}` and the inbox receives a six-digit code; the co-hosted app behind `/` is unaffected.
 
 ## Local Harness side
 
-1. In the Harness install, `dsh plugin --profile web add github:SparkElf/dsh-plugins-plus#<sha>` is not package-granular; instead add the plugin package to the profile (`pnpm add` in `$DSH_HOME/profiles/web`) and append its patch row to the profile `cordis.patch.yml` with config:
+1. Add the plugin package to the web profile and append its patch row with config:
 
 ```yaml
 - insert:
@@ -37,8 +49,8 @@ User=dshbridge
 ```
 
 2. Restart Harness; the plugin logs `pairing code: <6 hex>`.
-3. On the phone: open `https://<host>/bridge/`, register (username/password), log in (sets an HttpOnly cookie), paste the pairing code, bind. After that `https://<host>/` serves the stock Harness web itself, reverse-proxied through the tunnel; HTML responses get the narrow-width overlay injected automatically, and binary assets (fonts/images) ride the tunnel base64-safe.
+3. On the phone: open `https://<host>/bridge/`, request the email code, log in, paste the pairing code (or scan the desktop QR once that ships), and the stock web arrives through the tunnel; SSE streams and binary assets ride the base64-safe relay.
 
 ## Third-party login (later)
 
-`createBridgeServer(store, { externalAuth: { wechat: verifier } })` adds providers; the verifier checks the provider payload and returns the stable external id; `POST /api/login/external {provider, payload}` mints tokens and creates users on first sight. Password login stays available.
+`createBridgeServer(store, { externalAuth: { wechat: verifier } })` adds providers; the verifier checks the provider payload and returns the stable external id; `POST /bridge/api/login/external {provider, payload}` mints tokens and creates users on first sight. Email login stays available.

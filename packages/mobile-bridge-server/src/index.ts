@@ -30,8 +30,8 @@ const mailer = smtpHost.length > 0
       host: smtpHost,
       port: Number(process.env.SMTP_PORT ?? 465),
       secure: Number(process.env.SMTP_PORT ?? 465) === 465,
-      ...process.env.SMTP_USER === undefined ? {} : {
-        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS ?? '' },
+      ...process.env.SMTP_USERNAME === undefined ? {} : {
+        auth: { user: process.env.SMTP_USERNAME, pass: process.env.SMTP_PASSWORD ?? '' },
       },
     })
     await transport.sendMail({
