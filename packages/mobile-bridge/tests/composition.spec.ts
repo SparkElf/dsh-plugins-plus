@@ -23,7 +23,7 @@ describe('dsh-mobile-bridge composition', () => {
         }
       },
     } as never)
-    const config: MobileBridgeConfig = { serverUrl: '', secret: '', localPort: 3080 }
+    const config: MobileBridgeConfig = { serverUrl: '', localPort: 3080, userKey: '', autoConnect: false, autoReconnect: false }
     const fiber = ctx.plugin(mobileBridge, config)
     await fiber
     expect(routes.map(route => route.path)).toEqual(['/mobile/'])

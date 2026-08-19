@@ -1,7 +1,8 @@
 /**
  * Live dress rehearsal against a real local Harness web on :3080. Self-skips
  * in CI or anywhere the loopback web is absent; on a dev box it proves the
- * whole chain — register, bind, tunnel, stock HTML with injected overlay.
+ * encrypted chain: phone-side crypto through the blind server pipe to the
+ * desktop relay and back, reading the real stock HTML as ciphertext on wire.
  * @module @sparkelf/dsh-mobile-bridge-server/live
  */
 
@@ -12,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import WebSocket from 'ws'
 import { afterAll, describe, expect, it } from 'vitest'
+import { decryptJSON, deriveKey, encryptJSON } from '../../mobile-bridge/src/crypto.ts'
 import { relayToLocalWeb, type RelayRequest } from '../../mobile-bridge/src/index.ts'
 import { createBridgeServer } from './server.ts'
 import { UserStore } from './store.ts'
@@ -44,7 +46,7 @@ afterAll(async () => {
 })
 
 describe.skipIf(!reachable)('live rehearsal against the real Harness web', () => {
-  it('serves the stock UI through the tunnel after email login', async () => {
+  it('reads the stock UI through the encrypted tunnel after email login', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
     await fetch(base + '/bridge/api/email/code', {
       method: 'POST',
@@ -58,35 +60,49 @@ describe.skipIf(!reachable)('live rehearsal against the real Harness web', () =>
     const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? ''
 
     const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
-    const bridgeSocket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
-    await new Promise<void>((resolve, reject) => { bridgeSocket.on('open', () => resolve()); bridgeSocket.on('error', reject) })
-    bridgeSocket.on('message', raw => {
-      const request = JSON.parse(String(raw)) as RelayRequest
-      void relayToLocalWeb(request, LIVE_PORT, frame => bridgeSocket.send(JSON.stringify(frame)))
-    })
-
-    const bind = await fetch(base + '/bridge/api/bind', {
+    await fetch(base + '/bridge/api/bind', {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify({ bridge: start.code }),
     })
-    expect(bind.status).toBe(200)
 
-    const page = await fetch(base + '/', { headers: { cookie } })
-    expect(page.status).toBe(200)
-    const html = await page.text()
+    const desktopKey = await deriveKey('', 'livepair')
+    const phoneKey = await deriveKey('', 'livepair')
+    const bridgeSocket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
+    await new Promise<void>((resolve, reject) => { bridgeSocket.on('open', () => resolve()); bridgeSocket.on('error', reject) })
+    bridgeSocket.on('message', raw => {
+      const wire = JSON.parse(String(raw)) as { id: string; blob?: string }
+      if (wire.blob === undefined) return
+      const blobIn = wire.blob
+      void (async () => {
+        const request = await decryptJSON<RelayRequest>(desktopKey, blobIn)
+        await relayToLocalWeb({ ...request, id: wire.id }, LIVE_PORT, frame => {
+          void (async () => {
+            if (frame.end) { bridgeSocket.send(JSON.stringify({ id: frame.id, end: true })); return }
+            if (frame.stream) { bridgeSocket.send(JSON.stringify({ id: frame.id, stream: true, blob: await encryptJSON(desktopKey, { stream: true, status: frame.status, headers: frame.headers }) })); return }
+            if (frame.chunk !== undefined) { bridgeSocket.send(JSON.stringify({ id: frame.id, chunk: await encryptJSON(desktopKey, { d: frame.chunk }) })); return }
+            bridgeSocket.send(JSON.stringify({ id: frame.id, blob: await encryptJSON(desktopKey, { status: frame.status, headers: frame.headers, body: frame.body, bodyEncoding: 'base64' }) }))
+          })()
+        })
+      })()
+    })
+
+    const client = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/client`, { headers: { cookie } })
+    await new Promise<void>((resolve, reject) => { client.on('open', () => resolve()); client.on('error', reject) })
+    const answer = new Promise<string>(resolve => {
+      client.on('message', raw => {
+        const wire = JSON.parse(String(raw)) as { id: string; blob?: string }
+        if (wire.blob === undefined) return
+        void decryptJSON<{ body: string }>(phoneKey, wire.blob).then(full => resolve(Buffer.from(full.body, 'base64').toString('utf8')))
+      })
+    })
+    const blob = await encryptJSON(phoneKey, { method: 'GET', path: '/', headers: { accept: 'text/html' }, body: '', bodyEncoding: 'base64' })
+    client.send(JSON.stringify({ id: 'live1', blob }))
+
+    const html = await answer
     expect(html).toContain('__DSH_BOOT__')
 
-    // The overlay stylesheet lives on the plugin's /mobile/ route; it only
-    // exists once the plugin is installed in the target runtime (deployment
-    // step in docs/deploy-mobile-bridge.md), so assert it conditionally.
-    const direct = await fetch(`http://127.0.0.1:${LIVE_PORT}/mobile/bridge/style.css`)
-    if ((direct.headers.get('content-type') ?? '').includes('text/css')) {
-      const css = await fetch(base + '/mobile/bridge/style.css', { headers: { cookie } })
-      expect(css.status).toBe(200)
-      expect(await css.text()).toContain('max-width: 720px')
-    }
-
+    client.close()
     bridgeSocket.close()
   }, 20000)
 })

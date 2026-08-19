@@ -2,16 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { relayToLocalWeb, type RelayFrame, type RelayRequest } from './index.ts'
 
 describe('relayToLocalWeb', () => {
-  const request: RelayRequest = { id: 'r1', kind: 'http', method: 'GET', path: '/api/x', headers: {}, body: '' }
+  const request: RelayRequest = { id: 'r1', method: 'GET', path: '/api/x', headers: {}, body: '' }
   const noop = () => {}
 
-  it('forwards status, body, and content type', async () => {
+  it('forwards status and base64 body', async () => {
     const fake = (async () => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } })) as typeof fetch
     const response = await relayToLocalWeb(request, 3080, noop, fake)
-    expect(response).toMatchObject({ id: 'r1', status: 200, body: 'hello' })
+    expect(response.status).toBe(200)
+    expect(Buffer.from(response.body ?? '', 'base64').toString('utf8')).toBe('hello')
   })
 
-  it('round-trips binary payloads as base64 both directions', async () => {
+  it('round-trips binary payloads as base64', async () => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff])
     const fake = (async () => new Response(png, { status: 200, headers: { 'content-type': 'image/png' } })) as typeof fetch
     const response = await relayToLocalWeb({ ...request, body: png.toString('base64'), bodyEncoding: 'base64' }, 3080, noop, fake)
@@ -40,6 +41,6 @@ describe('relayToLocalWeb', () => {
     const failing = (async () => { throw new Error('econnrefused') }) as typeof fetch
     const response = await relayToLocalWeb(request, 3080, noop, failing)
     expect(response.status).toBe(502)
-    expect(response.body).toContain('econnrefused')
+    expect(Buffer.from(response.body ?? '', 'base64').toString('utf8')).toContain('econnrefused')
   })
 })

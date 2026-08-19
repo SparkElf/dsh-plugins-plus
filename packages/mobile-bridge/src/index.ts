@@ -1,45 +1,39 @@
 /**
- * Mobile bridge plugin: dials OUT to the public bridge server with a pairing
- * code, relays the paired mobile client's HTTP requests to the local Harness
- * web loopback, and serves the mobile overlay plus status under `/mobile/`.
- * Outbound-only keeps home networks free of inbound ports and NAT rules.
+ * Mobile bridge plugin: dials OUT to the public bridge server, serves the
+ * narrow-width overlay under `/mobile/`, and answers the paired phone's
+ * end-to-end encrypted relay frames against the local loopback web. The
+ * pairing secret and optional user passphrase never leave the desktop except
+ * inside the one-time QR payload; the server only forwards ciphertext.
  * @module @sparkelf/dsh-mobile-bridge
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { randomBytes } from 'node:crypto'
 import WebSocket from 'ws'
+import { base64ToBytes, bytesToBase64, decryptJSON, deriveKey, encryptJSON } from './crypto.ts'
 
-/** Plugin row config. */
+/** Plugin row config rendered by the stock settings page. */
 export interface MobileBridgeConfig {
   serverUrl: string
-  secret: string
   localPort: number
+  /** Optional user passphrase mixed into every session key. */
+  userKey: string
+  autoConnect: boolean
+  autoReconnect: boolean
 }
 
-/** Minimal web-server seam used by this plugin. */
-interface MobileWebServer {
-  register(route: {
-    kind: 'prefix'
-    path: string
-    handler: (req: unknown, res: { writeHead(code: number, headers: Record<string, string>): void; end(body: string): void }) => void
-  }): () => void
-}
-
-/** One relayed request from the bridge server. */
+/** One relayed request, decrypted from the phone. */
 export interface RelayRequest {
   id: string
-  kind: 'http'
+  kind?: 'http'
   method: string
   path: string
   headers: Record<string, string>
   body: string
-  /** 'text' carries utf-8; 'base64' carries binary-safe payloads. */
   bodyEncoding?: 'text' | 'base64'
 }
 
-const TEXTUAL = /^(text\/|application\/(json|.*\+json))/
-
-/** One outbound relay message (head, chunk, or end frame). */
+/** One outbound relay frame before encryption. */
 export interface RelayFrame {
   id: string
   status?: number
@@ -51,14 +45,14 @@ export interface RelayFrame {
   body?: string
 }
 
+const TEXTUAL = /^(text\/|application\/(json|.*\+json))/
+
 /**
- * Handle one relayed request against the local loopback web, binary-safe and
- * stream-aware: event-stream responses (the stock web's SSE mux) flow as
- * head/chunk/end frames so live updates reach the phone; everything else
- * returns one base64-safe frame.
- * @param request - relayed request.
+ * Handle one decrypted relayed request against the local loopback web,
+ * binary-safe and stream-aware.
+ * @param request - decrypted relay request.
  * @param localPort - local Harness web port.
- * @param send - outbound frame sink (the bridge socket).
+ * @param send - outbound plaintext frame sink (caller encrypts).
  * @param fetchImpl - fetch seam for tests.
  * @returns resolves when the local response completes.
  */
@@ -77,7 +71,7 @@ export async function relayToLocalWeb(
     })
     const contentType = response.headers.get('content-type') ?? ''
     if (contentType.includes('text/event-stream') && response.body) {
-      send({ id: request.id, status: response.status, headers: { 'content-type': contentType }, stream: true })
+      send({ id: request.id, stream: true, status: response.status, headers: { 'content-type': contentType } })
       const reader = response.body.getReader()
       for (;;) {
         const { done, value } = await reader.read()
@@ -88,18 +82,17 @@ export async function relayToLocalWeb(
       return { id: request.id, end: true }
     }
     const bytes = Buffer.from(await response.arrayBuffer())
-    const textual = TEXTUAL.test(contentType)
     const frame: RelayFrame = {
       id: request.id,
       status: response.status,
       headers: { 'content-type': contentType },
-      body: textual ? bytes.toString('utf8') : bytes.toString('base64'),
-      bodyEncoding: textual ? 'text' : 'base64',
+      body: bytes.toString('base64'),
+      bodyEncoding: 'base64',
     }
     send(frame)
     return frame
   } catch (error) {
-    const frame: RelayFrame = { id: request.id, status: 502, headers: {}, body: error instanceof Error ? error.message : String(error), bodyEncoding: 'text' }
+    const frame: RelayFrame = { id: request.id, status: 502, headers: {}, body: Buffer.from(error instanceof Error ? error.message : String(error)).toString('base64'), bodyEncoding: 'base64' }
     send(frame)
     return frame
   }
@@ -118,40 +111,68 @@ const MOBILE_CSS = `/* narrow-width overlay: fixes occlusion via semantic select
 }
 `
 
+interface MobileWebServer {
+  register(route: {
+    kind: 'prefix'
+    path: string
+    handler: (req: unknown, res: { writeHead(code: number, headers: Record<string, string>): void; end(body: string): void }) => void
+  }): () => void
+}
+
 /**
- * Register the `/mobile/` routes and the outbound bridge tunnel.
+ * Register the `/mobile/` overlay route and the outbound encrypted tunnel.
  * @param ctx - context carrying the web server seam.
- * @param config - server URL, bridge secret, and local web port.
+ * @param config - server URL, local port, passphrase, and reconnect policy.
  */
 export function apply(ctx: Context, config: MobileBridgeConfig): void {
-  const state = { code: '', socket: undefined as WebSocket | undefined, connected: false }
+  const state = {
+    socket: undefined as WebSocket | undefined,
+    connected: false,
+    codes: new Map<string, string>(),
+  }
 
   async function connect() {
-    if (!config.serverUrl) return
+    if (!config.serverUrl || !config.autoConnect) return
     try {
-      if (!state.code) {
-        const started = await fetch(`${config.serverUrl}/bridge/api/bridge/start`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ secret: config.secret }),
-        }).then(response => response.json()) as { code: string }
-        state.code = started.code
-        console.log('[mobile-bridge] pairing code:', state.code)
-      }
-      const wsUrl = config.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + state.code
+      const started = await fetch(`${config.serverUrl}/bridge/api/bridge/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }).then(response => response.json()) as { code: string }
+      const secret = randomBytes(16).toString('hex')
+      state.codes.set(started.code, secret)
+      const qrPayload = encodeURIComponent(JSON.stringify({
+        u: config.serverUrl, c: started.code, s: secret, k: config.userKey ?? '', b: started.code,
+      }))
+      console.log('[mobile-bridge] pairing code:', started.code)
+      console.log('[mobile-bridge] phone QR url:', `${config.serverUrl}/bridge/#${qrPayload}`)
+      const wsUrl = config.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
       const socket = new WebSocket(wsUrl)
       state.socket = socket
+      const key = await deriveKey(config.userKey ?? '', secret)
       socket.on('open', () => { state.connected = true })
       socket.on('message', raw => {
         void (async () => {
-          const request = JSON.parse(String(raw)) as RelayRequest
-          await relayToLocalWeb(request, config.localPort, frame => socket.send(JSON.stringify(frame)))
+          const wire = JSON.parse(String(raw)) as { id: string; blob?: string }
+          if (wire.blob === undefined) return
+          const request = await decryptJSON<RelayRequest>(key, wire.blob)
+          await relayToLocalWeb({ ...request, id: wire.id }, config.localPort, frame => {
+            void (async () => {
+              if (frame.end) { socket.send(JSON.stringify({ id: frame.id, end: true })); return }
+              if (frame.stream) { socket.send(JSON.stringify({ id: frame.id, stream: true, blob: await encryptJSON(key, { stream: true, status: frame.status, headers: frame.headers }) })); return }
+              if (frame.chunk !== undefined) { socket.send(JSON.stringify({ id: frame.id, chunk: await encryptJSON(key, { d: frame.chunk }) })); return }
+              socket.send(JSON.stringify({ id: frame.id, blob: await encryptJSON(key, { status: frame.status, headers: frame.headers, body: frame.body, bodyEncoding: 'base64' }) }))
+            })()
+          })
         })()
       })
-      socket.on('close', () => { state.connected = false; setTimeout(() => void connect(), 5000) })
+      socket.on('close', () => {
+        state.connected = false
+        if (config.autoReconnect) setTimeout(() => void connect(), 5000)
+      })
       socket.on('error', () => { socket.close() })
     } catch {
-      setTimeout(() => void connect(), 5000)
+      if (config.autoReconnect) setTimeout(() => void connect(), 5000)
     }
   }
 
@@ -169,3 +190,5 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     yield () => { state.socket?.close(); dispose() }
   }, 'dsh-mobile-bridge lifecycle')
 }
+
+export { base64ToBytes, bytesToBase64, decryptJSON, deriveKey, encryptJSON }
