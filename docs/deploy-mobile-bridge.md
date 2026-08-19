@@ -36,21 +36,16 @@ location /ws/ {
 
 ## Local Harness side
 
-1. Add the plugin package to the web profile and append its patch row with config:
+1. Install the complete Host and Client plugin into the Web profile:
 
-```yaml
-- insert:
-    - id: mobile-bridge
-      name: '@sparkelf/dsh-mobile-bridge'
-      config:
-        serverUrl: https://<host>
-        secret: <bridge secret>
-        localPort: 3085
+```sh
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.1.4
 ```
 
-2. Restart Harness; the plugin logs `pairing code: <6 hex>`.
-3. On the phone: open `https://<host>/bridge/`, request the email code, log in, paste the pairing code (or scan the desktop QR once that ships), and the stock web arrives through the tunnel; SSE streams and binary assets ride the base64-safe relay.
+2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and confirm that the status is Connected.
+3. Scan the displayed QR from the phone. An unused one-time QR renews before its five-minute ticket expires, while a successful scan stops renewal. The server cannot rotate a ticket without the private refresh token held by the desktop plugin.
+4. Disabling or removing the bundle removes the Host routes, outbound connection, narrow-screen style, and Settings entry together. There is no standalone HTML configuration panel.
 
-## Third-party login (later)
+## Authentication
 
-`createBridgeServer(store, { externalAuth: { wechat: verifier } })` adds providers; the verifier checks the provider payload and returns the stable external id; `POST /bridge/api/login/external {provider, payload}` mints tokens and creates users on first sight. Email login stays available.
+Email verification-code login is available when SMTP is configured. Setting `WECHAT_APP_ID` and `WECHAT_APP_SECRET` also enables WeChat URL Scheme login; external-provider verification creates or resumes the stable bridge identity while email login remains available.
