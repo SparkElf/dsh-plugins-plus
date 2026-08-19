@@ -124,10 +124,18 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
   if (fragment) {
     try {
       var pair = JSON.parse(decodeURIComponent(fragment))
-      localStorage.setItem('dshmb-pair', JSON.stringify(pair))
-      api('/api/login/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pair.b || pair.c }) })
-        .then(function () { history.replaceState(null, '', '/'); registerSw(pair) })
-        .catch(function (e) { var m = document.querySelector('main'); if (m) m.insertAdjacentHTML('beforeend', '<p class=err>' + e.message + '</p>') })
+      var proceed = function () {
+        localStorage.setItem('dshmb-pair', JSON.stringify(pair))
+        api('/api/login/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pair.b || pair.c }) })
+          .then(function () { history.replaceState(null, '', '/'); registerSw(pair) })
+          .catch(function (e) { var m = document.querySelector('main'); if (m) m.insertAdjacentHTML('beforeend', '<p class=err>' + e.message + '</p>') })
+      }
+      if (pair.k === undefined) {
+        var k = prompt('输入桌面端设置的加密口令')
+        if (k === null) return
+        pair.k = k
+      }
+      proceed()
       return
     } catch (e) { /* fall through to manual login */ }
   }

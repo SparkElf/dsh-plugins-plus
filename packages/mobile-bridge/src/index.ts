@@ -166,8 +166,10 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       }).then(response => response.json()) as { code: string }
       const secret = randomBytes(16).toString('hex')
       state.codes.set(started.code, secret)
+      // With a passphrase set, k stays out of the QR: the phone must type it,
+      // turning the scan into possession plus knowledge (two factors).
       const qrPayload = encodeURIComponent(JSON.stringify({
-        u: live.serverUrl, c: started.code, s: secret, k: live.userKey ?? '', b: started.code,
+        u: live.serverUrl, c: started.code, s: secret, ...(live.userKey ? {} : { k: '' }), b: started.code,
       }))
       const qrUrl = `${live.serverUrl}/bridge/#${qrPayload}`
       state.lastQrUrl = qrUrl

@@ -59,10 +59,18 @@ function cookieToken(req: IncomingMessage): string {
  * @param options - mailer and external auth provider verifiers.
  * @returns the node HTTP server (listen owned by the caller).
  */
-export function createBridgeServer(store: UserStore, options: BridgeServerOptions = {}) {
+/** Options for the bridge server. */
+export interface BridgeServerRuntimeOptions extends BridgeServerOptions {
+  /** Pairing login ticket lifetime; defaults to five minutes. */
+  ticketTtlMs?: number
+}
+
+export function createBridgeServer(store: UserStore, options: BridgeServerRuntimeOptions = {}) {
   const externalAuth = options.externalAuth ?? {}
   const mailer = options.mailer
+  const ticketTtlMs = options.ticketTtlMs ?? 5 * 60_000
   const bridges = new Map<string, WebSocket>()
+  const tickets = new Map<string, { createdAt: number; used: boolean }>()
 
   const http = createServer((req, res) => {
     void (async () => {
@@ -120,7 +128,11 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
         // is online; the phone gets a session without typing credentials.
         try {
           const { code } = JSON.parse(await readBody(req)) as { code: string }
-          if (!bridges.has(code)) throw new Error('unknown or offline pairing code')
+          const ticket = tickets.get(code)
+          if (ticket === undefined || !bridges.has(code)) throw new Error('unknown or offline pairing code')
+          if (ticket.used) throw new Error('pairing code already used')
+          if (Date.now() - ticket.createdAt > ticketTtlMs) throw new Error('pairing code expired')
+          ticket.used = true
           const token = store.loginExternal('bridge', code)
           store.bind(token, code)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`] })
@@ -145,6 +157,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
       if (req.method === 'POST' && url.pathname === '/bridge/api/bridge/start') {
         const code = randomBytes(3).toString('hex')
         bridges.set(code, null as unknown as WebSocket)
+        tickets.set(code, { createdAt: Date.now(), used: false })
         json(res, 200, { code })
         return
       }
