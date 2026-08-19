@@ -8,6 +8,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { randomBytes } from 'node:crypto'
 import WebSocket from 'ws'
 import { base64ToBytes, bytesToBase64, decryptJSON, deriveKey, encryptJSON } from './crypto.ts'
@@ -21,6 +23,18 @@ export interface MobileBridgeConfig {
   autoConnect: boolean
   autoReconnect: boolean
 }
+
+/** Settings namespace owning the mobile bridge section. */
+export const MOBILE_BRIDGE_SETTINGS_NAMESPACE = settingsNamespace('mobile-bridge')
+
+/** Schema for the settings section; secrets render masked. */
+export const Config: z<MobileBridgeConfig> = z.object({
+  serverUrl: z.string().default(''),
+  localPort: z.number().step(1).min(1).default(3080),
+  userKey: z.string().role('secret').default(''),
+  autoConnect: z.boolean().default(true),
+  autoReconnect: z.boolean().default(true),
+})
 
 /** One relayed request, decrypted from the phone. */
 export interface RelayRequest {
@@ -125,6 +139,11 @@ interface MobileWebServer {
  * @param config - server URL, local port, passphrase, and reconnect policy.
  */
 export function apply(ctx: Context, config: MobileBridgeConfig): void {
+  let current: () => MobileBridgeConfig = () => config
+  installSettingsSection(ctx, MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, config, {
+    setSource: source => { current = source },
+    onChange: () => {},
+  })
   const state = {
     socket: undefined as WebSocket | undefined,
     connected: false,
@@ -132,9 +151,10 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   }
 
   async function connect() {
-    if (!config.serverUrl || !config.autoConnect) return
+    const live = current()
+    if (!live.serverUrl || !live.autoConnect) return
     try {
-      const started = await fetch(`${config.serverUrl}/bridge/api/bridge/start`, {
+      const started = await fetch(`${live.serverUrl}/bridge/api/bridge/start`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: '{}',
@@ -142,21 +162,21 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       const secret = randomBytes(16).toString('hex')
       state.codes.set(started.code, secret)
       const qrPayload = encodeURIComponent(JSON.stringify({
-        u: config.serverUrl, c: started.code, s: secret, k: config.userKey ?? '', b: started.code,
+        u: live.serverUrl, c: started.code, s: secret, k: live.userKey ?? '', b: started.code,
       }))
       console.log('[mobile-bridge] pairing code:', started.code)
-      console.log('[mobile-bridge] phone QR url:', `${config.serverUrl}/bridge/#${qrPayload}`)
-      const wsUrl = config.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
+      console.log('[mobile-bridge] phone QR url:', `${live.serverUrl}/bridge/#${qrPayload}`)
+      const wsUrl = live.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
       const socket = new WebSocket(wsUrl)
       state.socket = socket
-      const key = await deriveKey(config.userKey ?? '', secret)
+      const key = await deriveKey(live.userKey ?? '', secret)
       socket.on('open', () => { state.connected = true })
       socket.on('message', raw => {
         void (async () => {
           const wire = JSON.parse(String(raw)) as { id: string; blob?: string }
           if (wire.blob === undefined) return
           const request = await decryptJSON<RelayRequest>(key, wire.blob)
-          await relayToLocalWeb({ ...request, id: wire.id }, config.localPort, frame => {
+          await relayToLocalWeb({ ...request, id: wire.id }, live.localPort, frame => {
             void (async () => {
               if (frame.end) { socket.send(JSON.stringify({ id: frame.id, end: true })); return }
               if (frame.stream) { socket.send(JSON.stringify({ id: frame.id, stream: true, blob: await encryptJSON(key, { stream: true, status: frame.status, headers: frame.headers }) })); return }
@@ -168,11 +188,11 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       })
       socket.on('close', () => {
         state.connected = false
-        if (config.autoReconnect) setTimeout(() => void connect(), 5000)
+        if (live.autoReconnect) setTimeout(() => void connect(), 5000)
       })
       socket.on('error', () => { socket.close() })
     } catch {
-      if (config.autoReconnect) setTimeout(() => void connect(), 5000)
+      if (live.autoReconnect) setTimeout(() => void connect(), 5000)
     }
   }
 
