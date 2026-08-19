@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import QRCode from 'qrcode/lib/browser.js'
+import { Button, Input, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from './contract.ts'
 import css from './MobileBridgeSection.module.css'
@@ -20,7 +21,9 @@ export interface MobileBridgeValues {
 /** Current Host connection and pairing projection. */
 export interface MobileBridgeStatus {
   connected: boolean
+  paired: boolean
   qrUrl: string
+  qrRefreshAt: number
 }
 
 /** Registration-side operations supplied by the Client plugin apply closure. */
@@ -35,6 +38,14 @@ export type MobileBridgeSectionProps =
   PropsRuntime<'settings.section'>
   & PropsLocale<'settingsMobileBridge'>
   & InjectFace<MobileBridgeSectionInjected>
+
+function SettingsLabel({ label, hint }: { label: string; hint: string }): ReactNode {
+  return (
+    <Tooltip label={hint} side="bottom" delayMs={300}>
+      <span className={css.label} tabIndex={0}>{label}</span>
+    </Tooltip>
+  )
+}
 
 const DEFAULTS: MobileBridgeValues = {
   serverUrl: '',
@@ -70,6 +81,24 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     })
     return () => { live = false }
   }, [loadStatus, loadValues, t])
+
+  useEffect(() => {
+    const refreshAt = status?.qrRefreshAt ?? 0
+    if (status?.paired === true || refreshAt <= 0) return
+    let live = true
+    const timer = setTimeout(() => {
+      void loadStatus().then(nextStatus => {
+        if (live) setStatus(nextStatus)
+      }).catch((caught: unknown) => {
+        console.error('[dsh-mobile-bridge] scheduled status refresh failed', caught)
+        if (live) setError(t('statusFailed'))
+      })
+    }, Math.max(0, refreshAt - Date.now() + 750))
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [loadStatus, status?.paired, status?.qrRefreshAt, t])
 
   useEffect(() => {
     const qrUrl = status?.qrUrl ?? ''
@@ -128,52 +157,55 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   }
 
   const statusLabel = status === null ? t('loading') : status.connected ? t('connected') : t('disconnected')
+  const statusState = refreshing || status === null ? 'ongoing' : status.connected ? 'done' : 'warning'
 
   return (
     <section className={css.section}>
       <header className={css.header}>
-        <h2 className={css.title}>{t('title')}</h2>
-        <p className={css.description}>{t('description')}</p>
+        <Tooltip label={t('description')} side="bottom" delayMs={300}>
+          <h2 className={css.title} tabIndex={0}>{t('title')}</h2>
+        </Tooltip>
+        <div className={css.toolbar}>
+          <span className={css.status} role="status"><StateDot state={statusState} />{statusLabel}</span>
+          <Button variant="outline" size="sm" disabled={refreshing} onClick={() => { void refreshStatus() }}>{refreshing ? t('refreshing') : t('refresh')}</Button>
+        </div>
       </header>
       <form className={css.form} onSubmit={event => { void save(event) }}>
-        <div className={css.row}>
-          <span className={css.label}>{t('status')}</span>
-          <span className={css.statusControls}>
-            <span className={status?.connected === true ? `${css.badge} ${css.badgeConnected}` : css.badge} role="status">{statusLabel}</span>
-            <button className={css.refresh} type="button" disabled={refreshing} onClick={() => { void refreshStatus() }}>{refreshing ? t('refreshing') : t('refresh')}</button>
-          </span>
+        <div className={css.fields}>
+          <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-server-url">
+            <SettingsLabel label={t('serverUrl')} hint={t('serverUrlHint')} />
+            <Input id="dshmb-server-url" className={css.control} type="url" value={values.serverUrl} disabled={!loaded || saving} onChange={event => set('serverUrl', event.currentTarget.value)} />
+          </label>
+          <label className={css.field} htmlFor="dshmb-local-port">
+            <SettingsLabel label={t('localPort')} hint={t('localPortHint')} />
+            <Input id="dshmb-local-port" className={css.control} type="number" min={1} step={1} value={values.localPort} disabled={!loaded || saving} onChange={event => set('localPort', event.currentTarget.valueAsNumber)} />
+          </label>
+          <label className={css.field} htmlFor="dshmb-user-key">
+            <SettingsLabel label={t('userKey')} hint={t('userKeyHint')} />
+            <Input id="dshmb-user-key" className={css.control} type="password" value={values.userKey} disabled={!loaded || saving} onChange={event => set('userKey', event.currentTarget.value)} />
+          </label>
+          <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-owner-email">
+            <SettingsLabel label={t('ownerEmail')} hint={t('ownerEmailHint')} />
+            <Input id="dshmb-owner-email" className={css.control} type="email" value={values.ownerEmail} disabled={!loaded || saving} onChange={event => set('ownerEmail', event.currentTarget.value)} />
+          </label>
         </div>
-        <label className={css.row} htmlFor="dshmb-server-url">
-          <span className={css.fieldCopy}><span className={css.label}>{t('serverUrl')}</span><span className={css.hint}>{t('serverUrlHint')}</span></span>
-          <input id="dshmb-server-url" className={css.input} type="url" value={values.serverUrl} disabled={!loaded || saving} onChange={event => set('serverUrl', event.currentTarget.value)} />
-        </label>
-        <label className={css.row} htmlFor="dshmb-local-port">
-          <span className={css.fieldCopy}><span className={css.label}>{t('localPort')}</span><span className={css.hint}>{t('localPortHint')}</span></span>
-          <input id="dshmb-local-port" className={css.input} type="number" min={1} step={1} value={values.localPort} disabled={!loaded || saving} onChange={event => set('localPort', event.currentTarget.valueAsNumber)} />
-        </label>
-        <label className={css.row} htmlFor="dshmb-user-key">
-          <span className={css.fieldCopy}><span className={css.label}>{t('userKey')}</span><span className={css.hint}>{t('userKeyHint')}</span></span>
-          <input id="dshmb-user-key" className={css.input} type="password" value={values.userKey} disabled={!loaded || saving} onChange={event => set('userKey', event.currentTarget.value)} />
-        </label>
-        <label className={css.row} htmlFor="dshmb-owner-email">
-          <span className={css.fieldCopy}><span className={css.label}>{t('ownerEmail')}</span><span className={css.hint}>{t('ownerEmailHint')}</span></span>
-          <input id="dshmb-owner-email" className={css.input} type="email" value={values.ownerEmail} disabled={!loaded || saving} onChange={event => set('ownerEmail', event.currentTarget.value)} />
-        </label>
-        <label className={css.row} htmlFor="dshmb-email-two-factor">
-          <span className={css.label}>{t('twoFactor')}</span>
-          <input id="dshmb-email-two-factor" className={css.check} type="checkbox" checked={values.emailTwoFactor} disabled={!loaded || saving} onChange={event => set('emailTwoFactor', event.currentTarget.checked)} />
-        </label>
-        <label className={css.row} htmlFor="dshmb-auto-connect">
-          <span className={css.label}>{t('autoConnect')}</span>
-          <input id="dshmb-auto-connect" className={css.check} type="checkbox" checked={values.autoConnect} disabled={!loaded || saving} onChange={event => set('autoConnect', event.currentTarget.checked)} />
-        </label>
-        <div className={css.row}>
-          <span className={css.fieldCopy}><span className={css.label}>{t('pair')}</span><span className={css.hint}>{t('pairHint')}</span></span>
-          {qrSource === null ? <span className={css.qrEmpty}>{t('qrUnavailable')}</span> : <img className={css.qr} src={qrSource} alt={t('qrAlt')} width={180} height={180} />}
+        <div className={css.toggles}>
+          <label className={css.toggle} htmlFor="dshmb-email-two-factor">
+            <input id="dshmb-email-two-factor" className={css.checkbox} type="checkbox" checked={values.emailTwoFactor} disabled={!loaded || saving} onChange={event => set('emailTwoFactor', event.currentTarget.checked)} />
+            <span>{t('twoFactor')}</span>
+          </label>
+          <label className={css.toggle} htmlFor="dshmb-auto-connect">
+            <input id="dshmb-auto-connect" className={css.checkbox} type="checkbox" checked={values.autoConnect} disabled={!loaded || saving} onChange={event => set('autoConnect', event.currentTarget.checked)} />
+            <span>{t('autoConnect')}</span>
+          </label>
+        </div>
+        <div className={css.pairing}>
+          <SettingsLabel label={t('pair')} hint={t('pairHint')} />
+          {qrSource === null ? <span className={css.qrEmpty}>{status?.paired === true ? t('paired') : t('qrUnavailable')}</span> : <img className={css.qr} src={qrSource} alt={t('qrAlt')} width={180} height={180} />}
         </div>
         <div className={css.actions}>
-          <button className={css.save} type="submit" disabled={!loaded || saving}>{saving ? t('saving') : t('save')}</button>
           {message !== null ? <p className={css.message} role="status">{message}</p> : null}
+          <Button variant="primary" type="submit" disabled={!loaded || saving}>{saving ? t('saving') : t('save')}</Button>
         </div>
       </form>
       {error !== null ? <p className={css.error} role="alert">{error}</p> : null}

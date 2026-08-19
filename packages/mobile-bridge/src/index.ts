@@ -129,9 +129,18 @@ const MOBILE_CSS = `/* narrow-width overlay: fixes occlusion via semantic select
   main{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
   [class*="floating"],[class*="fab"],button[class*="compose"]{bottom:calc(16px + env(safe-area-inset-bottom)) !important;z-index:60}
   [class*="toast"],[class*="popup"],[role="dialog"]{max-width:94vw;left:50%;transform:translateX(-50%)}
-  [class*="tooltip"]{display:none}
 }
 `
+
+interface PairingTicket {
+  code: string
+  refreshToken: string
+  expiresAt: number
+  secret: string
+}
+
+const PAIRING_ROTATE_LEAD_MS = 60_000
+const PAIRING_ROTATE_RETRY_MS = 5_000
 
 interface MobileWebServer {
   register(route: {
@@ -153,10 +162,14 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     socket: undefined as WebSocket | undefined,
     connected: false,
     restartRequested: false,
+    paired: false,
+    pairing: undefined as PairingTicket | undefined,
     lastQrUrl: '',
+    qrRefreshAt: 0,
   }
   let disposed = false
   let retryTimer: ReturnType<typeof setTimeout> | undefined
+  let pairingTimer: ReturnType<typeof setTimeout> | undefined
 
   const scheduleConnect = (delayMs: number): void => {
     if (disposed) return
@@ -167,32 +180,106 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     }, delayMs)
   }
 
+  const clearPairingTimer = (): void => {
+    if (pairingTimer === undefined) return
+    clearTimeout(pairingTimer)
+    pairingTimer = undefined
+  }
+
+  const schedulePairingRotation = (delayMs: number): void => {
+    if (disposed) return
+    clearPairingTimer()
+    state.qrRefreshAt = Date.now() + delayMs
+    pairingTimer = setTimeout(() => {
+      pairingTimer = undefined
+      void rotatePairing()
+    }, delayMs)
+  }
+
+  const pairingUrl = (serverUrl: string, code: string, secret: string, userKey: string): string => {
+    const payload = encodeURIComponent(JSON.stringify({ u: serverUrl, c: code, s: secret, ...(userKey ? {} : { k: '' }), b: code }))
+    return `${serverUrl}/bridge/#${payload}`
+  }
+
+  async function rotatePairing(): Promise<void> {
+    const pairing = state.pairing
+    const socket = state.socket
+    if (disposed || pairing === undefined || socket === undefined || socket.readyState !== WebSocket.OPEN) return
+    state.qrRefreshAt = Date.now() + PAIRING_ROTATE_RETRY_MS
+    try {
+      const live = current()
+      const response = await fetch(`${live.serverUrl}/bridge/api/bridge/rotate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: pairing.code, refreshToken: pairing.refreshToken }),
+      })
+      if (response.status === 409) {
+        const conflict = await response.json() as { paired?: boolean; error?: string }
+        if (conflict.paired !== true) throw new Error(`pairing rotation conflict: ${conflict.error ?? 'unknown conflict'}`)
+        if (state.pairing !== pairing) return
+        state.paired = true
+        state.pairing = undefined
+        state.lastQrUrl = ''
+        state.qrRefreshAt = 0
+        return
+      }
+      if (!response.ok) throw new Error(`pairing rotation failed with ${response.status}: ${await response.text()}`)
+      const issued = await response.json() as Omit<PairingTicket, 'secret'>
+      if (state.pairing !== pairing) return
+      const next = { ...issued, secret: pairing.secret }
+      state.pairing = next
+      state.lastQrUrl = pairingUrl(live.serverUrl, next.code, next.secret, live.userKey)
+      schedulePairingRotation(Math.max(0, next.expiresAt - Date.now() - PAIRING_ROTATE_LEAD_MS))
+    } catch (error) {
+      console.error('[dsh-mobile-bridge] pairing rotation failed', error)
+      if (state.pairing !== pairing) return
+      if (Date.now() >= pairing.expiresAt) {
+        state.restartRequested = true
+        socket.close()
+        return
+      }
+      schedulePairingRotation(PAIRING_ROTATE_RETRY_MS)
+    }
+  }
+
   async function connect(): Promise<void> {
     if (disposed) return
     const live = current()
     if (!live.serverUrl || !live.autoConnect) return
     try {
-      const started = await fetch(`${live.serverUrl}/bridge/api/bridge/start`, {
+      const response = await fetch(`${live.serverUrl}/bridge/api/bridge/start`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ ...live.emailTwoFactor && live.ownerEmail ? { email2fa: live.ownerEmail } : {} }),
-      }).then(response => response.json()) as { code: string }
+      })
+      if (!response.ok) throw new Error(`pairing start failed with ${response.status}: ${await response.text()}`)
+      const started = await response.json() as Omit<PairingTicket, 'secret'>
       const secret = randomBytes(16).toString('hex')
       // With a passphrase set, k stays out of the QR: the phone must type it,
       // turning the scan into possession plus knowledge (two factors).
-      const qrPayload = encodeURIComponent(JSON.stringify({
-        u: live.serverUrl, c: started.code, s: secret, ...(live.userKey ? {} : { k: '' }), b: started.code,
-      }))
-      const qrUrl = `${live.serverUrl}/bridge/#${qrPayload}`
-      state.lastQrUrl = qrUrl
+      const pairing = { ...started, secret }
+      state.pairing = pairing
+      state.paired = false
+      state.lastQrUrl = pairingUrl(live.serverUrl, pairing.code, secret, live.userKey)
+      const key = await deriveKey(live.userKey, secret)
       const wsUrl = live.serverUrl.replace(/^http/, 'ws') + '/ws/bridge?code=' + started.code
       const socket = new WebSocket(wsUrl)
       state.socket = socket
-      const key = await deriveKey(live.userKey ?? '', secret)
-      socket.on('open', () => { state.connected = true })
+      socket.on('open', () => {
+        state.connected = true
+        schedulePairingRotation(Math.max(0, pairing.expiresAt - Date.now() - PAIRING_ROTATE_LEAD_MS))
+      })
       socket.on('message', raw => {
         void (async () => {
-          const wire = JSON.parse(String(raw)) as { id: string; blob?: string }
+          const wire = JSON.parse(String(raw)) as { id: string; blob?: string; control?: 'paired' }
+          if (wire.control === 'paired') {
+            state.paired = true
+            state.pairing = undefined
+            state.lastQrUrl = ''
+            state.qrRefreshAt = 0
+            clearPairingTimer()
+            return
+          }
           if (wire.blob === undefined) return
           const request = await decryptJSON<RelayRequest>(key, wire.blob)
           await relayToLocalWeb({ ...request, id: wire.id }, live.localPort, frame => {
@@ -206,8 +293,15 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         })().catch(error => { console.error('[dsh-mobile-bridge] relay request failed', error) })
       })
       socket.on('close', () => {
-        if (state.socket === socket) state.socket = undefined
-        state.connected = false
+        if (state.socket === socket) {
+          state.socket = undefined
+          state.connected = false
+          state.paired = false
+          state.pairing = undefined
+          state.lastQrUrl = ''
+          state.qrRefreshAt = 0
+          clearPairingTimer()
+        }
         const restartNow = state.restartRequested
         state.restartRequested = false
         if (restartNow || current().autoReconnect) scheduleConnect(restartNow ? 0 : 5000)
@@ -218,6 +312,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       })
     } catch (error) {
       console.error('[dsh-mobile-bridge] connection failed', error)
+      clearPairingTimer()
+      state.paired = false
+      state.pairing = undefined
+      state.lastQrUrl = ''
+      state.qrRefreshAt = 0
+      state.socket?.close()
       if (current().autoReconnect) scheduleConnect(5000)
     }
   }
@@ -240,7 +340,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         const path = String((req as { url?: string }).url ?? '/mobile/')
         if (path.startsWith('/mobile/bridge/status')) {
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ connected: state.connected, serverUrl: current().serverUrl, qrUrl: state.lastQrUrl }))
+          res.end(JSON.stringify({ connected: state.connected, paired: state.paired, serverUrl: current().serverUrl, qrUrl: state.lastQrUrl, qrRefreshAt: state.qrRefreshAt }))
           return
         }
         if (path.startsWith('/mobile/bridge/style.css')) {
@@ -256,6 +356,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     yield () => {
       disposed = true
       if (retryTimer !== undefined) clearTimeout(retryTimer)
+      clearPairingTimer()
       state.socket?.close()
       dispose()
     }

@@ -8,7 +8,7 @@
  * @module @sparkelf/dsh-mobile-bridge-server/server
  */
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { WebSocket, WebSocketServer } from 'ws'
 import { SW_SOURCE, CLIENT_SOURCE } from './phone.ts'
@@ -50,6 +50,12 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8')
 }
 
+function sameToken(expected: string, actual: string): boolean {
+  const left = Buffer.from(expected)
+  const right = Buffer.from(actual)
+  return left.length === right.length && timingSafeEqual(left, right)
+}
+
 function cookieToken(req: IncomingMessage): string {
   const header = req.headers.cookie ?? ''
   const match = header.match(new RegExp('(?:^|; )' + COOKIE + '=([^;]+)'))
@@ -73,8 +79,22 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
   const externalAuth = options.externalAuth ?? {}
   const mailer = options.mailer
   const ticketTtlMs = options.ticketTtlMs ?? 5 * 60_000
-  const bridges = new Map<string, WebSocket>()
-  const tickets = new Map<string, { createdAt: number; used: boolean; email2fa?: string }>()
+  const bridges = new Map<string, WebSocket | null>()
+  const bridgeCodes = new Map<WebSocket, string>()
+  const tickets = new Map<string, { createdAt: number; used: boolean; refreshToken: string; email2fa?: string }>()
+
+  const issueTicket = (email2fa?: string) => {
+    const code = randomBytes(3).toString('hex')
+    const refreshToken = randomBytes(24).toString('hex')
+    const createdAt = Date.now()
+    tickets.set(code, { createdAt, used: false, refreshToken, ...email2fa ? { email2fa } : {} })
+    return { code, refreshToken, expiresAt: createdAt + ticketTtlMs }
+  }
+
+  const notifyPaired = (code: string): void => {
+    const socket = bridges.get(code)
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ control: 'paired' }))
+  }
 
   const http = createServer((req, res) => {
     void (async () => {
@@ -143,6 +163,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             return
           }
           ticket.used = true
+          notifyPaired(code)
           const token = store.loginExternal('bridge', code)
           store.bind(token, code)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`] })
@@ -159,6 +180,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           if (Date.now() - ticket.createdAt > ticketTtlMs) throw new Error('pairing code expired')
           store.consumeEmailCode(ticket.email2fa, emailCode)
           ticket.used = true
+          notifyPaired(code)
           const token = store.loginExternal('bridge', code)
           store.bind(token, code)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [`${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/`] })
@@ -209,10 +231,37 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       }
       if (req.method === 'POST' && url.pathname === '/bridge/api/bridge/start') {
         const { email2fa } = JSON.parse(await readBody(req) || '{}') as { email2fa?: string }
-        const code = randomBytes(3).toString('hex')
-        bridges.set(code, null as unknown as WebSocket)
-        tickets.set(code, { createdAt: Date.now(), used: false, ...typeof email2fa === 'string' && email2fa.length > 0 ? { email2fa } : {} })
-        json(res, 200, { code })
+        const issued = issueTicket(typeof email2fa === 'string' && email2fa.length > 0 ? email2fa : undefined)
+        bridges.set(issued.code, null)
+        json(res, 200, issued)
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/bridge/api/bridge/rotate') {
+        const { code, refreshToken } = JSON.parse(await readBody(req) || '{}') as { code?: string; refreshToken?: string }
+        if (typeof code !== 'string' || typeof refreshToken !== 'string') {
+          json(res, 401, { error: 'invalid pairing refresh token' })
+          return
+        }
+        const ticket = tickets.get(code)
+        if (ticket === undefined || !sameToken(ticket.refreshToken, refreshToken)) {
+          json(res, 401, { error: 'invalid pairing refresh token' })
+          return
+        }
+        if (ticket.used) {
+          json(res, 409, { paired: true })
+          return
+        }
+        const socket = bridges.get(code)
+        if (socket == null || socket.readyState !== WebSocket.OPEN) {
+          json(res, 409, { error: 'bridge is offline' })
+          return
+        }
+        const issued = issueTicket(ticket.email2fa)
+        bridges.delete(code)
+        tickets.delete(code)
+        bridges.set(issued.code, socket)
+        bridgeCodes.set(socket, issued.code)
+        json(res, 200, issued)
         return
       }
       json(res, 404, { error: 'not found' })
@@ -227,7 +276,15 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       if (!bridges.has(code)) { socket.destroy(); return }
       wss.handleUpgrade(req, socket, head, ws => {
         bridges.set(code, ws)
-        ws.on('close', () => { if (bridges.get(code) === ws) bridges.delete(code) })
+        bridgeCodes.set(ws, code)
+        ws.on('close', () => {
+          const activeCode = bridgeCodes.get(ws)
+          if (activeCode !== undefined && bridges.get(activeCode) === ws) {
+            bridges.delete(activeCode)
+            tickets.delete(activeCode)
+          }
+          bridgeCodes.delete(ws)
+        })
       })
       return
     }
