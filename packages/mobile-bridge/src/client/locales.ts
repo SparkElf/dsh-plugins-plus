@@ -5,6 +5,8 @@ export const zh = {
   title: '移动连接',
   description: '配置桌面端到移动桥接服务器的加密连接。',
   status: '连接状态',
+  refresh: '刷新状态',
+  refreshing: '正在刷新',
   loading: '正在读取',
   connected: '已连接',
   disconnected: '未连接',
@@ -28,6 +30,7 @@ export const zh = {
   loadFailed: '读取移动连接配置失败。',
   saveFailed: '保存移动连接配置失败。',
   qrFailed: '生成配对二维码失败。',
+  statusFailed: '读取移动连接状态失败。',
 } as const
 
 /** Keys of the section dictionary. */
@@ -38,6 +41,8 @@ export const en: Record<SettingsMobileBridgeKey, string> = {
   title: 'Mobile Bridge',
   description: 'Configure the encrypted desktop connection to the mobile bridge server.',
   status: 'Connection',
+  refresh: 'Refresh status',
+  refreshing: 'Refreshing',
   loading: 'Loading',
   connected: 'Connected',
   disconnected: 'Not connected',
@@ -61,4 +66,5 @@ export const en: Record<SettingsMobileBridgeKey, string> = {
   loadFailed: 'Could not load the Mobile Bridge configuration.',
   saveFailed: 'Could not save the Mobile Bridge configuration.',
   qrFailed: 'Could not generate the pairing QR code.',
+  statusFailed: 'Could not load the Mobile Bridge status.',
 }
