@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import QRCode from 'qrcode/lib/browser.js'
-import { Button, Input, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconStopFill16, Input, Modal, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from './contract.ts'
 import css from './MobileBridgeSection.module.css'
@@ -18,13 +18,24 @@ export interface MobileBridgeValues {
   autoConnect: boolean
 }
 
-/** Current Host connection and pairing projection. */
+/** One phone device projected by the Host. */
+export interface MobileBridgeDevice {
+  id: string
+  bridgeId: string
+  name: string
+  ip: string
+  pairedAt: number
+  lastSeenAt: number
+  online: boolean
+}
+
+/** Current Host connection, pairing ticket, and device projection. */
 export interface MobileBridgeStatus {
   connected: boolean
-  paired: boolean
   qrUrl: string
   pairingCode: string
   qrRefreshAt: number
+  devices: MobileBridgeDevice[]
 }
 
 /** Registration-side operations supplied by the Client plugin apply closure. */
@@ -32,6 +43,8 @@ export interface MobileBridgeSectionInjected {
   loadValues(): Promise<MobileBridgeValues>
   saveValues(values: MobileBridgeValues): Promise<void>
   loadStatus(): Promise<MobileBridgeStatus>
+  subscribeStatus(listener: (status: MobileBridgeStatus) => void): () => void
+  disconnectDevice(deviceId: string): Promise<MobileBridgeStatus>
 }
 
 /** Full settings component props derived from the public Slot shares. */
@@ -78,7 +91,7 @@ const DEFAULTS: MobileBridgeValues = {
 
 /** Render and operate the Mobile Bridge settings page. */
 export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode {
-  const { loadStatus, loadValues, saveValues, t } = props
+  const { disconnectDevice, loadStatus, loadValues, saveValues, subscribeStatus, t } = props
   const [values, setValues] = useState(DEFAULTS)
   const [status, setStatus] = useState<MobileBridgeStatus | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -87,6 +100,8 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [qrSource, setQrSource] = useState<string | null>(null)
+  const [disconnectTarget, setDisconnectTarget] = useState<MobileBridgeDevice | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
   const saveRefresh = useRef<AbortController | null>(null)
 
   useEffect(() => () => {
@@ -110,22 +125,12 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   }, [loadStatus, loadValues, t])
 
   useEffect(() => {
-    const refreshAt = status?.qrRefreshAt ?? 0
-    if (status?.paired === true || refreshAt <= 0) return
-    let live = true
-    const timer = setTimeout(() => {
-      void loadStatus().then(nextStatus => {
-        if (live) setStatus(nextStatus)
-      }).catch((caught: unknown) => {
-        console.error('[dsh-mobile-bridge] scheduled status refresh failed', caught)
-        if (live) setError(t('statusFailed'))
-      })
-    }, Math.max(0, refreshAt - Date.now() + 750))
-    return () => {
-      live = false
-      clearTimeout(timer)
-    }
-  }, [loadStatus, status?.paired, status?.qrRefreshAt, t])
+    if (!loaded) return
+    return subscribeStatus(nextStatus => {
+      setStatus(nextStatus)
+      setError(null)
+    })
+  }, [loaded, subscribeStatus])
 
   useEffect(() => {
     const qrUrl = status?.qrUrl ?? ''
@@ -192,7 +197,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     try {
       await saveValues(values)
       persisted = true
-      if (expectQr) setStatus(current => current === null ? current : { ...current, connected: false, paired: false, qrUrl: '', pairingCode: '', qrRefreshAt: 0 })
+      if (expectQr) setStatus(current => current === null ? current : { ...current, connected: false, qrUrl: '', pairingCode: '', qrRefreshAt: 0 })
       const ready = await confirmFreshStatus(previousQrUrl, expectQr, controller.signal)
       if (controller.signal.aborted) return
       if (!ready) {
@@ -211,6 +216,23 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     }
   }
 
+  const confirmDisconnect = async (): Promise<void> => {
+    if (disconnectTarget === null) return
+    setDisconnecting(true)
+    setMessage(null)
+    setError(null)
+    try {
+      setStatus(await disconnectDevice(disconnectTarget.id))
+      setDisconnectTarget(null)
+      setMessage(t('deviceDisconnected'))
+    } catch (caught) {
+      console.error('[dsh-mobile-bridge] device disconnect failed', caught)
+      setError(t('deviceDisconnectFailed'))
+    } finally {
+      setDisconnecting(false)
+    }
+  }
+
   const statusLabel = status === null ? t('loading') : status.connected ? t('connected') : t('disconnected')
   const statusState = refreshing || status === null ? 'ongoing' : status.connected ? 'done' : 'warning'
 
@@ -225,6 +247,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
           <Button variant="outline" size="sm" disabled={refreshing} onClick={() => { void refreshStatus() }}>{refreshing ? t('refreshing') : t('refresh')}</Button>
         </div>
       </header>
+
       <form className={css.form} onSubmit={event => { void save(event) }}>
         <div className={css.fields}>
           <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-server-url">
@@ -254,28 +277,67 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
             <span>{t('autoConnect')}</span>
           </label>
         </div>
-        <div className={css.pairing}>
-          <SettingsLabel label={t('pair')} hint={t('pairHint')} />
-          {qrSource === null
-            ? <span className={css.qrEmpty}>{status?.paired === true ? t('paired') : t('qrUnavailable')}</span>
-            : (
-                <div className={css.pairingDisplay}>
-                  <img className={css.qr} src={qrSource} alt={t('qrAlt')} width={180} height={180} />
-                  <div className={css.pairingCodeBlock}>
-                    <span className={css.label}>{t('pairingCode')}</span>
-                    <output className={css.pairingCode} aria-label={t('pairingCode')}>
-                      {status?.pairingCode.toUpperCase().split('').map((character, index) => <span key={index}>{character}</span>)}
-                    </output>
-                  </div>
-                </div>
-              )}
-        </div>
         <div className={css.actions}>
           {message !== null ? <p className={css.message} role="status">{message}</p> : null}
           <Button variant="primary" type="submit" disabled={!loaded || saving}>{saving ? t('saving') : t('save')}</Button>
         </div>
       </form>
+
+      <div className={css.pairing}>
+        <SettingsLabel label={t('pair')} hint={t('pairHint')} />
+        {qrSource === null
+          ? <span className={css.qrEmpty}>{t('qrUnavailable')}</span>
+          : (
+              <div className={css.pairingDisplay}>
+                <img className={css.qr} src={qrSource} alt={t('qrAlt')} width={180} height={180} />
+                <div className={css.pairingCodeBlock}>
+                  <span className={css.label}>{t('pairingCode')}</span>
+                  <output className={css.pairingCode} aria-label={t('pairingCode')}>
+                    {status?.pairingCode.toUpperCase().split('').map((character, index) => <span key={index}>{character}</span>)}
+                  </output>
+                </div>
+              </div>
+            )}
+      </div>
+
+      <div className={css.devices}>
+        <div className={css.devicesHeader}>
+          <SettingsLabel label={t('devices')} hint={t('devicesHint')} />
+          <span className={css.deviceCount}>{status?.devices.length ?? 0}</span>
+        </div>
+        {status !== null && status.devices.length > 0
+          ? (
+              <ul className={css.deviceList}>
+                {status.devices.map(device => (
+                  <li className={css.deviceRow} key={device.id}>
+                    <span className={css.deviceState}><StateDot state={device.online ? 'done' : 'warning'} />{device.online ? t('online') : t('offline')}</span>
+                    <strong className={css.deviceName}>{device.name}</strong>
+                    <span className={css.deviceMeta}>IP {device.ip}</span>
+                    <span className={css.deviceTimes}><span>{t('pairedAt')} {new Date(device.pairedAt).toLocaleString()}</span><span>{t('lastSeen')} {new Date(device.lastSeenAt).toLocaleString()}</span></span>
+                    <Button variant="outline" size="sm" icon={<IconStopFill16 size={14} />} className={css.disconnectButton} onClick={() => { setDisconnectTarget(device) }}>
+                      {t('disconnect')}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )
+          : <p className={css.deviceEmpty}>{t('noDevices')}</p>}
+      </div>
+
       {error !== null ? <p className={css.error} role="alert">{error}</p> : null}
+      <Modal
+        open={disconnectTarget !== null}
+        onClose={() => { if (!disconnecting) setDisconnectTarget(null) }}
+        title={t('disconnectTitle')}
+        footer={(
+          <>
+            <Button variant="outline" disabled={disconnecting} onClick={() => { setDisconnectTarget(null) }}>{t('cancel')}</Button>
+            <Button variant="primary" disabled={disconnecting} onClick={() => { void confirmDisconnect() }}>{disconnecting ? t('disconnecting') : t('confirmDisconnect')}</Button>
+          </>
+        )}
+      >
+        <p className={css.disconnectDescription}>{t('disconnectDescription')}</p>
+      </Modal>
     </section>
   )
 }

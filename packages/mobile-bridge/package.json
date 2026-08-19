@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-mobile-bridge",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "DeepSeek Harness plugin: an outbound E2EE tunnel, mobile presentation, and first-class Mobile Bridge settings section.",
   "type": "module",
   "main": "./lib/index.js",

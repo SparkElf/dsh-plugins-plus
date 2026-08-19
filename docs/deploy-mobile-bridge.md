@@ -4,9 +4,16 @@ Two halves: the public bridge server (this repo, `@sparkelf/dsh-mobile-bridge-se
 
 ## Server
 
-1. Provision a Linux box with Node 22+ and a TLS-terminated public hostname. When the host already runs another app (e.g. sub2api) behind nginx, split by path: `/bridge/` and `/ws/` go to the bridge port, everything else keeps the existing proxy:
+1. Provision a Linux box with Node 22+ and a TLS-terminated public hostname. When the host already runs another app (e.g. sub2api) behind nginx, split by path: `/bridge/`, `/ws/`, and the exact service-worker path `/sw.js` go to the bridge port, while everything else keeps the existing proxy:
 
 ```nginx
+location = /sw.js {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
 location /bridge/ {
     proxy_pass http://127.0.0.1:8787;
     proxy_set_header Host $host;
@@ -19,6 +26,10 @@ location /ws/ {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
 }
@@ -32,18 +43,18 @@ location /ws/ {
    - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` — email verification delivery (QQ/163/Gmail SMTP all work; absent disables email login).
    - `WECHAT_APP_ID`, `WECHAT_APP_SECRET` — optional WeChat QR login.
 4. systemd unit with `EnvironmentFile` and `ExecStart=/usr/bin/node /opt/dsh-mobile-bridge/bridge-server.mjs`, `Restart=on-failure`; enable and start.
-5. Verify: `https://<host>/bridge/` returns the landing page; `POST /bridge/api/email/code` returns `{"sent":true}` and the inbox receives a six-digit code; the co-hosted app behind `/` is unaffected.
+5. Verify the mobile login in a browser: `/sw.js` must return `Content-Type: text/javascript` plus `Service-Worker-Allowed: /`; scan a live desktop QR and confirm the mobile Harness renders. The co-hosted app behind `/` remains unaffected before service-worker registration.
 
 ## Local Harness side
 
 1. Install the complete Host and Client plugin into the Web profile:
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.1.5
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.0
 ```
 
 2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and wait for the new six-character pairing code and QR to appear with Connected status.
-3. Scan the displayed QR from the phone. If a ticket rotates during that scan, the phone keeps the E2EE secret and shows a recovery form where the current six-character desktop code can be entered. An unused one-time QR renews before its five-minute ticket expires, while a successful scan stops renewal. The server cannot rotate a ticket without the private refresh token held by the desktop plugin.
+3. Scan the displayed QR from each phone. The branded phone login persists language and theme choices, and establishes Service Worker control before consuming the ticket. The desktop keeps one unconsumed five-minute ticket visible: expiry or a successful pairing replaces only that ticket, while existing devices retain their stable bridge and E2EE secret. Settings lists each device and IP; taking one device offline revokes its sessions immediately without affecting other devices. The server cannot rotate a ticket or manage devices without the private desktop credential.
 4. Disabling or removing the bundle removes the Host routes, outbound connection, narrow-screen style, and Settings entry together. There is no standalone HTML configuration panel.
 
 ## Authentication

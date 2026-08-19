@@ -1,8 +1,6 @@
 /**
- * Zero-dependency user store: identities are email addresses or external
- * provider ids (WeChat), never passwords; HMAC session tokens; user-to-bridge
- * bindings; and short-lived email verification codes. Persisted as one JSON
- * document with atomic replacement.
+ * File-backed identities, stable desktop bridges, mobile devices, session
+ * tokens, and short-lived email verification codes.
  * @module @sparkelf/dsh-mobile-bridge-server/store
  */
 
@@ -10,41 +8,80 @@ import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** One registered user record, keyed by provider plus external id. */
+/** One registered login identity. */
 export interface UserRecord {
   key: string
   provider: string
   externalId: string
-  bridge: string | null
 }
 
-/** One pending email verification code. */
+/** One desktop installation authorized to reconnect under a stable id. */
+export interface BridgeRecord {
+  id: string
+  tokenHash: string
+  createdAt: number
+}
+
+/** One paired phone browser. Online state is projected by the relay runtime. */
+export interface DeviceRecord {
+  id: string
+  bridgeId: string
+  name: string
+  ip: string
+  pairedAt: number
+  lastSeenAt: number
+}
+
+interface TokenRecord {
+  userKey: string
+  deviceId: string | null
+}
+
 interface CodeRecord {
   code: string
   expiresAt: number
 }
 
-/** Persisted store document. */
 interface StoreDocument {
+  version: 2
   users: Record<string, UserRecord>
-  tokens: Record<string, string>
+  tokens: Record<string, TokenRecord>
   codes: Record<string, CodeRecord>
+  bridges: Record<string, BridgeRecord>
+  devices: Record<string, DeviceRecord>
+}
+
+interface LegacyStoreDocument {
+  users?: Record<string, UserRecord & { bridge?: string | null }>
+  codes?: Record<string, CodeRecord>
 }
 
 /** Verification code lifetime in milliseconds. */
 export const CODE_TTL_MS = 5 * 60_000
 
-/** File-backed user/token store with atomic writes. */
+/** File-backed account and device store with atomic writes. */
 export class UserStore {
   private doc: StoreDocument
 
   constructor(private file: string, private tokenSecret: string) {
     try {
-      this.doc = JSON.parse(readFileSync(file, 'utf8')) as StoreDocument
-    } catch {
-      this.doc = { users: {}, tokens: {}, codes: {} }
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as StoreDocument | LegacyStoreDocument
+      if ('version' in parsed && parsed.version === 2) {
+        this.doc = parsed
+      } else {
+        const legacy = parsed as LegacyStoreDocument
+        const users = Object.fromEntries(Object.entries(legacy.users ?? {}).map(([key, user]) => [key, {
+          key: user.key,
+          provider: user.provider,
+          externalId: user.externalId,
+        }]))
+        this.doc = { version: 2, users, tokens: {}, codes: legacy.codes ?? {}, bridges: {}, devices: {} }
+        this.save()
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      this.doc = { version: 2, users: {}, tokens: {}, codes: {}, bridges: {}, devices: {} }
     }
-    this.doc.codes ??= {}
   }
 
   private save(): void {
@@ -55,9 +92,36 @@ export class UserStore {
 
   private mintToken(key: string): string {
     const token = createHmac('sha256', this.tokenSecret).update(key + ':' + randomBytes(8).toString('hex')).digest('hex')
-    this.doc.tokens[token] = key
+    this.doc.tokens[token] = { userKey: key, deviceId: null }
     this.save()
     return token
+  }
+
+  private bridgeTokenHash(token: string): string {
+    return createHmac('sha256', this.tokenSecret).update('bridge:' + token).digest('hex')
+  }
+
+  /** Register a desktop identity on first use or authenticate its existing token. */
+  authenticateBridge(id: string, token: string): void {
+    const tokenHash = this.bridgeTokenHash(token)
+    const record = this.doc.bridges[id]
+    if (record === undefined) {
+      this.doc.bridges[id] = { id, tokenHash, createdAt: Date.now() }
+      this.save()
+      return
+    }
+    const expected = Buffer.from(record.tokenHash, 'hex')
+    const actual = Buffer.from(tokenHash, 'hex')
+    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw new Error('invalid bridge credentials')
+  }
+
+  /** Authenticate an existing desktop identity without creating one. */
+  verifyBridge(id: string, token: string): void {
+    const record = this.doc.bridges[id]
+    if (record === undefined) throw new Error('invalid bridge credentials')
+    const expected = Buffer.from(record.tokenHash, 'hex')
+    const actual = Buffer.from(this.bridgeTokenHash(token), 'hex')
+    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw new Error('invalid bridge credentials')
   }
 
   /** Mint a six-digit verification code for one email, replacing any pending one. */
@@ -83,36 +147,73 @@ export class UserStore {
     this.save()
   }
 
-  /** Log in through a verified identity, creating the user on first sight. */
+  /** Log in through a verified identity, creating the identity on first sight. */
   loginExternal(provider: string, externalId: string): string {
     const key = provider + ':' + externalId
-    if (!this.doc.users[key]) {
-      this.doc.users[key] = { key, provider, externalId, bridge: null }
-    }
+    if (this.doc.users[key] === undefined) this.doc.users[key] = { key, provider, externalId }
     return this.mintToken(key)
   }
 
-  /** Resolve a session token to its user key. */
+  /** Resolve a session token to its login identity. */
   userFor(token: string): string | undefined {
-    return this.doc.tokens[token]
+    return this.doc.tokens[token]?.userKey
   }
 
-  /** Bind a user to a bridge code. */
-  bind(token: string, bridge: string): string {
-    const key = this.userFor(token)
-    if (!key) throw new Error('unknown token')
-    this.doc.users[key].bridge = bridge.trim()
+  /** Pair a token with a new or previously authenticated phone device. */
+  bindDevice(token: string, bridgeId: string, details: { name: string; ip: string }, existingDeviceId?: string): DeviceRecord {
+    const session = this.doc.tokens[token]
+    if (session === undefined) throw new Error('unknown token')
+    const existing = existingDeviceId === undefined ? undefined : this.doc.devices[existingDeviceId]
+    const now = Date.now()
+    const device = existing?.bridgeId === bridgeId
+      ? { ...existing, name: details.name, ip: details.ip, lastSeenAt: now }
+      : { id: randomBytes(12).toString('hex'), bridgeId, name: details.name, ip: details.ip, pairedAt: now, lastSeenAt: now }
+    this.doc.devices[device.id] = device
+    session.deviceId = device.id
     this.save()
-    return key
+    return device
   }
 
-  /** The bridge code a user is bound to. */
+  /** Resolve a session token to its active phone device. */
+  deviceFor(token: string): DeviceRecord | undefined {
+    const deviceId = this.doc.tokens[token]?.deviceId
+    return deviceId === null || deviceId === undefined ? undefined : this.doc.devices[deviceId]
+  }
+
+  /** Resolve a phone session to the stable desktop bridge id. */
   bridgeFor(token: string): string | null {
-    const key = this.userFor(token)
-    return key ? this.doc.users[key].bridge : null
+    return this.deviceFor(token)?.bridgeId ?? null
   }
 
-  /** Stable fingerprint for integrity checks in tests. */
+  /** Record the latest address and activity time for a paired device. */
+  touchDevice(id: string, ip: string): DeviceRecord {
+    const device = this.doc.devices[id]
+    if (device === undefined) throw new Error('unknown device')
+    const next = { ...device, ip, lastSeenAt: Date.now() }
+    this.doc.devices[id] = next
+    this.save()
+    return next
+  }
+
+  /** List all devices paired with one stable desktop bridge. */
+  devicesForBridge(bridgeId: string): DeviceRecord[] {
+    return Object.values(this.doc.devices)
+      .filter(device => device.bridgeId === bridgeId)
+      .sort((left, right) => right.pairedAt - left.pairedAt)
+  }
+
+  /** Remove one device and revoke every session token associated with it. */
+  revokeDevice(bridgeId: string, deviceId: string): void {
+    const device = this.doc.devices[deviceId]
+    if (device === undefined || device.bridgeId !== bridgeId) throw new Error('unknown device')
+    delete this.doc.devices[deviceId]
+    for (const [token, session] of Object.entries(this.doc.tokens)) {
+      if (session.deviceId === deviceId) delete this.doc.tokens[token]
+    }
+    this.save()
+  }
+
+  /** Stable fingerprint for persistence diagnostics. */
   fingerprint(): string {
     return createHash('sha256').update(JSON.stringify(this.doc)).digest('hex').slice(0, 12)
   }

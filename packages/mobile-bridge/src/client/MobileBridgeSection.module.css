@@ -154,6 +154,90 @@
   font: var(--dsw-font-markdown-code);
 }
 
+.devices {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.devicesHeader,
+.deviceState {
+  display: flex;
+  align-items: center;
+}
+
+.devicesHeader {
+  gap: 8px;
+}
+
+.deviceCount {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.deviceList {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  list-style: none;
+}
+
+.deviceRow {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  grid-template-columns: max-content minmax(100px, 1fr) minmax(100px, auto) minmax(170px, auto) max-content;
+  gap: 8px 12px;
+}
+
+.deviceState {
+  gap: 6px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.deviceName {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.deviceMeta,
+.deviceTimes,
+.deviceEmpty,
+.disconnectDescription {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.deviceTimes {
+  display: flex;
+  flex-direction: column;
+}
+
+.disconnectButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.disconnectDescription {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
 .qr {
   box-sizing: border-box;
   width: min(180px, 100%);
@@ -204,6 +288,21 @@
 
   .pairingDisplay {
     flex-direction: column;
+  }
+
+  .deviceRow {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .deviceName,
+  .deviceMeta,
+  .deviceTimes {
+    grid-column: 1;
+  }
+
+  .disconnectButton {
+    grid-row: 1 / span 2;
+    grid-column: 2;
   }
 
   .actions {
