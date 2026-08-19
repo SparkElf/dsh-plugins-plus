@@ -24,7 +24,7 @@ location /ws/ {
 }
 ```
 
-2. Bundle the server to one file: `pnpm dlx esbuild packages/mobile-bridge-server/src/index.ts --bundle --platform=node --format=esm --outfile=bridge-server.mjs` (banner `createRequire` for the CJS deps).
+2. Bundle the server: `pnpm dlx esbuild packages/mobile-bridge-server/src/index.ts --bundle --platform=node --format=esm --outfile=bridge-server.mjs` (banner `createRequire` for the CJS deps), then copy `packages/mobile-bridge-server/src/deepseek-logo.svg` beside `bridge-server.mjs`. The logo's MIT notice is in `packages/mobile-bridge-server/THIRD_PARTY_NOTICES.md`.
 3. Write `/etc/dsh-mobile-bridge.env` (mode 0600) with:
    - `MOBILE_BRIDGE_SECRET` — 32-byte hex, HMAC secret for session tokens.
    - `MOBILE_BRIDGE_DATA` — users JSON path (e.g. `/var/lib/dsh-mobile-bridge/users.json`).
@@ -43,7 +43,7 @@ dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.1.5
 ```
 
 2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and wait for the new six-character pairing code and QR to appear with Connected status.
-3. Scan the displayed QR from the phone, or enter the same pairing code manually. An unused one-time QR renews before its five-minute ticket expires, while a successful scan stops renewal. The server cannot rotate a ticket without the private refresh token held by the desktop plugin.
+3. Scan the displayed QR from the phone. If a ticket rotates during that scan, the phone keeps the E2EE secret and shows a recovery form where the current six-character desktop code can be entered. An unused one-time QR renews before its five-minute ticket expires, while a successful scan stops renewal. The server cannot rotate a ticket without the private refresh token held by the desktop plugin.
 4. Disabling or removing the bundle removes the Host routes, outbound connection, narrow-screen style, and Settings entry together. There is no standalone HTML configuration panel.
 
 ## Authentication

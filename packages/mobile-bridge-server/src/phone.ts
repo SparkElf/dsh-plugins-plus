@@ -115,12 +115,17 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
     if (message === 'unknown or offline pairing code') return '配对码无效或桌面端已离线，请刷新桌面二维码后重试。'
     if (message === 'pairing code expired') return '配对码已过期，请刷新桌面二维码后重试。'
     if (message === 'pairing code already used') return '配对码已使用，请刷新桌面二维码后重试。'
+    if (message === 'invalid or expired code') return '验证码无效或已过期。'
     return message
   }
-  function showError(error) { var target = $('x'); if (target) target.textContent = errorText(String(error && error.message || error)) }
+  function showError(error) {
+    console.error('[dsh-mobile-bridge] phone action failed', error)
+    var target = $('x')
+    if (target) target.textContent = errorText(String(error && error.message || error))
+  }
   function registerSw(pair) {
-    if (!('serviceWorker' in navigator)) { showError(new Error('此浏览器不支持 service worker')); return }
-    navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function () {
+    if (!('serviceWorker' in navigator)) return Promise.reject(new Error('此浏览器不支持 service worker'))
+    return navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function () {
       return navigator.serviceWorker.ready
     }).then(function (reg) {
       reg.active.postMessage({ type: 'pair', pair: pair })
@@ -132,6 +137,7 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
     try {
       var pair = JSON.parse(decodeURIComponent(fragment))
       var proceed = function () {
+        if ($('x')) $('x').textContent = '正在连接'
         if ($('b')) $('b').value = pair.b || pair.c || ''
         localStorage.setItem('dshmb-pair', JSON.stringify(pair))
         api('/api/login/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pair.b || pair.c }) })
@@ -143,37 +149,48 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
             }
             return res
           })
-          .then(function () { history.replaceState(null, '', '/'); registerSw(pair) })
+          .then(function () { history.replaceState(null, '', '/'); return registerSw(pair) })
           .catch(function (error) {
-            localStorage.removeItem('dshmb-pair')
             history.replaceState(null, '', '/bridge/')
             showError(error)
           })
       }
       if (pair.k === undefined) {
         var k = prompt('输入桌面端设置的加密口令')
-        if (k === null) return
-        pair.k = k
-      }
-      proceed()
-      return
+        if (k === null) showError(new Error('已取消'))
+        else { pair.k = k; proceed() }
+      } else proceed()
     } catch (e) { /* fall through to manual login */ }
   }
   var stored = localStorage.getItem('dshmb-pair')
-  if (stored && document.cookie.includes('mbs=')) { registerSw(JSON.parse(stored)); return }
+  if ($('loginForm')) $('loginForm').hidden = !stored
+  if ($('scanFirst')) $('scanFirst').hidden = !!stored
+  if (!fragment && stored && document.cookie.includes('mbs=')) registerSw(JSON.parse(stored)).catch(showError)
   if (!document.getElementById('e')) return
   $('s').onclick = function () {
+    var button = $('s')
+    button.disabled = true
+    button.textContent = '发送中'
+    $('x').textContent = ''
     api('/api/email/code', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: $('e').value }) })
       .then(function () { $('x').textContent = '验证码已发送' })
       .catch(showError)
+      .finally(function () { button.disabled = false; button.textContent = '发送' })
   }
   $('l').onclick = function () {
+    var button = $('l')
+    button.disabled = true
+    button.textContent = '连接中'
+    $('x').textContent = ''
     api('/api/login/email', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: $('e').value, code: $('c').value, bridge: $('b').value }) })
       .then(function () {
-        var pair = JSON.parse(localStorage.getItem('dshmb-pair') || '{"s":""}')
-        registerSw(pair)
+        var pair = JSON.parse(localStorage.getItem('dshmb-pair'))
+        if ($('b').value) pair.b = $('b').value
+        localStorage.setItem('dshmb-pair', JSON.stringify(pair))
+        return registerSw(pair)
       })
       .catch(showError)
+      .finally(function () { button.disabled = false; button.textContent = '登录并连接' })
   }
 })()
 `
