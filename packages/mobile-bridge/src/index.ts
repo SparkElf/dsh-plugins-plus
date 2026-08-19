@@ -64,13 +64,16 @@ export async function relayToLocalWeb(
   }
 }
 
-const MOBILE_CSS = `/* narrow-width overlay: fixes occlusion without touching stock styles */
+const MOBILE_CSS = `/* narrow-width overlay: fixes occlusion via semantic selectors, stock tokens untouched */
 @media (max-width: 720px){
   body{padding-bottom:env(safe-area-inset-bottom)}
-  [class*="floating"],[class*="fab"]{bottom:calc(16px + env(safe-area-inset-bottom)) !important}
   header{flex-wrap:wrap;row-gap:4px}
-  [class*="drawer"],[class*="sidebar"]{max-width:88vw}
-  [class*="toast"],[class*="popup"]{max-width:94vw;left:50%;transform:translateX(-50%)}
+  header nav,header [role="toolbar"]{max-width:100%;overflow-x:auto;scrollbar-width:none}
+  aside,[class*="drawer"],[class*="sidebar"]{max-width:88vw}
+  main{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
+  [class*="floating"],[class*="fab"],button[class*="compose"]{bottom:calc(16px + env(safe-area-inset-bottom)) !important;z-index:60}
+  [class*="toast"],[class*="popup"],[role="dialog"]{max-width:94vw;left:50%;transform:translateX(-50%)}
+  [class*="tooltip"]{display:none}
 }
 `
 

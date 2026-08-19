@@ -9,6 +9,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createBridgeServer } from './server.ts'
 import { UserStore } from './store.ts'
+import { wechatConfigFromEnv, wechatVerifier } from './wechat.ts'
 
 const secret = process.env.MOBILE_BRIDGE_SECRET ?? ''
 if (secret.length < 16) {
@@ -19,7 +20,11 @@ const data = process.env.MOBILE_BRIDGE_DATA ?? 'mobile-bridge-users.json'
 mkdirSync(dirname(data) === '.' ? '.' : dirname(data), { recursive: true })
 const port = Number(process.env.MOBILE_BRIDGE_PORT ?? 8787)
 
-const server = createBridgeServer(new UserStore(data, secret))
+const wechat = wechatConfigFromEnv()
+const server = createBridgeServer(new UserStore(data, secret), {
+  ...wechat === undefined ? {} : { externalAuth: { wechat: wechatVerifier(wechat) } },
+})
+if (wechat) console.log('[mobile-bridge] wechat login enabled')
 server.listen(port, () => {
   console.log(`[mobile-bridge] listening on :${port}`)
 })
