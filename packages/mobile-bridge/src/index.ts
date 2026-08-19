@@ -39,20 +39,35 @@ export interface RelayRequest {
 
 const TEXTUAL = /^(text\/|application\/(json|.*\+json))/
 
+/** One outbound relay message (head, chunk, or end frame). */
+export interface RelayFrame {
+  id: string
+  status?: number
+  headers?: Record<string, string>
+  stream?: boolean
+  chunk?: string
+  bodyEncoding?: 'text' | 'base64'
+  end?: boolean
+  body?: string
+}
+
 /**
- * Handle one relayed request against the local loopback web, binary-safe:
- * binary request bodies arrive base64 and binary responses return base64 so
- * fonts, images, and attachments survive the tunnel.
+ * Handle one relayed request against the local loopback web, binary-safe and
+ * stream-aware: event-stream responses (the stock web's SSE mux) flow as
+ * head/chunk/end frames so live updates reach the phone; everything else
+ * returns one base64-safe frame.
  * @param request - relayed request.
  * @param localPort - local Harness web port.
+ * @param send - outbound frame sink (the bridge socket).
  * @param fetchImpl - fetch seam for tests.
- * @returns the relay response with a matching bodyEncoding.
+ * @returns resolves when the local response completes.
  */
 export async function relayToLocalWeb(
   request: RelayRequest,
   localPort: number,
+  send: (frame: RelayFrame) => void = () => {},
   fetchImpl: typeof fetch = fetch,
-) {
+): Promise<RelayFrame> {
   try {
     const decoded = request.bodyEncoding === 'base64' ? Buffer.from(request.body, 'base64') : Buffer.from(request.body, 'utf8')
     const response = await fetchImpl(`http://127.0.0.1:${localPort}${request.path}`, {
@@ -61,17 +76,32 @@ export async function relayToLocalWeb(
       body: request.method === 'GET' || request.method === 'HEAD' ? undefined : decoded,
     })
     const contentType = response.headers.get('content-type') ?? ''
+    if (contentType.includes('text/event-stream') && response.body) {
+      send({ id: request.id, status: response.status, headers: { 'content-type': contentType }, stream: true })
+      const reader = response.body.getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        send({ id: request.id, chunk: Buffer.from(value).toString('base64'), bodyEncoding: 'base64' })
+      }
+      send({ id: request.id, end: true })
+      return { id: request.id, end: true }
+    }
     const bytes = Buffer.from(await response.arrayBuffer())
     const textual = TEXTUAL.test(contentType)
-    return {
+    const frame: RelayFrame = {
       id: request.id,
       status: response.status,
       headers: { 'content-type': contentType },
       body: textual ? bytes.toString('utf8') : bytes.toString('base64'),
-      bodyEncoding: (textual ? 'text' : 'base64') as 'text' | 'base64',
+      bodyEncoding: textual ? 'text' : 'base64',
     }
+    send(frame)
+    return frame
   } catch (error) {
-    return { id: request.id, status: 502, headers: {}, body: error instanceof Error ? error.message : String(error), bodyEncoding: 'text' as const }
+    const frame: RelayFrame = { id: request.id, status: 502, headers: {}, body: error instanceof Error ? error.message : String(error), bodyEncoding: 'text' }
+    send(frame)
+    return frame
   }
 }
 
@@ -115,7 +145,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       socket.on('message', raw => {
         void (async () => {
           const request = JSON.parse(String(raw)) as RelayRequest
-          socket.send(JSON.stringify(await relayToLocalWeb(request, config.localPort)))
+          await relayToLocalWeb(request, config.localPort, frame => socket.send(JSON.stringify(frame)))
         })()
       })
       socket.on('close', () => { state.connected = false; setTimeout(() => void connect(), 5000) })

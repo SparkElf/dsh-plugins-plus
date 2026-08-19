@@ -84,14 +84,31 @@ function cookieToken(req: IncomingMessage): string {
 export function createBridgeServer(store: UserStore, options: BridgeServerOptions = {}) {
   const externalAuth = options.externalAuth ?? {}
   const bridges = new Map<string, WebSocket>()
-  const pending = new Map<string, (response: RelayResponse) => void>()
+  const pending = new Map<string, { settle?: (response: RelayResponse) => void; timer?: ReturnType<typeof setTimeout>; res?: ServerResponse }>()
+
+  interface PendingEntry {
+    settle?: (response: RelayResponse) => void
+    timer?: ReturnType<typeof setTimeout>
+    res?: ServerResponse
+  }
 
   const relay = (socket: WebSocket, request: Omit<RelayRequest, 'id'>): Promise<RelayResponse> =>
     new Promise((resolve, reject) => {
       const id = randomBytes(8).toString('hex')
       const timer = setTimeout(() => { pending.delete(id); reject(new Error('relay timeout')) }, 30_000)
-      pending.set(id, response => { clearTimeout(timer); pending.delete(id); resolve(response) })
+      pending.set(id, { settle: response => { clearTimeout(timer); pending.delete(id); resolve(response) }, timer })
       socket.send(JSON.stringify({ id, ...request }))
+    })
+
+  /** Stream one event-stream request straight into the phone response. */
+  const relayStream = (socket: WebSocket, request: Omit<RelayRequest, 'id'>, res: ServerResponse): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const id = randomBytes(8).toString('hex')
+      const entry: PendingEntry = { res }
+      pending.set(id, entry)
+      res.on('close', () => { pending.delete(id); resolve() })
+      socket.send(JSON.stringify({ id, ...request }))
+      void reject
     })
 
   const http = createServer((req, res) => {
@@ -165,15 +182,24 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
       for (const [key, value] of Object.entries(req.headers)) {
         if (typeof value === 'string' && !['host', 'cookie', 'authorization', 'connection'].includes(key)) headers[key] = value
       }
+      const requestFrame = {
+        kind: 'http' as const,
+        method: req.method ?? 'GET',
+        path: url.pathname + url.search,
+        headers,
+        body: rawBody.toString('base64'),
+        bodyEncoding: 'base64' as const,
+      }
+      if ((req.headers.accept ?? '').includes('text/event-stream')) {
+        try {
+          await relayStream(socket, requestFrame, res)
+        } catch (error) {
+          json(res, 502, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
       try {
-        const response = await relay(socket, {
-          kind: 'http',
-          method: req.method ?? 'GET',
-          path: url.pathname + url.search,
-          headers,
-          body: rawBody.toString('base64'),
-          bodyEncoding: 'base64',
-        })
+        const response = await relay(socket, requestFrame)
         const contentType = response.headers['content-type'] ?? ''
         let out = response.bodyEncoding === 'base64' ? Buffer.from(response.body, 'base64') : Buffer.from(response.body, 'utf8')
         if (response.bodyEncoding !== 'base64' && contentType.includes('text/html')) {
@@ -196,9 +222,27 @@ export function createBridgeServer(store: UserStore, options: BridgeServerOption
       wss.handleUpgrade(req, socket, head, ws => {
         bridges.set(code, ws)
         ws.on('message', raw => {
-          const message = JSON.parse(String(raw)) as RelayResponse
-          const settle = pending.get(message.id)
-          if (settle) settle(message)
+          const frame = JSON.parse(String(raw)) as RelayResponse & { stream?: boolean; chunk?: string; end?: boolean }
+          const entry = pending.get(frame.id)
+          if (!entry) return
+          if (frame.stream && entry.res) {
+            entry.res.writeHead(frame.status ?? 200, { 'content-type': frame.headers?.['content-type'] ?? 'text/event-stream', 'cache-control': 'no-cache' })
+            return
+          }
+          if (frame.chunk !== undefined && entry.res) {
+            entry.res.write(Buffer.from(frame.chunk, frame.bodyEncoding === 'text' ? 'utf8' : 'base64'))
+            return
+          }
+          if (frame.end && entry.res) {
+            pending.delete(frame.id)
+            entry.res.end()
+            return
+          }
+          if (entry.settle) {
+            if (entry.timer) clearTimeout(entry.timer)
+            pending.delete(frame.id)
+            entry.settle(frame)
+          }
         })
         ws.on('close', () => { if (bridges.get(code) === ws) bridges.delete(code) })
       })

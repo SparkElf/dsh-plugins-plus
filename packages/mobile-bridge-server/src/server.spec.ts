@@ -17,6 +17,12 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0
 
 beforeAll(async () => {
   local = createServer((req, res) => {
+    if (req.url === '/events') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('data: one\n\n')
+      setTimeout(() => { res.write('data: two\n\n'); res.end() }, 50)
+      return
+    }
     if (req.url === '/logo.png') {
       res.writeHead(200, { 'content-type': 'image/png' })
       res.end(PNG)
@@ -63,7 +69,7 @@ describe('bridge server end to end', () => {
     await new Promise<void>((resolve, reject) => { bridgeSocket.on('open', () => resolve()); bridgeSocket.on('error', reject) })
     bridgeSocket.on('message', raw => {
       const request = JSON.parse(String(raw)) as RelayRequest
-      void relayToLocalWeb(request, localPort).then(response => bridgeSocket.send(JSON.stringify(response)))
+      void relayToLocalWeb(request, localPort, frame => bridgeSocket.send(JSON.stringify(frame)))
     })
 
     const page = await fetch(base + '/', { headers: { cookie } })
@@ -76,6 +82,32 @@ describe('bridge server end to end', () => {
     expect(image.status).toBe(200)
     expect(Buffer.from(await image.arrayBuffer())).toEqual(PNG)
 
+    bridgeSocket.close()
+  })
+
+  it('streams SSE through the tunnel in order', async () => {
+    const base = `http://127.0.0.1:${bridgePort}`
+    const register = await fetch(base + '/bridge/api/register', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'sse', password: 'longpassword' }),
+    })
+    const cookie = register.headers.get('set-cookie')?.split(';')[0] ?? ''
+    const start = await fetch(base + '/bridge/api/bridge/start', { method: 'POST', body: '{}' }).then(response => response.json()) as { code: string }
+    await fetch(base + '/bridge/api/bind', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ bridge: start.code }),
+    })
+    const bridgeSocket = new WebSocket(`ws://127.0.0.1:${bridgePort}/ws/bridge?code=${start.code}`)
+    await new Promise<void>((resolve, reject) => { bridgeSocket.on('open', () => resolve()); bridgeSocket.on('error', reject) })
+    bridgeSocket.on('message', raw => {
+      const request = JSON.parse(String(raw)) as RelayRequest
+      void relayToLocalWeb(request, localPort, frame => bridgeSocket.send(JSON.stringify(frame)))
+    })
+
+    const response = await fetch(base + '/events', { headers: { cookie, accept: 'text/event-stream' } })
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('data: one\n\ndata: two\n\n')
     bridgeSocket.close()
   })
 
