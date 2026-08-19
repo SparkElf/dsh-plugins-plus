@@ -9,6 +9,7 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { WebSocket, WebSocketServer } from 'ws'
 import { SW_SOURCE, CLIENT_SOURCE } from './phone.ts'
@@ -33,31 +34,45 @@ export interface BridgeServerOptions {
 }
 
 const COOKIE = 'mbs'
+const DEEPSEEK_LOGO = readFileSync(new URL('./deepseek-logo.svg', import.meta.url), 'utf8')
 
 const LANDING = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>DeepSeek Harness Mobile</title>
 <style>
-:root{color-scheme:dark;--page:#111318;--surface:#1b1e24;--field:#121419;--border:#343942;--label:#f4f6f8;--muted:#a7adb6;--primary:#2f80ed;--primary-hover:#4a91ee;--danger:#ff777d}
+:root{color-scheme:dark;--page:#0d1015;--surface:#161b23;--field:#0f131a;--border:#303846;--label:#f4f7fb;--muted:#aeb8c8;--placeholder:#818da1;--primary:#405de6;--primary-hover:#4965ef;--danger:#ff7b84}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%;background:var(--page)}
 body{min-height:100dvh;margin:0;padding:max(24px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom));background:var(--page);color:var(--label);font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-main{width:min(100%,420px);margin:clamp(8px,8vh,72px) auto 0;padding:24px;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
-h1{margin:0 0 20px;font-size:18px;line-height:1.35;font-weight:650}
+body::before{position:fixed;inset:0;content:"";pointer-events:none;background-image:linear-gradient(rgb(77 107 254/.055) 1px,transparent 1px),linear-gradient(90deg,rgb(77 107 254/.055) 1px,transparent 1px);background-size:32px 32px}
+main{position:relative;width:min(100%,420px);margin:clamp(8px,5vh,44px) auto 0;padding:24px;border:1px solid var(--border);border-top:2px solid var(--primary);border-radius:8px;background:rgb(22 27 35/.96);box-shadow:0 24px 64px rgb(2 6 14/.42)}
+.brand{display:flex;align-items:center;gap:12px;padding-bottom:18px;border-bottom:1px solid var(--border)}
+.brand img{display:block;width:148px;height:auto}
+.product{padding-left:12px;border-left:1px solid var(--border);color:var(--muted);font-size:11px;font-weight:650;line-height:1.2}
+.intro{margin:20px 0}
+h1{margin:0;font-size:20px;line-height:1.35;font-weight:650}
+.intro p,.scanFirst{margin:4px 0 0;color:var(--muted);font-size:13px}
+.scanFirst{padding:14px 0 2px;border-top:1px solid var(--border)}
+[hidden]{display:none!important}
+.field{display:grid;gap:6px}
+.field+.field,.codeRow+.field{margin-top:14px}
+label{color:var(--muted);font-size:12px;font-weight:600}
 input,button{width:100%;min-width:0;height:44px;border-radius:8px;font:inherit}
 input{padding:0 12px;border:1px solid var(--border);outline:none;background:var(--field);color:var(--label);font-size:16px}
-input::placeholder{color:var(--muted)}
-input:focus{border-color:var(--primary)}
-.codeRow{display:grid;grid-template-columns:minmax(0,1fr) 96px;gap:8px;margin-top:12px}
-#b{margin-top:12px}
-button{border:0;background:var(--primary);color:white;font-weight:600;cursor:pointer}
+input::placeholder{color:var(--placeholder)}
+input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgb(77 107 254/.16)}
+.codeRow{display:grid;grid-template-columns:minmax(0,1fr) 96px;align-items:end;gap:8px;margin-top:14px}
+button{border:0;background:var(--primary);color:white;font-weight:650;cursor:pointer;transition:background-color .16s ease,transform .08s ease}
 button:hover{background:var(--primary-hover)}
-button.ghost{background:#292e36;color:var(--label)}
-button.ghost:hover{background:#343a44}
-#l{margin-top:16px}
-p.err{min-height:20px;margin:12px 0 0;color:var(--danger);font-size:13px;line-height:20px}
-@media(max-width:340px){main{padding:18px}.codeRow{grid-template-columns:minmax(0,1fr) 84px}}
+button:active{transform:translateY(1px)}
+button.ghost{border:1px solid var(--border);background:#252c37;color:var(--label)}
+button.ghost:hover{background:#303846}
+button:disabled{opacity:.6;cursor:wait}
+#l{margin-top:20px}
+p.err{min-height:20px;margin:10px 0 0;color:var(--danger);font-size:13px;line-height:20px}
+@media(max-width:340px){main{padding:18px}.brand img{width:132px}.codeRow{grid-template-columns:minmax(0,1fr) 84px}}
+@media(prefers-reduced-motion:reduce){button{transition:none}}
 </style></head><body>
-<main aria-labelledby="title"><h1 id="title">DeepSeek Harness Mobile</h1><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="邮箱"><div class="codeRow"><input id="c" inputmode="numeric" autocomplete="one-time-code" placeholder="验证码"><button id="s" class="ghost" type="button">发送</button></div><input id="b" autocomplete="off" placeholder="配对码（扫码可免填）"><p class="err" id="x" role="alert"></p><button id="l" type="button">登录并连接</button></main>
+<main aria-labelledby="title"><header class="brand"><img src="/bridge/deepseek-logo.svg" alt="DeepSeek"><span class="product">HARNESS<br>MOBILE</span></header><div class="intro"><h1 id="title">移动连接</h1><p>端到端加密通道</p></div><p class="scanFirst" id="scanFirst">请扫描桌面端二维码</p><section id="loginForm" hidden><div class="field"><label for="e">邮箱</label><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="name@example.com"></div><div class="codeRow"><div class="field"><label for="c">验证码</label><input id="c" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码"></div><button id="s" class="ghost" type="button">发送</button></div><div class="field"><label for="b">配对码</label><input id="b" autocomplete="off" placeholder="6 位字符"></div><button id="l" type="button">登录并连接</button><p class="err" id="x" role="alert"></p></section></main>
 <script src="/bridge/client.js"></script></body></html>`
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -123,6 +138,11 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       if (url.pathname === '/bridge' || url.pathname === '/bridge/') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
         res.end(LANDING)
+        return
+      }
+      if (url.pathname === '/bridge/deepseek-logo.svg') {
+        res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=86400' })
+        res.end(DEEPSEEK_LOGO)
         return
       }
       if (url.pathname === '/bridge/client.js') {

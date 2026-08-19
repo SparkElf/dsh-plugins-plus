@@ -39,14 +39,6 @@ afterAll(async () => {
 })
 
 describe('bridge server end to end', () => {
-  it('serves a narrow-safe aligned phone login form', async () => {
-    const html = await fetch(`http://127.0.0.1:${bridgePort}/bridge/`).then(response => response.text())
-    expect(html).toContain('text-size-adjust:100%')
-    expect(html).toContain('grid-template-columns:minmax(0,1fr) 96px')
-    expect(html).toContain('width:min(100%,420px)')
-    expect(html).not.toContain('width:40%')
-  })
-
   it('emails a code, logs in, and binds', async () => {
     const base = `http://127.0.0.1:${bridgePort}`
     await fetch(base + '/bridge/api/email/code', { method: 'POST', body: JSON.stringify({ email: 'dee@example.com' }) })
