@@ -28,11 +28,15 @@ function observePage(page, label, problems) {
 }
 
 async function decodeRenderedQr(qr) {
-  await expect.poll(() => qr.evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true)
-  const png = PNG.sync.read(await qr.screenshot({ path: '/tmp/mobile-bridge-qr-current.png' }))
-  const decoded = jsQR(new Uint8ClampedArray(png.data), png.width, png.height)
-  expect(decoded, 'Settings 中渲染的二维码应可由手机相机解码').not.toBeNull()
-  return decoded.data
+  let value = null
+  await expect.poll(async () => {
+    const ready = await qr.evaluate(image => image.complete && image.naturalWidth > 0)
+    if (!ready) return false
+    const png = PNG.sync.read(await qr.screenshot({ path: '/tmp/mobile-bridge-qr-current.png' }))
+    value = jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data ?? null
+    return value !== null
+  }, { message: 'Settings 中渲染的二维码应可由手机相机解码' }).toBe(true)
+  return value
 }
 
 test('登录页显示品牌与相机入口并保留显示偏好', async ({ browser }) => {
