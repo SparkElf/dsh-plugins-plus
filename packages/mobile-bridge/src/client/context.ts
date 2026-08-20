@@ -5,7 +5,7 @@ import type { LocaleDictOf, LocaleNamespaceMap, SlotCore, TranslateNS } from '@d
 
 interface ClientSlots {
   register: SlotCore['register']
-  inject(name: 'settings.section', factory: () => () => void): void
+  inject(name: 'settings.section' | 'shell.overlay', factory: () => () => void): void
 }
 
 interface ClientLocale {

@@ -11,8 +11,9 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { dirname, resolve } from 'node:path'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { WebSocket, WebSocketServer } from 'ws'
+import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import { SW_SOURCE, CLIENT_SOURCE, SOCKET_CLIENT_SOURCE } from './phone.ts'
 import { UserStore, type DeviceRecord } from './store.ts'
 import type { WechatConfig } from './wechat.ts'
@@ -36,7 +37,11 @@ export interface BridgeServerOptions {
 
 const COOKIE = 'mbs'
 const require = createRequire(import.meta.url)
-const JSQR_SOURCE = readFileSync(require.resolve('jsqr'), 'utf8')
+const QR_SCANNER_SOURCE = readFileSync(require.resolve('qr-scanner'), 'utf8')
+const QR_SCANNER_WORKER_SOURCE = readFileSync(require.resolve('qr-scanner/qr-scanner-worker.min.js'), 'utf8')
+const ZXING_READER_ENTRY = require.resolve('zxing-wasm/reader')
+const ZXING_READER_SOURCE = readFileSync(resolve(dirname(ZXING_READER_ENTRY), '../../iife/reader/index.js'), 'utf8')
+const ZXING_READER_WASM = readFileSync(require.resolve('zxing-wasm/reader/zxing_reader.wasm'))
 const DEEPSEEK_LOGO = readFileSync(new URL('./deepseek-logo.svg', import.meta.url), 'utf8')
 const DEEPSEEK_LOGO_DATA_URL = 'data:image/svg+xml;base64,' + Buffer.from(DEEPSEEK_LOGO).toString('base64')
 
@@ -70,7 +75,13 @@ h1{margin:0;font-size:22px;line-height:1.35;font-weight:650}
 .scannerClose:hover{background:rgb(255 255 255/.16)}
 .scannerStage{position:relative;min-height:0;overflow:hidden;background:#000}
 .scanner video{display:block;width:100%;height:100%;object-fit:cover}
-.scannerFrame{position:absolute;top:50%;left:50%;width:min(72vw,320px);aspect-ratio:1;transform:translate(-50%,-50%);border:2px solid #6f89ff;border-radius:8px;box-shadow:0 0 0 200vmax rgb(0 0 0/.34)}
+.scannerFrame{border:2px solid #6f89ff;border-radius:8px;box-shadow:0 0 0 200vmax rgb(0 0 0/.34)}
+.scannerFrame.manual{position:absolute;top:50%;left:50%;width:min(67vw,320px);aspect-ratio:1;transform:translate(-50%,-50%)}
+.wasmOutline{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.wasmOutline polygon{fill:rgb(69 196 129/.16);stroke:#45c481;stroke-width:4;vector-effect:non-scaling-stroke}
+.scannerFrame.invalid .wasmOutline polygon{fill:rgb(255 104 120/.14);stroke:#ff6878}
+.scannerFrame .code-outline-highlight{fill:rgb(69 196 129/.16)!important;stroke:#45c481!important;stroke-width:4!important;stroke-dasharray:none!important}
+.scannerFrame.invalid .code-outline-highlight{fill:rgb(255 104 120/.14)!important;stroke:#ff6878!important}
 .scannerStatus{min-height:48px;margin:0;padding:14px 20px 0;color:#c6cedb;text-align:center}
 .scannerStatus.error{color:#ff9aa2}
 body.scannerOpen{overflow:hidden}
@@ -96,8 +107,8 @@ p.err{min-height:20px;margin:12px 0 0;color:var(--danger);font-size:13px;line-he
 @media(max-width:340px){main{padding:0 2px}.brand img{width:168px}.preferences{justify-content:flex-start}.preferences button{padding:0 8px}.codeRow{grid-template-columns:minmax(0,1fr) 82px}}
 @media(prefers-reduced-motion:reduce){button{transition:none}}
 </style></head><body>
-<main aria-labelledby="title"><header class="brand"><img src="${DEEPSEEK_LOGO_DATA_URL}" alt="DeepSeek"><span class="product">Harness Mobile</span></header><nav class="preferences" aria-label="显示偏好"><div class="segmented"><button id="langZh" type="button" aria-pressed="true">中文</button><button id="langEn" type="button" aria-pressed="false">EN</button></div><div class="segmented"><button id="themeLight" type="button" aria-pressed="false" data-i18n="light">浅色</button><button id="themeDark" type="button" aria-pressed="true" data-i18n="dark">深色</button></div></nav><div class="intro"><h1 id="title" data-i18n="title">移动连接</h1></div><section class="scanFirst" id="scanFirst"><p data-i18n="scanFirst">请扫描桌面端二维码</p><button id="openScanner" class="scanButton" type="button" data-i18n="openScanner">打开相机扫码</button></section><section id="loginForm" hidden><div class="field"><label for="e" data-i18n="email">邮箱</label><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="name@example.com" data-i18n-placeholder="emailPlaceholder"></div><div class="codeRow"><div class="field"><label for="c" data-i18n="code">验证码</label><input id="c" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码" data-i18n-placeholder="codePlaceholder"></div><button id="s" class="ghost" type="button" data-i18n="send">发送</button></div><div class="field"><label for="b" data-i18n="pairingCode">配对码</label><input id="b" autocomplete="off" placeholder="6 位字符" data-i18n-placeholder="pairingPlaceholder"></div><button id="l" type="button" data-i18n="connect">登录并连接</button><p class="err" id="x" role="alert"></p></section></main><section id="scanner" class="scanner" role="dialog" aria-modal="true" aria-labelledby="scannerTitle" hidden><header class="scannerHeader"><h2 id="scannerTitle" data-i18n="scannerTitle">扫描配对二维码</h2><button id="closeScanner" class="scannerClose" type="button" aria-label="关闭相机" data-i18n-aria-label="closeScanner">×</button></header><div class="scannerStage"><video id="scannerVideo" autoplay muted playsinline></video><div class="scannerFrame" aria-hidden="true"></div></div><p id="scannerStatus" class="scannerStatus" role="status" data-i18n="cameraStarting">正在打开相机</p></section>
-<script src="/bridge/jsqr.js"></script><script src="/bridge/client.js"></script></body></html>`
+<main aria-labelledby="title"><header class="brand"><img src="${DEEPSEEK_LOGO_DATA_URL}" alt="DeepSeek"><span class="product">Harness Mobile</span></header><nav class="preferences" aria-label="显示偏好"><div class="segmented"><button id="langZh" type="button" aria-pressed="true">中文</button><button id="langEn" type="button" aria-pressed="false">EN</button></div><div class="segmented"><button id="themeLight" type="button" aria-pressed="false" data-i18n="light">浅色</button><button id="themeDark" type="button" aria-pressed="true" data-i18n="dark">深色</button></div></nav><div class="intro"><h1 id="title" data-i18n="title">移动连接</h1></div><section class="scanFirst" id="scanFirst"><p data-i18n="scanFirst">请扫描桌面端二维码</p><button id="openScanner" class="scanButton" type="button" data-i18n="openScanner">打开相机扫码</button></section><section id="loginForm" hidden><div class="field"><label for="e" data-i18n="email">邮箱</label><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="name@example.com" data-i18n-placeholder="emailPlaceholder"></div><div class="codeRow"><div class="field"><label for="c" data-i18n="code">验证码</label><input id="c" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码" data-i18n-placeholder="codePlaceholder"></div><button id="s" class="ghost" type="button" data-i18n="send">发送</button></div><div class="field"><label for="b" data-i18n="pairingCode">配对码</label><input id="b" autocomplete="off" placeholder="6 位字符" data-i18n-placeholder="pairingPlaceholder"></div><button id="l" type="button" data-i18n="connect">登录并连接</button><p class="err" id="x" role="alert"></p></section></main><section id="scanner" class="scanner" role="dialog" aria-modal="true" aria-labelledby="scannerTitle" hidden><header class="scannerHeader"><h2 id="scannerTitle" data-i18n="scannerTitle">扫描配对二维码</h2><button id="closeScanner" class="scannerClose" type="button" aria-label="关闭相机" data-i18n-aria-label="closeScanner">×</button></header><div class="scannerStage"><video id="scannerVideo" autoplay muted playsinline></video><div id="scannerFrame" class="scannerFrame" aria-hidden="true"><svg id="wasmOutline" class="wasmOutline" aria-hidden="true"><polygon id="wasmOutlinePolygon"></polygon></svg></div></div><p id="scannerStatus" class="scannerStatus" role="status" data-i18n="cameraStarting">正在打开相机</p></section>
+<script src="/bridge/client.js"></script></body></html>`
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -186,6 +197,50 @@ function requestDeviceName(req: IncomingMessage): string {
           ? 'Safari'
           : ''
   return browser === '' ? platform : platform + ' · ' + browser
+}
+
+const SCANNER_DIAGNOSTIC_EVENTS = new Set(['open', 'library', 'controls', 'camera', 'scan', 'adjustment', 'decoded', 'accepted', 'rejected', 'error', 'close'])
+const SCANNER_STRING_FIELDS = new Map([['state', 80], ['name', 80], ['message', 320], ['facingMode', 80], ['focusMode', 80], ['exposureMode', 80]])
+const SCANNER_NUMBER_FIELDS = new Set(['attempts', 'elapsedMs', 'width', 'height', 'frameRate', 'corners', 'zoom', 'focusDistance', 'zoomMin', 'zoomMax', 'focusMin', 'focusMax', 'sharpness'])
+const SCANNER_SIGNED_NUMBER_FIELDS = new Set(['exposureMin', 'exposureMax', 'exposureCompensation'])
+
+function rawDataByteLength(raw: RawData): number {
+  return Array.isArray(raw) ? raw.reduce((total, part) => total + part.byteLength, 0) : raw.byteLength
+}
+
+// Scanner diagnostics are an unauthenticated public ingress; only bounded, non-secret telemetry fields reach the server log.
+function scannerDiagnostic(value: unknown): Record<string, string | number | boolean> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('scanner diagnostic must be an object')
+  const input = value as Record<string, unknown>
+  if (typeof input.event !== 'string' || !SCANNER_DIAGNOSTIC_EVENTS.has(input.event)) throw new Error('scanner diagnostic event is invalid')
+  const output: Record<string, string | number | boolean> = { event: input.event }
+  for (const [field, maxLength] of SCANNER_STRING_FIELDS) {
+    const fieldValue = input[field]
+    if (fieldValue === undefined) continue
+    if (typeof fieldValue !== 'string') throw new Error('scanner diagnostic ' + field + ' must be a string')
+    output[field] = fieldValue.slice(0, maxLength)
+  }
+  if (input.stack !== undefined) {
+    if (typeof input.stack !== 'string') throw new Error('scanner diagnostic stack must be a string')
+    output.stack = input.stack
+  }
+  for (const field of SCANNER_NUMBER_FIELDS) {
+    const fieldValue = input[field]
+    if (fieldValue === undefined) continue
+    if (typeof fieldValue !== 'number' || !Number.isFinite(fieldValue) || fieldValue < 0) throw new Error('scanner diagnostic ' + field + ' must be a non-negative number')
+    output[field] = fieldValue
+  }
+  for (const field of SCANNER_SIGNED_NUMBER_FIELDS) {
+    const fieldValue = input[field]
+    if (fieldValue === undefined) continue
+    if (typeof fieldValue !== 'number' || !Number.isFinite(fieldValue)) throw new Error('scanner diagnostic ' + field + ' must be a finite number')
+    output[field] = fieldValue
+  }
+  if (input.valid !== undefined) {
+    if (typeof input.valid !== 'boolean') throw new Error('scanner diagnostic valid must be a boolean')
+    output.valid = input.valid
+  }
+  return output
 }
 
 /**
@@ -285,9 +340,24 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
         res.end(DEEPSEEK_LOGO)
         return
       }
-      if (url.pathname === '/bridge/jsqr.js') {
-        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' })
-        res.end(JSQR_SOURCE)
+      if (url.pathname === '/bridge/qr-scanner.js') {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(QR_SCANNER_SOURCE)
+        return
+      }
+      if (url.pathname === '/bridge/qr-scanner-worker.min.js') {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(QR_SCANNER_WORKER_SOURCE)
+        return
+      }
+      if (url.pathname === '/bridge/zxing-reader.js') {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(ZXING_READER_SOURCE)
+        return
+      }
+      if (url.pathname === '/bridge/zxing-reader.wasm') {
+        res.writeHead(200, { 'content-type': 'application/wasm', 'cache-control': 'no-store' })
+        res.end(ZXING_READER_WASM)
         return
       }
       if (url.pathname === '/bridge/client.js') {
@@ -467,6 +537,34 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
   const wss = new WebSocketServer({ noServer: true })
   http.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
+    if (url.pathname === '/ws/scanner') {
+      const origin = req.headers.origin
+      const host = req.headers.host ?? ''
+      if (typeof origin !== 'string' || (origin !== 'https://' + host && origin !== 'http://' + host)) { socket.destroy(); return }
+      wss.handleUpgrade(req, socket, head, scanner => {
+        const id = randomBytes(4).toString('hex')
+        let messages = 0
+        const lifetime = setTimeout(() => { scanner.close(1000, 'scanner timeout') }, 10 * 60_000)
+        console.info('[mobile-bridge scanner]', { id, event: 'connected', ip: requestIp(req), device: requestDeviceName(req) })
+        scanner.on('message', (raw, isBinary) => {
+          try {
+            if (isBinary) { scanner.close(1003, 'binary scanner diagnostic unsupported'); return }
+            if (rawDataByteLength(raw) > 8192) { scanner.close(1009, 'scanner diagnostic too large'); return }
+            messages += 1
+            if (messages > 180) { scanner.close(1008, 'scanner diagnostic limit reached'); return }
+            console.info('[mobile-bridge scanner]', { id, ...scannerDiagnostic(JSON.parse(String(raw))) })
+          } catch (error) {
+            console.warn('[mobile-bridge scanner]', { id, event: 'invalid', error })
+            scanner.close(1003, 'invalid scanner diagnostic')
+          }
+        })
+        scanner.on('close', (code, reason) => {
+          clearTimeout(lifetime)
+          console.info('[mobile-bridge scanner]', { id, event: 'disconnected', code, reason: String(reason).slice(0, 123), messages })
+        })
+      })
+      return
+    }
     if (url.pathname === '/ws/bridge') {
       const bridgeId = url.searchParams.get('bridgeId') ?? ''
       const code = bridgeTickets.get(bridgeId)

@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-mobile-bridge",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "DeepSeek Harness plugin: an outbound E2EE tunnel, mobile presentation, and first-class Mobile Bridge settings section.",
   "type": "module",
   "main": "./lib/index.js",
@@ -24,6 +24,7 @@
       "inject": [
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-primitives",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-slots"
@@ -37,7 +38,8 @@
     "lib/client.js.map",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",

@@ -1,4 +1,4 @@
-/** Local compile-time declarations for the public settings Slot consumed by this external plugin. */
+/** Local compile-time declarations for the public Slots consumed by this external plugin. */
 
 import type { SettingsMobileBridgeKey } from './locales.ts'
 
@@ -10,6 +10,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
       scope: 'root'
       owner: { close: () => void }
     }
+    /** Global overlay used for the phone revocation notice. */
+    'shell.overlay': { kind: 'list'; scope: 'root' }
   }
 
   interface LocaleNamespaceMap {

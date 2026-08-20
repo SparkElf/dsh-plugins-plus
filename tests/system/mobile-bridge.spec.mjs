@@ -29,7 +29,11 @@ function observePage(page, label, problems) {
   page.on('request', request => { pending.add(request.url()) })
   page.on('requestfinished', request => { pending.delete(request.url()) })
   page.on('console', message => {
-    if (message.type() === 'error' || message.type() === 'warning') problems.push(label + ' console ' + message.type() + ': ' + message.text())
+    if (message.type() === 'error' || message.type() === 'warning') {
+      const location = message.location()
+      const source = location.url === '' ? '' : ' at ' + location.url + ':' + location.lineNumber + ':' + location.columnNumber
+      problems.push(label + ' console ' + message.type() + ': ' + message.text() + source)
+    }
   })
   page.on('pageerror', error => { problems.push(label + ' pageerror: ' + (error.stack ?? error.message)) })
   page.on('requestfailed', request => { pending.delete(request.url()); problems.push(label + ' requestfailed: ' + request.url() + ' ' + (request.failure()?.errorText ?? 'failed')) })
@@ -120,8 +124,13 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     const firstQrSource = await qr.evaluate(image => image.currentSrc)
     const phoneAUrl = await decodeRenderedQr(qr)
     expect(new URL(phoneAUrl).origin).toBe(RELAY_URL)
+    const pairingRefresh = desktop.getByRole('status').filter({ hasText: /正在刷新二维码|Refreshing pairing code/ })
 
-    await phoneA.goto(phoneAUrl, { waitUntil: 'domcontentloaded' })
+    await Promise.all([
+      phoneA.goto(phoneAUrl, { waitUntil: 'domcontentloaded' }),
+      pairingRefresh.waitFor({ state: 'visible' }),
+    ])
+    await expect(pairingRefresh).toBeHidden()
     const phoneASidebar = phoneA.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })
     const openMainSidebar = phoneA.getByRole('button', { name: /^(打开侧边栏|Open sidebar)$/ }).first()
     const collapseMainSidebar = phoneA.getByRole('button', { name: /^(收起侧边栏|Collapse sidebar)$/ }).first()
@@ -141,6 +150,23 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     }
 
     if (await openMainSidebar.isVisible()) await openMainSidebar.click()
+    await expect(collapseMainSidebar).toBeVisible()
+    await expectMainSidebarHalf(phoneA)
+    await phoneA.getByRole('button', { name: /^(新建会话|New session)$/ }).first().click()
+    await collapseMainSidebar.click()
+    await settleMainSidebarCollapsed(phoneA)
+    const heroTitle = phoneA.getByText(/^(探索未至之境|Into the Unknown)$/)
+    const heroBadge = phoneA.getByText(/^(预览版|Preview)$/)
+    await expect(heroTitle).toBeVisible()
+    await expect(heroBadge).toBeVisible()
+    const [heroTitleBox, heroBadgeBox] = await Promise.all([heroTitle.boundingBox(), heroBadge.boundingBox()])
+    expect(heroTitleBox).not.toBeNull()
+    expect(heroBadgeBox).not.toBeNull()
+    expect(heroTitleBox.height).toBeLessThanOrEqual(28)
+    expect(heroBadgeBox.y).toBeGreaterThanOrEqual(heroTitleBox.y - 1)
+    expect(heroBadgeBox.y + heroBadgeBox.height).toBeLessThanOrEqual(heroTitleBox.y + heroTitleBox.height + 1)
+    await phoneA.screenshot({ path: '/tmp/mobile-new-session-hero.png', fullPage: true })
+    await openMainSidebar.click()
     await expect(collapseMainSidebar).toBeVisible()
     await expectMainSidebarHalf(phoneA)
     const unavailableSidebar = phoneA.getByRole('button', { name: /^(选择一个会话以使用侧边栏|Select a (?:session|conversation) to use the sidebar)$/ })
@@ -286,6 +312,9 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     expect(modelBox).not.toBeNull()
     expect(primaryBox).not.toBeNull()
     expect(modelBox.x + modelBox.width).toBeLessThanOrEqual(primaryBox.x)
+    await phoneA.touchscreen.tap(modelBox.x + modelBox.width / 2, modelBox.y + modelBox.height / 2)
+    await expect(phoneA.getByRole('menu', { name: /^(模型与推理等级|Model and reasoning effort)$/ })).toBeVisible()
+    await phoneA.keyboard.press('Escape')
 
     const commandButton = phoneA.getByRole('button', { name: /^(命令|Commands)$/ })
     await commandButton.focus()
@@ -331,8 +360,10 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expect(iphoneRow).toBeVisible()
     await expect(offlineButtons).toHaveCount(1)
 
-    await expect(phoneA.getByRole('heading', { name: /此设备已下线|This device is offline/ })).toBeVisible({ timeout: 30_000 })
-    await expect(phoneA.getByRole('link', { name: /返回配对|Pair again/ })).toBeVisible()
+    const revokedDialog = phoneA.getByRole('dialog', { name: /此设备已下线|This device is offline/ })
+    await expect(revokedDialog).toBeVisible({ timeout: 30_000 })
+    await expect(revokedDialog).toContainText(/请重新扫描最新二维码|Scan the latest QR code/)
+    await expect(revokedDialog.getByRole('button', { name: /重新扫码|Scan again/ }).last()).toBeVisible()
 
     await phoneB.reload({ waitUntil: 'domcontentloaded' })
     await expect(phoneB.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })).toBeVisible({ timeout: 30_000 })
