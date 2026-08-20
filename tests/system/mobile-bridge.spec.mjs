@@ -119,9 +119,19 @@ test('两台手机独立配对，桌面只下线目标设备并保留下一张�
       }
     }
 
+    if (await phoneASidebar.isVisible()) await phoneASidebar.click()
+    const unavailableSidebar = phoneA.getByRole('button', { name: /^(选择一个会话以使用侧边栏|Select a (?:session|conversation) to use the sidebar)$/ })
+    if (await unavailableSidebar.isVisible()) {
+      const unavailableBox = await unavailableSidebar.boundingBox()
+      expect(unavailableBox).not.toBeNull()
+      await phoneA.touchscreen.tap(unavailableBox.x + unavailableBox.width / 2, unavailableBox.y + unavailableBox.height / 2)
+      await expect(phoneA.getByRole('tooltip')).toHaveText(/^(选择一个会话以使用侧边栏|Select a (?:session|conversation) to use the sidebar)$/)
+    }
+
     if (!(await phoneSettings.isVisible())) {
-      await phoneASidebar.click()
-      await phoneA.getByRole('button', { name: /^(设置|Settings)$/ }).click()
+      const settingsButton = phoneA.getByRole('button', { name: /^(设置|Settings)$/ })
+      if (!(await settingsButton.isVisible())) await phoneASidebar.click()
+      await settingsButton.click()
       await expect(phoneSettings).toBeVisible()
     }
     const generalNav = phoneSettings.getByRole('button', { name: /^(通用设置|General)$/ })
@@ -180,7 +190,46 @@ test('两台手机独立配对，桌面只下线目标设备并保留下一张�
     expect(Math.abs(cancelBox.y - openBox.y)).toBeLessThanOrEqual(1)
     expect(Math.abs(cancelBox.width - openBox.width)).toBeLessThanOrEqual(1)
     await phoneA.screenshot({ path: '/tmp/mobile-bridge-directory-picker-mobile.png', fullPage: true })
-    await directoryPicker.getByRole('button', { name: /^(取消|Cancel)$/ }).click()
+    await directoryPicker.getByRole('button', { name: /^(编辑路径|Edit path)$/ }).click()
+    const pathInput = directoryPicker.getByLabel(/^(编辑路径|Edit path)$/)
+    await pathInput.fill('/root/projects')
+    await pathInput.press('Enter')
+    await expect(newFolderButton).toBeEnabled({ timeout: 30_000 })
+    await directoryPicker.getByRole('button', { name: /^(打开|Open)$/ }).click()
+    await expect(directoryPicker).toBeHidden()
+
+    const expandBetterSidebar = phoneA.getByRole('button', { name: /^(展开侧边栏|Expand sidebar)$/ })
+    await expect(expandBetterSidebar).toBeVisible({ timeout: 30_000 })
+    await expandBetterSidebar.click()
+    const newTabButton = phoneA.getByRole('button', { name: /^(新建标签页|New tab)$/ }).first()
+    await expect(newTabButton).toBeVisible()
+    await expect.poll(() => newTabButton.evaluate(button => {
+      let panel = button.parentElement
+      while (panel !== null && getComputedStyle(panel).position !== 'absolute') panel = panel.parentElement
+      return Math.abs(panel.getBoundingClientRect().x)
+    })).toBeLessThanOrEqual(1)
+    const drawerGeometry = await newTabButton.evaluate(button => {
+      let panel = button.parentElement
+      while (panel !== null && getComputedStyle(panel).position !== 'absolute') panel = panel.parentElement
+      const panelRect = panel.getBoundingClientRect()
+      const buttonRect = button.getBoundingClientRect()
+      return {
+        x: panelRect.x,
+        width: panelRect.width,
+        viewportWidth: window.innerWidth,
+        buttonX: buttonRect.x,
+        buttonRight: buttonRect.right,
+        mobileMedia: window.matchMedia('(max-width: 767px)').matches,
+        computedWidth: getComputedStyle(panel).width,
+      }
+    })
+    expect(drawerGeometry).toMatchObject({ x: 0, width: drawerGeometry.viewportWidth, mobileMedia: true })
+    expect(drawerGeometry.buttonX).toBeGreaterThanOrEqual(0)
+    expect(drawerGeometry.buttonRight).toBeLessThanOrEqual(drawerGeometry.viewportWidth)
+    const collapseBetterSidebar = phoneA.getByRole('button', { name: /^(折叠侧边栏|Collapse sidebar)$/ })
+    await expect(collapseBetterSidebar).toBeVisible()
+    await phoneA.screenshot({ path: '/tmp/better-sidebar-mobile.png', fullPage: true })
+    await collapseBetterSidebar.click()
 
     await expect(offlineButtons).toHaveCount(1)
     await expect(pairingCode).not.toHaveText(firstCode)
