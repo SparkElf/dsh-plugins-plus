@@ -1,8 +1,16 @@
 # Third-party notices
 
-## jsQR
+## qr-scanner
 
-Camera scanning serves jsQR 1.4.0 by Cosmo Wolfe and contributors. jsQR is distributed under the Apache License 2.0; the complete license text is included in `JSQR_LICENSE` and is deployed with the runtime file.
+Camera scanning uses qr-scanner 1.4.2 by Nimiq. qr-scanner is distributed under the MIT License; the complete license text is included in `QR_SCANNER_LICENSE` and is deployed with the runtime file.
+
+## zxing-wasm
+
+Non-native browser profiles use zxing-wasm 3.1.3 by Ze-Zheng Wu. zxing-wasm is distributed under the MIT License; the complete license text is included in `ZXING_WASM_LICENSE`.
+
+## ZXing-C++
+
+zxing-wasm embeds the ZXing-C++ reader. ZXing-C++ is distributed under the Apache License 2.0; the complete license text is included in `ZXING_CPP_LICENSE`.
 
 ## DeepSeek logo
 

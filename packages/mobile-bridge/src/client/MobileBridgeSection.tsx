@@ -143,8 +143,8 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     let live = true
     setQrSource(null)
     void QRCode.toDataURL(qrUrl, {
-      width: 180,
-      margin: 1,
+      width: 360,
+      margin: 4,
       errorCorrectionLevel: 'M',
       color: { dark: '#000000ff', light: '#ffffffff' },
     }).then(source => {
@@ -304,7 +304,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
             ? <span className={css.qrEmpty}>{t('qrUnavailable')}</span>
             : (
                 <div className={css.pairingDisplay}>
-                  <img className={css.qr} src={currentQrSource} alt={t('qrAlt')} width={180} height={180} />
+                  <img className={css.qr} src={currentQrSource} alt={t('qrAlt')} width={240} height={240} />
                   <div className={css.pairingCodeBlock}>
                     <span className={css.label}>{t('pairingCode')}</span>
                     <output className={css.pairingCode} aria-label={t('pairingCode')}>

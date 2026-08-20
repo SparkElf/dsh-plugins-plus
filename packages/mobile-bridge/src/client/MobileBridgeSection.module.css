@@ -130,8 +130,8 @@
 .qrRefreshing {
   box-sizing: border-box;
   display: grid;
-  width: min(388px, 100%);
-  min-height: 180px;
+  width: min(448px, 100%);
+  min-height: 240px;
   place-content: center;
   place-items: center;
   gap: 10px;
@@ -276,7 +276,7 @@
 
 .qr {
   box-sizing: border-box;
-  width: min(180px, 100%);
+  width: min(240px, 100%);
   height: auto;
   aspect-ratio: 1;
   border: 1px solid var(--dsw-alias-border-l2);

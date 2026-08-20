@@ -2,6 +2,7 @@
 
 import type {} from './contract.ts'
 import { MobileBridgeSection } from './MobileBridgeSection.tsx'
+import { RevokedDeviceModal } from './RevokedDeviceModal.tsx'
 import type { MobileBridgeSectionInjected, MobileBridgeStatus, MobileBridgeValues } from './MobileBridgeSection.tsx'
 import type { MobileBridgeClientContext } from './context.ts'
 import { en, zh } from './locales.ts'
@@ -97,6 +98,13 @@ export function apply(ctx: MobileBridgeClientContext): void {
       return await response.json() as MobileBridgeStatus
     },
   }
+
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'mobile-bridge-revoked',
+    order: 100,
+    locale: LOCALE_NS,
+  }, RevokedDeviceModal))
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

@@ -1,4 +1,4 @@
-/** Copy dictionaries for the Mobile Bridge settings section. */
+/** Copy dictionaries for the Mobile Bridge settings and revoked-device overlay. */
 
 export const zh = {
   nav: '移动连接',
@@ -42,6 +42,9 @@ export const zh = {
   confirmDisconnect: '确认下线',
   disconnecting: '正在下线',
   deviceDisconnected: '设备已下线。',
+  revokedTitle: '此设备已下线',
+  revokedDescription: '桌面端已结束此设备的移动连接，请重新扫描最新二维码。',
+  scanAgain: '重新扫码',
   deviceDisconnectFailed: '设备下线失败。',
   save: '保存配置',
   saving: '正在保存',
@@ -98,6 +101,9 @@ export const en: Record<SettingsMobileBridgeKey, string> = {
   confirmDisconnect: 'Take offline',
   disconnecting: 'Taking offline',
   deviceDisconnected: 'Device taken offline.',
+  revokedTitle: 'This device is offline',
+  revokedDescription: 'The desktop ended this device’s mobile connection. Scan the latest QR code to reconnect.',
+  scanAgain: 'Scan again',
   deviceDisconnectFailed: 'Could not take the device offline.',
   save: 'Save',
   saving: 'Saving',
