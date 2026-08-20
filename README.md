@@ -13,7 +13,7 @@
 
 - `@sparkelf/dsh-plugin-ping`：提供 `/ping` 连通性命令；无需模型调用即可回复 `pong`。
 - `@sparkelf/dsh-mobile-bridge`：完整的 Host 与 Client 插件，提供出站 E2EE 隧道、配对二维码和一等公民的“移动连接”设置页。手机端只注入连接 facade；Harness 各功能包继续拥有自己的响应式界面。
-- `@sparkelf/dsh-mobile-bridge-server`：多用户盲中继，支持邮箱验证码和可选的微信身份通道，让手机通过自有服务器访问本地 Harness。
+- `@sparkelf/dsh-mobile-bridge-server`：多用户盲中继，支持邮箱验证码、可选的微信身份通道、页面内相机扫码和持久手机登录，让手机通过自有服务器访问本地 Harness。
 
 ### CI / CD
 
@@ -41,7 +41,7 @@ This repository contains independent [DeepSeek Harness](https://github.com/deeps
 
 - `@sparkelf/dsh-plugin-ping`: provides the `/ping` connectivity command and replies with `pong` without a model call.
 - `@sparkelf/dsh-mobile-bridge`: a complete Host and Client plugin providing an outbound E2EE tunnel, pairing QR, and first-class Mobile Bridge settings section. The phone injects only the connection facade; each Harness package retains ownership of its responsive UI.
-- `@sparkelf/dsh-mobile-bridge-server`: a multi-user blind relay with email-code and optional WeChat identity channels, allowing phones to reach a local Harness through a self-hosted server.
+- `@sparkelf/dsh-mobile-bridge-server`: a multi-user blind relay with email-code and optional WeChat identity channels, in-page camera scanning, and persistent phone sign-in, allowing phones to reach a local Harness through a self-hosted server.
 
 ### CI / CD
 

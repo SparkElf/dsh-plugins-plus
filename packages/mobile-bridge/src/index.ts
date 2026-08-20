@@ -26,6 +26,8 @@ export interface MobileBridgeConfig {
   /** Optional owner email; when set with emailTwoFactor, scans need an inbox code. */
   ownerEmail: string
   emailTwoFactor: boolean
+  /** Days a paired phone remains signed in after its browser closes. */
+  sessionDays: number
   /** Stable desktop identity persisted inside this plugin's Settings namespace. */
   bridgeId: string
   /** Desktop credential used only for authenticated bridge and device operations. */
@@ -46,6 +48,7 @@ export const Config: z<MobileBridgeConfig> = z.object({
   autoReconnect: z.boolean().default(true),
   ownerEmail: z.string().default(''),
   emailTwoFactor: z.boolean().default(false),
+  sessionDays: z.number().step(1).min(1).max(365).default(7),
   bridgeId: z.string().role('secret').default(''),
   bridgeToken: z.string().role('secret').default(''),
   bridgeSecret: z.string().role('secret').default(''),
@@ -401,6 +404,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         body: JSON.stringify({
           bridgeId: live.bridgeId,
           bridgeToken: live.bridgeToken,
+          sessionDays: live.sessionDays,
           ...live.emailTwoFactor && live.ownerEmail ? { email2fa: live.ownerEmail } : {},
         }),
       })

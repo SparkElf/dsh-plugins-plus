@@ -329,7 +329,7 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
   var $ = function (id) { return document.getElementById(id) }
   var COPY = {
     zh: {
-      preferences: '显示偏好', title: '移动连接', scanFirst: '请扫描桌面端二维码', email: '邮箱', emailPlaceholder: 'name@example.com',
+      preferences: '显示偏好', title: '移动连接', scanFirst: '扫描桌面端显示的配对二维码', openScanner: '打开相机扫码', scannerTitle: '扫描配对二维码', closeScanner: '关闭相机', cameraStarting: '正在打开相机', cameraReady: '将二维码放入扫描框', cameraUnavailable: '无法使用相机，请检查浏览器相机权限。', invalidPairQr: '请扫描桌面端显示的 Mobile Bridge 配对二维码。', email: '邮箱', emailPlaceholder: 'name@example.com',
       code: '验证码', codePlaceholder: '6 位验证码', send: '发送', sending: '发送中', sent: '验证码已发送',
       pairingCode: '配对码', pairingPlaceholder: '6 位字符', connect: '登录并连接', connecting: '正在连接', light: '浅色', dark: '深色',
       ownerCode: '桌面所有者邮箱收到验证码，请输入', passphrase: '输入桌面端设置的加密口令', cancelled: '已取消',
@@ -338,7 +338,7 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
       usedPair: '配对码已使用，请扫描最新二维码。', invalidCode: '验证码无效或已过期。'
     },
     en: {
-      preferences: 'Display preferences', title: 'Mobile connection', scanFirst: 'Scan the QR code shown on the desktop', email: 'Email', emailPlaceholder: 'name@example.com',
+      preferences: 'Display preferences', title: 'Mobile connection', scanFirst: 'Scan the pairing QR shown on the desktop', openScanner: 'Open camera scanner', scannerTitle: 'Scan pairing QR', closeScanner: 'Close camera', cameraStarting: 'Opening camera', cameraReady: 'Place the QR code inside the frame', cameraUnavailable: 'The camera is unavailable. Check this browser’s camera permission.', invalidPairQr: 'Scan the Mobile Bridge pairing QR shown on the desktop.', email: 'Email', emailPlaceholder: 'name@example.com',
       code: 'Verification code', codePlaceholder: '6-digit code', send: 'Send', sending: 'Sending', sent: 'Code sent',
       pairingCode: 'Pairing code', pairingPlaceholder: '6 characters', connect: 'Sign in and connect', connecting: 'Connecting', light: 'Light', dark: 'Dark',
       ownerCode: 'Enter the code sent to the desktop owner email', passphrase: 'Enter the passphrase configured on the desktop', cancelled: 'Cancelled',
@@ -355,6 +355,7 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
     document.querySelector('.preferences').setAttribute('aria-label', tr('preferences'))
     document.querySelectorAll('[data-i18n]').forEach(function (node) { node.textContent = tr(node.getAttribute('data-i18n')) })
     document.querySelectorAll('[data-i18n-placeholder]').forEach(function (node) { node.placeholder = tr(node.getAttribute('data-i18n-placeholder')) })
+    document.querySelectorAll('[data-i18n-aria-label]').forEach(function (node) { node.setAttribute('aria-label', tr(node.getAttribute('data-i18n-aria-label'))) })
     $('langZh').setAttribute('aria-pressed', String(language === 'zh'))
     $('langEn').setAttribute('aria-pressed', String(language === 'en'))
   }
@@ -428,6 +429,92 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
     location.assign('/')
   }
 
+  var scannerStream = null
+  var scannerAnimation = 0
+  var lastScannedValue = ''
+  var lastScanAt = 0
+  var scannerCanvas = document.createElement('canvas')
+  var scannerContext = scannerCanvas.getContext('2d', { willReadFrequently: true })
+
+  // 相机轨道只属于取景页；关闭、识别成功和页面离开都会立即释放设备。
+  function stopScanner() {
+    cancelAnimationFrame(scannerAnimation)
+    scannerAnimation = 0
+    if (scannerStream) scannerStream.getTracks().forEach(function (track) { track.stop() })
+    scannerStream = null
+    $('scannerVideo').srcObject = null
+    $('scanner').hidden = true
+    document.body.classList.remove('scannerOpen')
+  }
+
+  function setScannerStatus(key, error) {
+    $('scannerStatus').textContent = tr(key)
+    $('scannerStatus').classList.toggle('error', error)
+  }
+
+  // 摄像头二维码是外部输入；这里只接受当前 relay 的配对入口，再交给既有 hash 配对流程。
+  function acceptScannedPair(value) {
+    var target = new URL(value)
+    if (target.origin !== location.origin || target.pathname !== '/bridge/' || !target.hash) throw new Error('invalidPairQr')
+    stopScanner()
+    location.assign('/bridge/' + target.hash)
+  }
+
+  function scanCameraFrame(now) {
+    var video = $('scannerVideo')
+    if (video.readyState >= 2 && now - lastScanAt >= 120) {
+      lastScanAt = now
+      var sourceSize = Math.min(video.videoWidth, video.videoHeight)
+      var outputSize = Math.min(sourceSize, 640)
+      scannerCanvas.width = outputSize
+      scannerCanvas.height = outputSize
+      scannerContext.drawImage(video, (video.videoWidth - sourceSize) / 2, (video.videoHeight - sourceSize) / 2, sourceSize, sourceSize, 0, 0, outputSize, outputSize)
+      var pixels = scannerContext.getImageData(0, 0, outputSize, outputSize)
+      var decoded = window.jsQR(pixels.data, outputSize, outputSize, { inversionAttempts: 'dontInvert' })
+      if (decoded && decoded.data !== lastScannedValue) {
+        lastScannedValue = decoded.data
+        try {
+          acceptScannedPair(decoded.data)
+          return
+        } catch (error) {
+          console.info('[dsh-mobile-bridge] camera QR rejected', error)
+          setScannerStatus('invalidPairQr', true)
+        }
+      }
+    }
+    scannerAnimation = requestAnimationFrame(scanCameraFrame)
+  }
+
+  function openScanner() {
+    $('scanner').hidden = false
+    document.body.classList.add('scannerOpen')
+    lastScannedValue = ''
+    lastScanAt = 0
+    setScannerStatus('cameraStarting', false)
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setScannerStatus('cameraUnavailable', true)
+      return
+    }
+    navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' } } })
+      .then(function (stream) {
+        scannerStream = stream
+        $('scannerVideo').srcObject = stream
+        return $('scannerVideo').play()
+      })
+      .then(function () {
+        setScannerStatus('cameraReady', false)
+        scannerAnimation = requestAnimationFrame(scanCameraFrame)
+      })
+      .catch(function (error) {
+        console.info('[dsh-mobile-bridge] camera start failed', error)
+        setScannerStatus('cameraUnavailable', true)
+      })
+  }
+
+  $('openScanner').onclick = openScanner
+  $('closeScanner').onclick = stopScanner
+  window.addEventListener('pagehide', stopScanner)
+
   var fragment = location.hash.slice(1)
   if (fragment) {
     try {
@@ -465,8 +552,12 @@ export const CLIENT_SOURCE = `/* DSH mobile bridge client bootstrap: login, pair
   var stored = localStorage.getItem('dshmb-pair')
   $('loginForm').hidden = !stored
   $('scanFirst').hidden = !!stored
-  if (!fragment && stored && document.cookie.includes('mbs=')) {
-    registerSw(JSON.parse(stored)).then(navigateToHarness).catch(showError)
+  if (!fragment && stored) {
+    $('x').textContent = tr('connecting')
+    api('/api/me')
+      .then(function () { return registerSw(JSON.parse(stored)) })
+      .then(navigateToHarness)
+      .catch(showError)
   }
   $('s').onclick = function () {
     var button = $('s')
