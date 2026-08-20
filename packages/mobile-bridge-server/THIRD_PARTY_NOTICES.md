@@ -1,5 +1,9 @@
 # Third-party notices
 
+## jsQR
+
+Camera scanning serves jsQR 1.4.0 by Cosmo Wolfe and contributors. jsQR is distributed under the Apache License 2.0; the complete license text is included in `JSQR_LICENSE` and is deployed with the runtime file.
+
 ## DeepSeek logo
 
 The DeepSeek logo in `src/deepseek-logo.svg` is copied from DeepSeek Harness and remains Copyright (c) 2026 DeepSeek. It is distributed under the MIT License included below.

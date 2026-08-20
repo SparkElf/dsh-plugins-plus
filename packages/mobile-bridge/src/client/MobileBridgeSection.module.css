@@ -127,6 +127,42 @@
   gap: 20px;
 }
 
+.qrRefreshing {
+  box-sizing: border-box;
+  display: grid;
+  width: min(388px, 100%);
+  min-height: 180px;
+  place-content: center;
+  place-items: center;
+  gap: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.qrSpinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--dsw-alias-border-l2);
+  border-top-color: var(--dsw-alias-state-business-primary);
+  border-radius: 50%;
+  animation: pairing-spin 800ms linear infinite;
+}
+
+@keyframes pairing-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qrSpinner {
+    animation: none;
+  }
+}
+
 .pairingCodeBlock {
   display: flex;
   width: min(188px, 100%);

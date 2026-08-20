@@ -203,7 +203,7 @@ interface MobileBridgeStatusView {
   serverUrl: string
   qrUrl: string
   pairingCode: string
-  qrRefreshAt: number
+  pairingRefreshing: boolean
   devices: MobileBridgeDevice[]
 }
 
@@ -232,7 +232,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     restartRequested: false,
     pairing: undefined as PairingTicket | undefined,
     lastQrUrl: '',
-    qrRefreshAt: 0,
+    pairingRefreshing: false,
     devices: [] as MobileBridgeDevice[],
   }
   const statusStreams = new Set<MobileResponse>()
@@ -246,7 +246,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     serverUrl: current().serverUrl,
     qrUrl: state.lastQrUrl,
     pairingCode: state.pairing?.code ?? '',
-    qrRefreshAt: state.qrRefreshAt,
+    pairingRefreshing: state.pairingRefreshing,
     devices: state.devices,
   })
 
@@ -273,7 +273,6 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   const schedulePairingRotation = (delayMs: number): void => {
     if (disposed) return
     clearPairingTimer()
-    state.qrRefreshAt = Date.now() + delayMs
     emitStatus()
     pairingTimer = setTimeout(() => {
       pairingTimer = undefined
@@ -310,12 +309,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     return statusView()
   }
 
-  // 配对票据只负责新设备准入；轮换不得改变稳定桌面身份或现有设备密钥。
+  // 配对票据只负责新设备准入；请求期间隐藏旧票据并发布刷新进度，轮换不得改变稳定桌面身份或现有设备密钥。
   async function rotatePairing(): Promise<void> {
     const pairing = state.pairing
     const socket = state.socket
     if (disposed || pairing === undefined || socket === undefined || socket.readyState !== WebSocket.OPEN) return
-    state.qrRefreshAt = Date.now() + PAIRING_ROTATE_RETRY_MS
+    state.pairingRefreshing = true
     emitStatus()
     try {
       const live = current()
@@ -329,6 +328,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       if (state.pairing !== pairing) return
       state.pairing = next
       state.lastQrUrl = pairingUrl(live.serverUrl, next.code, live.bridgeSecret, live.userKey)
+      state.pairingRefreshing = false
       schedulePairingRotation(Math.max(0, next.expiresAt - Date.now() - PAIRING_ROTATE_LEAD_MS))
     } catch (error) {
       console.error('[dsh-mobile-bridge] pairing rotation failed', error)
@@ -338,6 +338,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         socket.close()
         return
       }
+      state.pairingRefreshing = false
       schedulePairingRotation(PAIRING_ROTATE_RETRY_MS)
     }
   }
@@ -392,11 +393,13 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     local.close(request.code, request.reason)
   }
 
-  // 每次重连复用 Settings 持久化身份，并在同一连接上投影全部设备状态。
+  // 每次重连复用 Settings 持久化身份；取票到 WebSocket 就绪期间发布刷新进度，再投影全部设备状态。
   async function connect(): Promise<void> {
     if (disposed) return
     const live = current()
     if (!live.serverUrl || !live.autoConnect || !live.bridgeId || !live.bridgeToken || !live.bridgeSecret) return
+    state.pairingRefreshing = true
+    emitStatus()
     try {
       const response = await fetch(live.serverUrl + '/bridge/api/bridge/start', {
         method: 'POST',
@@ -419,6 +422,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       socket.on('open', () => {
         state.connected = true
         state.lastQrUrl = pairingUrl(live.serverUrl, started.code, live.bridgeSecret, live.userKey)
+        state.pairingRefreshing = false
         schedulePairingRotation(Math.max(0, started.expiresAt - Date.now() - PAIRING_ROTATE_LEAD_MS))
         void loadDevices().catch(error => { console.error('[dsh-mobile-bridge] device list refresh failed', error) })
       })
@@ -459,7 +463,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
           state.connected = false
           state.pairing = undefined
           state.lastQrUrl = ''
-          state.qrRefreshAt = 0
+          state.pairingRefreshing = false
           state.devices = state.devices.map(device => ({ ...device, online: false }))
           for (const local of localSockets.values()) local.close(1012, 'bridge offline')
           localSockets.clear()
@@ -479,7 +483,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       clearPairingTimer()
       state.pairing = undefined
       state.lastQrUrl = ''
-      state.qrRefreshAt = 0
+      state.pairingRefreshing = false
       state.socket?.close()
       emitStatus()
       if (current().autoReconnect) scheduleConnect(5000)

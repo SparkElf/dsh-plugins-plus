@@ -35,7 +35,7 @@ location /ws/ {
 }
 ```
 
-2. Bundle the server: `pnpm dlx esbuild packages/mobile-bridge-server/src/index.ts --bundle --platform=node --format=esm --outfile=bridge-server.mjs` (banner `createRequire` for the CJS deps), then copy `packages/mobile-bridge-server/src/deepseek-logo.svg` beside `bridge-server.mjs`. The logo's MIT notice is in `packages/mobile-bridge-server/THIRD_PARTY_NOTICES.md`.
+2. Bundle the server with `pnpm dlx esbuild@0.27.0 packages/mobile-bridge-server/src/index.ts --bundle --platform=node --format=esm --banner:js="import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);" --outfile=bridge-server.mjs`. Deploy `bridge-server.mjs` and `packages/mobile-bridge-server/src/deepseek-logo.svg` under `/opt/dsh-mobile-bridge`. Camera scanning also serves the exact `jsqr@1.4.0` browser runtime: copy its `package.json`, `dist/jsQR.js`, and `LICENSE` under `/opt/dsh-mobile-bridge/node_modules/jsqr/`, preserving the `dist/` subdirectory. Omitting the ESM banner or jsQR runtime makes the service fail at startup. Third-party attribution is in `packages/mobile-bridge-server/THIRD_PARTY_NOTICES.md`.
 3. Write `/etc/dsh-mobile-bridge.env` (mode 0600) with:
    - `MOBILE_BRIDGE_SECRET` — 32-byte hex, HMAC secret for session tokens.
    - `MOBILE_BRIDGE_DATA` — users JSON path (e.g. `/var/lib/dsh-mobile-bridge/users.json`).
@@ -50,7 +50,7 @@ location /ws/ {
 1. Install the complete Host and Client plugin into the Web profile:
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.2
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.3
 ```
 
 2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; set the mobile sign-in duration (seven days by default), and optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and wait for the new six-character pairing code and QR to appear with Connected status.

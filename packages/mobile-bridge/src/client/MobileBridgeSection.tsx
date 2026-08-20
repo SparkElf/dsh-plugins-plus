@@ -35,7 +35,7 @@ export interface MobileBridgeStatus {
   connected: boolean
   qrUrl: string
   pairingCode: string
-  qrRefreshAt: number
+  pairingRefreshing: boolean
   devices: MobileBridgeDevice[]
 }
 
@@ -101,7 +101,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   const [refreshing, setRefreshing] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [qrSource, setQrSource] = useState<string | null>(null)
+  const [qrSource, setQrSource] = useState<{ url: string; source: string } | null>(null)
   const [disconnectTarget, setDisconnectTarget] = useState<MobileBridgeDevice | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
   const saveRefresh = useRef<AbortController | null>(null)
@@ -148,7 +148,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
       errorCorrectionLevel: 'M',
       color: { dark: '#000000ff', light: '#ffffffff' },
     }).then(source => {
-      if (live) setQrSource(source)
+      if (live) setQrSource({ url: qrUrl, source })
     }).catch((caught: unknown) => {
       console.error('[dsh-mobile-bridge] pairing QR generation failed', caught)
       if (live) setError(t('qrFailed'))
@@ -199,7 +199,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     try {
       await saveValues(values)
       persisted = true
-      if (expectQr) setStatus(current => current === null ? current : { ...current, connected: false, qrUrl: '', pairingCode: '', qrRefreshAt: 0 })
+      if (expectQr) setStatus(current => current === null ? current : { ...current, connected: false, qrUrl: '', pairingCode: '', pairingRefreshing: true })
       const ready = await confirmFreshStatus(previousQrUrl, expectQr, controller.signal)
       if (controller.signal.aborted) return
       if (!ready) {
@@ -237,6 +237,8 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
 
   const statusLabel = status === null ? t('loading') : status.connected ? t('connected') : t('disconnected')
   const statusState = refreshing || status === null ? 'ongoing' : status.connected ? 'done' : 'warning'
+  const currentQrSource = status !== null && qrSource?.url === status.qrUrl ? qrSource.source : null
+  const pairingRefreshing = status !== null && (status.pairingRefreshing || (status.qrUrl !== '' && currentQrSource === null))
 
   return (
     <section className={css.section}>
@@ -291,19 +293,26 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
 
       <div className={css.pairing}>
         <SettingsLabel label={t('pair')} hint={t('pairHint')} />
-        {qrSource === null
-          ? <span className={css.qrEmpty}>{t('qrUnavailable')}</span>
-          : (
-              <div className={css.pairingDisplay}>
-                <img className={css.qr} src={qrSource} alt={t('qrAlt')} width={180} height={180} />
-                <div className={css.pairingCodeBlock}>
-                  <span className={css.label}>{t('pairingCode')}</span>
-                  <output className={css.pairingCode} aria-label={t('pairingCode')}>
-                    {status?.pairingCode.toUpperCase().split('').map((character, index) => <span key={index}>{character}</span>)}
-                  </output>
-                </div>
+        {pairingRefreshing
+          ? (
+              <div className={css.qrRefreshing} role="status">
+                <span className={css.qrSpinner} aria-hidden="true" />
+                <span>{t('pairingRefreshing')}</span>
               </div>
-            )}
+            )
+          : currentQrSource === null
+            ? <span className={css.qrEmpty}>{t('qrUnavailable')}</span>
+            : (
+                <div className={css.pairingDisplay}>
+                  <img className={css.qr} src={currentQrSource} alt={t('qrAlt')} width={180} height={180} />
+                  <div className={css.pairingCodeBlock}>
+                    <span className={css.label}>{t('pairingCode')}</span>
+                    <output className={css.pairingCode} aria-label={t('pairingCode')}>
+                      {status?.pairingCode.toUpperCase().split('').map((character, index) => <span key={index}>{character}</span>)}
+                    </output>
+                  </div>
+                </div>
+              )}
       </div>
 
       <div className={css.devices}>
