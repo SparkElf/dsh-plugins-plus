@@ -46,7 +46,7 @@ const DEEPSEEK_LOGO = readFileSync(new URL('./deepseek-logo.svg', import.meta.ur
 const DEEPSEEK_LOGO_DATA_URL = 'data:image/svg+xml;base64,' + Buffer.from(DEEPSEEK_LOGO).toString('base64')
 
 const LANDING = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>DeepSeek Harness Mobile</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>DeepSeek Harness Mobile</title><link rel="icon" type="image/svg+xml" href="${DEEPSEEK_LOGO_DATA_URL}">
 <style>
 :root{color-scheme:dark;--page:#090d13;--field:#151b25;--field-focus:#1b2330;--label:#f4f7fb;--muted:#aeb8c8;--placeholder:#768296;--primary:#4d6bfe;--primary-hover:#5a76ff;--secondary:#222a37;--secondary-hover:#2a3443;--danger:#ff7b84;--grid:rgb(105 132 255/.12)}
 :root[data-theme=light]{color-scheme:light;--page:#f6f8fc;--field:#e9edf5;--field-focus:#e2e8f3;--label:#182033;--muted:#5c687b;--placeholder:#7d8899;--primary:#405de6;--primary-hover:#3452dc;--secondary:#e1e7f1;--secondary-hover:#d8e0ed;--danger:#d93d54;--grid:rgb(77 107 254/.045)}
