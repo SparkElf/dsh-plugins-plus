@@ -12,6 +12,18 @@ async function settleSettingsJoins(page, pending) {
   await page.evaluate(render)
 }
 
+async function expectMainSidebarHalf(page) {
+  await expect.poll(() => page.locator('[data-dsh-frame]').evaluate(frame => ({
+    viewportWidth: window.innerWidth,
+    frameWidth: frame.getBoundingClientRect().width,
+    sidebarWidth: Number.parseFloat(getComputedStyle(frame).gridTemplateColumns),
+  }))).toEqual({ viewportWidth: 412, frameWidth: 412, sidebarWidth: 206 })
+}
+
+async function settleMainSidebarCollapsed(page) {
+  await expect.poll(() => page.locator('[data-dsh-frame]').evaluate(frame => Number.parseFloat(getComputedStyle(frame).gridTemplateColumns))).toBeLessThanOrEqual(57)
+}
+
 function observePage(page, label, problems) {
   const pending = new Set()
   page.on('request', request => { pending.add(request.url()) })
@@ -111,6 +123,8 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
 
     await phoneA.goto(phoneAUrl, { waitUntil: 'domcontentloaded' })
     const phoneASidebar = phoneA.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })
+    const openMainSidebar = phoneA.getByRole('button', { name: /^(打开侧边栏|Open sidebar)$/ }).first()
+    const collapseMainSidebar = phoneA.getByRole('button', { name: /^(收起侧边栏|Collapse sidebar)$/ }).first()
     const phoneSettings = phoneA.getByRole('dialog', { name: /^(设置|Settings)$/ })
     await expect(phoneASidebar).toBeVisible({ timeout: 30_000 })
     await settleSettingsJoins(phoneA, pendingPhoneA)
@@ -126,7 +140,9 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
       }
     }
 
-    if (await phoneASidebar.isVisible()) await phoneASidebar.click()
+    if (await openMainSidebar.isVisible()) await openMainSidebar.click()
+    await expect(collapseMainSidebar).toBeVisible()
+    await expectMainSidebarHalf(phoneA)
     const unavailableSidebar = phoneA.getByRole('button', { name: /^(选择一个会话以使用侧边栏|Select a (?:session|conversation) to use the sidebar)$/ })
     if (await unavailableSidebar.isVisible()) {
       const unavailableBox = await unavailableSidebar.boundingBox()
@@ -135,9 +151,15 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
       await expect(phoneA.getByRole('tooltip')).toHaveText(/^(选择一个会话以使用侧边栏|Select a (?:session|conversation) to use the sidebar)$/)
     }
 
+    const startedSession = phoneA.getByRole('treeitem').filter({ hasText: /\d+(?:分钟|小时|天|h|min|d)(?:前| ago)?/ }).first()
+    await expect(startedSession).toBeVisible()
+    await startedSession.click()
+    await expectMainSidebarHalf(phoneA)
+    await expect(phoneA.getByRole('button', { name: 'Session log' })).toBeVisible()
+
     if (!(await phoneSettings.isVisible())) {
       const settingsButton = phoneA.getByRole('button', { name: /^(设置|Settings)$/ })
-      if (!(await settingsButton.isVisible())) await phoneASidebar.click()
+      if (!(await settingsButton.isVisible())) await openMainSidebar.click()
       await settingsButton.click()
       await expect(phoneSettings).toBeVisible()
     }
@@ -177,6 +199,20 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expect(presetLabel).toBeHidden()
     await phoneSettings.getByRole('button', { name: /^(关闭|Close)$/ }).click()
 
+    await expect(collapseMainSidebar).toBeVisible()
+
+    const sessionLogButton = phoneA.getByRole('button', { name: 'Session log' })
+    const expandBetterSidebar = phoneA.getByRole('button', { name: /^(展开侧边栏|Expand sidebar)$/ })
+    await expect(sessionLogButton).toBeVisible()
+    await expect(expandBetterSidebar).toBeVisible()
+    const [sessionLogBox, expandBetterSidebarBox] = await Promise.all([sessionLogButton.boundingBox(), expandBetterSidebar.boundingBox()])
+    expect(sessionLogBox).not.toBeNull()
+    expect(expandBetterSidebarBox).not.toBeNull()
+    expect(sessionLogBox.width).toBeLessThanOrEqual(28)
+    expect(sessionLogBox.x + sessionLogBox.width).toBeLessThanOrEqual(expandBetterSidebarBox.x)
+    expect(expandBetterSidebarBox.x - sessionLogBox.x - sessionLogBox.width).toBeLessThanOrEqual(6)
+    await phoneA.screenshot({ path: '/tmp/mobile-session-header-composer.png', fullPage: true })
+
     await phoneA.getByRole('button', { name: /^(添加工作区|Add workspace)$/ }).click()
     const directoryPicker = phoneA.getByRole('dialog', { name: /^(选择工作区目录|Select Workspace Directory)$/ })
     await expect(directoryPicker).toBeVisible()
@@ -204,8 +240,12 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expect(newFolderButton).toBeEnabled({ timeout: 30_000 })
     await directoryPicker.getByRole('button', { name: /^(打开|Open)$/ }).click()
     await expect(directoryPicker).toBeHidden()
+    await expectMainSidebarHalf(phoneA)
+    await expect(collapseMainSidebar).toBeVisible()
+    await collapseMainSidebar.click()
+    await settleMainSidebarCollapsed(phoneA)
+    await expect(openMainSidebar).toBeVisible()
 
-    const expandBetterSidebar = phoneA.getByRole('button', { name: /^(展开侧边栏|Expand sidebar)$/ })
     await expect(expandBetterSidebar).toBeVisible({ timeout: 30_000 })
     await expandBetterSidebar.click()
     const newTabButton = phoneA.getByRole('button', { name: /^(新建标签页|New tab)$/ }).first()
