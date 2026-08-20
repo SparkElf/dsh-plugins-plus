@@ -138,7 +138,7 @@ function wsReady() {
         }
         if ((full.headers?.['content-type'] ?? '').includes('text/html')) {
           let html = new TextDecoder().decode(body)
-          if (!html.includes('/bridge/socket-client.js')) html = html.replace('</head>', '<script src="/bridge/socket-client.js"></script><link rel="stylesheet" href="/mobile/bridge/style.css"></head>')
+          if (!html.includes('/bridge/socket-client.js')) html = html.replace('</head>', '<script src="/bridge/socket-client.js"></script></head>')
           body = new TextEncoder().encode(html)
         }
         pending.delete(frame.id)

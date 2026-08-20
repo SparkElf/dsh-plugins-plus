@@ -5,6 +5,13 @@ import { PNG } from 'pngjs'
 const HARNESS_URL = process.env.DSH_SYSTEM_URL ?? 'http://127.0.0.1:3081'
 const RELAY_URL = 'https://www.tokensfree.eu.cc'
 
+async function settleSettingsJoins(page, pending) {
+  const render = () => new Promise(resolve => { requestAnimationFrame(() => { requestAnimationFrame(resolve) }) })
+  await page.evaluate(render)
+  await expect.poll(() => [...pending].some(url => /\/api\/(?:settings|credentials|llm)\./.test(new URL(url).pathname))).toBe(false)
+  await page.evaluate(render)
+}
+
 function observePage(page, label, problems) {
   const pending = new Set()
   page.on('request', request => { pending.add(request.url()) })
@@ -21,7 +28,8 @@ function observePage(page, label, problems) {
 }
 
 async function decodeRenderedQr(qr) {
-  const png = PNG.sync.read(await qr.screenshot())
+  await expect.poll(() => qr.evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true)
+  const png = PNG.sync.read(await qr.screenshot({ path: '/tmp/mobile-bridge-qr-current.png' }))
   const decoded = jsQR(new Uint8ClampedArray(png.data), png.width, png.height)
   expect(decoded, 'Settings 中渲染的二维码应可由手机相机解码').not.toBeNull()
   return decoded.data
@@ -95,7 +103,133 @@ test('两台手机独立配对，桌面只下线目标设备并保留下一张�
     expect(new URL(phoneAUrl).origin).toBe(RELAY_URL)
 
     await phoneA.goto(phoneAUrl, { waitUntil: 'domcontentloaded' })
-    await expect(phoneA.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })).toBeVisible({ timeout: 30_000 })
+    const phoneASidebar = phoneA.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })
+    const phoneSettings = phoneA.getByRole('dialog', { name: /^(设置|Settings)$/ })
+    await expect(phoneASidebar).toBeVisible({ timeout: 30_000 })
+    await settleSettingsJoins(phoneA, pendingPhoneA)
+    const welcome = phoneA.getByRole('dialog', { name: /^(内测声明|Internal Testing Notice)$/ })
+    if (await welcome.isVisible()) {
+      await welcome.getByRole('button', { name: /^(继续|Continue)$/ }).click()
+      await expect(welcome).toBeHidden()
+      await settleSettingsJoins(phoneA, pendingPhoneA)
+      const credentialOnboarding = phoneA.getByRole('dialog', { name: /^(添加一个 API Key 开始使用|Add an API Key to get started)$/ })
+      if (await credentialOnboarding.isVisible()) {
+        await credentialOnboarding.getByRole('button', { name: /^(稍后配置|Configure later)$/ }).click()
+        await expect(credentialOnboarding).toBeHidden()
+      }
+    }
+
+    if (await phoneASidebar.isVisible()) await phoneASidebar.click()
+    const unavailableSidebar = phoneA.getByRole('button', { name: /^(选择一个会话以使用侧边栏|Select a (?:session|conversation) to use the sidebar)$/ })
+    if (await unavailableSidebar.isVisible()) {
+      const unavailableBox = await unavailableSidebar.boundingBox()
+      expect(unavailableBox).not.toBeNull()
+      await phoneA.touchscreen.tap(unavailableBox.x + unavailableBox.width / 2, unavailableBox.y + unavailableBox.height / 2)
+      await expect(phoneA.getByRole('tooltip')).toHaveText(/^(选择一个会话以使用侧边栏|Select a (?:session|conversation) to use the sidebar)$/)
+    }
+
+    if (!(await phoneSettings.isVisible())) {
+      const settingsButton = phoneA.getByRole('button', { name: /^(设置|Settings)$/ })
+      if (!(await settingsButton.isVisible())) await phoneASidebar.click()
+      await settingsButton.click()
+      await expect(phoneSettings).toBeVisible()
+    }
+    const generalNav = phoneSettings.getByRole('button', { name: /^(通用设置|General)$/ })
+    if (!(await generalNav.isVisible())) {
+      await phoneSettings.getByRole('button', { name: /^(设置|Settings)$/ }).click()
+    }
+    await expect(generalNav).toBeVisible()
+    const presetLabel = phoneSettings.getByText(/^(Agent 预设|Agent preset)$/).nth(1)
+    await expect(presetLabel).toBeHidden()
+    const navigationGeometry = await phoneSettings.evaluate(element => {
+      const rect = element.getBoundingClientRect()
+      return {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      }
+    })
+    expect(navigationGeometry.x).toBe(0)
+    expect(navigationGeometry.y).toBe(0)
+    expect(navigationGeometry.width).toBe(navigationGeometry.viewportWidth)
+    expect(navigationGeometry.height).toBe(navigationGeometry.viewportHeight)
+    expect(navigationGeometry.pageOverflow).toBeLessThanOrEqual(0)
+
+    await generalNav.click()
+    await expect(presetLabel).toBeVisible()
+    expect((await presetLabel.boundingBox()).width).toBeGreaterThan(48)
+    expect(await phoneSettings.evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(0)
+    await phoneA.screenshot({ path: '/tmp/mobile-bridge-settings-mobile.png', fullPage: true })
+
+    await phoneSettings.getByRole('button', { name: /^(设置|Settings)$/ }).click()
+    await expect(generalNav).toBeVisible()
+    await expect(presetLabel).toBeHidden()
+    await phoneSettings.getByRole('button', { name: /^(关闭|Close)$/ }).click()
+
+    await phoneA.getByRole('button', { name: /^(添加工作区|Add workspace)$/ }).click()
+    const directoryPicker = phoneA.getByRole('dialog', { name: /^(选择工作区目录|Select Workspace Directory)$/ })
+    await expect(directoryPicker).toBeVisible()
+    const newFolderButton = directoryPicker.getByRole('button', { name: /^(新建文件夹|New folder)$/ })
+    await expect(newFolderButton).toBeEnabled({ timeout: 30_000 })
+    const [newFolderBox, showHiddenBox, cancelBox, openBox] = await Promise.all([
+      newFolderButton.boundingBox(),
+      directoryPicker.getByRole('button', { name: /^(显示隐藏文件|Show hidden files)$/ }).boundingBox(),
+      directoryPicker.getByRole('button', { name: /^(取消|Cancel)$/ }).boundingBox(),
+      directoryPicker.getByRole('button', { name: /^(打开|Open)$/ }).boundingBox(),
+    ])
+    expect(newFolderBox).not.toBeNull()
+    expect(showHiddenBox).not.toBeNull()
+    expect(cancelBox).not.toBeNull()
+    expect(openBox).not.toBeNull()
+    expect(newFolderBox.y).toBeLessThan(cancelBox.y)
+    expect(showHiddenBox.y).toBeLessThan(cancelBox.y)
+    expect(Math.abs(cancelBox.y - openBox.y)).toBeLessThanOrEqual(1)
+    expect(Math.abs(cancelBox.width - openBox.width)).toBeLessThanOrEqual(1)
+    await phoneA.screenshot({ path: '/tmp/mobile-bridge-directory-picker-mobile.png', fullPage: true })
+    await directoryPicker.getByRole('button', { name: /^(编辑路径|Edit path)$/ }).click()
+    const pathInput = directoryPicker.getByLabel(/^(编辑路径|Edit path)$/)
+    await pathInput.fill('/root/projects')
+    await pathInput.press('Enter')
+    await expect(newFolderButton).toBeEnabled({ timeout: 30_000 })
+    await directoryPicker.getByRole('button', { name: /^(打开|Open)$/ }).click()
+    await expect(directoryPicker).toBeHidden()
+
+    const expandBetterSidebar = phoneA.getByRole('button', { name: /^(展开侧边栏|Expand sidebar)$/ })
+    await expect(expandBetterSidebar).toBeVisible({ timeout: 30_000 })
+    await expandBetterSidebar.click()
+    const newTabButton = phoneA.getByRole('button', { name: /^(新建标签页|New tab)$/ }).first()
+    await expect(newTabButton).toBeVisible()
+    await expect.poll(() => newTabButton.evaluate(button => {
+      let panel = button.parentElement
+      while (panel !== null && getComputedStyle(panel).position !== 'absolute') panel = panel.parentElement
+      return Math.abs(panel.getBoundingClientRect().x)
+    })).toBeLessThanOrEqual(1)
+    const drawerGeometry = await newTabButton.evaluate(button => {
+      let panel = button.parentElement
+      while (panel !== null && getComputedStyle(panel).position !== 'absolute') panel = panel.parentElement
+      const panelRect = panel.getBoundingClientRect()
+      const buttonRect = button.getBoundingClientRect()
+      return {
+        x: panelRect.x,
+        width: panelRect.width,
+        viewportWidth: window.innerWidth,
+        buttonX: buttonRect.x,
+        buttonRight: buttonRect.right,
+        mobileMedia: window.matchMedia('(max-width: 767px)').matches,
+        computedWidth: getComputedStyle(panel).width,
+      }
+    })
+    expect(drawerGeometry).toMatchObject({ x: 0, width: drawerGeometry.viewportWidth, mobileMedia: true })
+    expect(drawerGeometry.buttonX).toBeGreaterThanOrEqual(0)
+    expect(drawerGeometry.buttonRight).toBeLessThanOrEqual(drawerGeometry.viewportWidth)
+    const collapseBetterSidebar = phoneA.getByRole('button', { name: /^(折叠侧边栏|Collapse sidebar)$/ })
+    await expect(collapseBetterSidebar).toBeVisible()
+    await phoneA.screenshot({ path: '/tmp/better-sidebar-mobile.png', fullPage: true })
+    await collapseBetterSidebar.click()
 
     await expect(offlineButtons).toHaveCount(1)
     await expect(pairingCode).not.toHaveText(firstCode)
