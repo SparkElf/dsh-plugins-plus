@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-mobile-bridge-server",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "type": "module",
   "description": "Multi-user bridge server connecting mobile browsers to local DeepSeek Harness instances through outbound tunnels.",
   "license": "MIT",
@@ -24,7 +24,7 @@
     "ZXING_WASM_LICENSE"
   ],
   "dependencies": {
-    "nodemailer": "^6.9.0",
+    "nodemailer": "9.0.5",
     "qr-scanner": "1.4.2",
     "ws": "^8.18.0",
     "zxing-wasm": "3.1.3"

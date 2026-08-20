@@ -9,7 +9,7 @@ DeepSeek Harness 的独立移动连接插件。桌面端主动连接公网中继
 ### 安装
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.3
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.4
 ```
 
 安装会通过包内 `dsh.bundle` 挂载 Host 插件，并通过 `dsh.client` 加载浏览器设置页面。手机端仅注入应用 WebSocket facade；Harness 界面的响应式样式继续由各界面所属包负责。禁用或移除该 bundle 会同时移除路由、连接和设置菜单。
@@ -36,7 +36,7 @@ The package owns both halves of the capability: the Host provides the outbound t
 ### Install
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.3
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.4
 ```
 
 The package's `dsh.bundle` mounts the Host plugin and `dsh.client` loads the browser settings section. The phone injects only the application WebSocket facade; each Harness surface retains ownership of its responsive styles. Disabling or removing the bundle removes the routes, connection, and settings navigation entry together.
