@@ -7,6 +7,7 @@ export default defineConfig({
   workers: 1,
   reporter: 'list',
   use: {
+    actionTimeout: 10_000,
     channel: 'chrome',
     locale: 'zh-CN',
     viewport: { width: 1440, height: 1000 },
