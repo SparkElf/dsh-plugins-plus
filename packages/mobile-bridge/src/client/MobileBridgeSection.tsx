@@ -15,6 +15,7 @@ export interface MobileBridgeValues {
   userKey: string
   ownerEmail: string
   emailTwoFactor: boolean
+  sessionDays: number
   autoConnect: boolean
 }
 
@@ -86,6 +87,7 @@ const DEFAULTS: MobileBridgeValues = {
   userKey: '',
   ownerEmail: '',
   emailTwoFactor: false,
+  sessionDays: 7,
   autoConnect: true,
 }
 
@@ -257,6 +259,10 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
           <label className={css.field} htmlFor="dshmb-local-port">
             <SettingsLabel label={t('localPort')} hint={t('localPortHint')} />
             <Input id="dshmb-local-port" className={css.control} type="number" min={1} step={1} value={values.localPort} disabled={!loaded || saving} onChange={event => set('localPort', event.currentTarget.valueAsNumber)} />
+          </label>
+          <label className={css.field} htmlFor="dshmb-session-days">
+            <SettingsLabel label={t('sessionDays')} hint={t('sessionDaysHint')} />
+            <Input id="dshmb-session-days" className={css.control} type="number" min={1} max={365} step={1} value={values.sessionDays} disabled={!loaded || saving} onChange={event => set('sessionDays', event.currentTarget.valueAsNumber)} />
           </label>
           <label className={css.field} htmlFor="dshmb-user-key">
             <SettingsLabel label={t('userKey')} hint={t('userKeyHint')} />

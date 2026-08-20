@@ -10,6 +10,7 @@
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { WebSocket, WebSocketServer } from 'ws'
 import { SW_SOURCE, CLIENT_SOURCE, SOCKET_CLIENT_SOURCE } from './phone.ts'
@@ -34,18 +35,20 @@ export interface BridgeServerOptions {
 }
 
 const COOKIE = 'mbs'
+const require = createRequire(import.meta.url)
+const JSQR_SOURCE = readFileSync(require.resolve('jsqr'), 'utf8')
 const DEEPSEEK_LOGO = readFileSync(new URL('./deepseek-logo.svg', import.meta.url), 'utf8')
 const DEEPSEEK_LOGO_DATA_URL = 'data:image/svg+xml;base64,' + Buffer.from(DEEPSEEK_LOGO).toString('base64')
 
 const LANDING = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>DeepSeek Harness Mobile</title>
 <style>
-:root{color-scheme:dark;--page:#090d13;--field:#151b25;--field-focus:#1b2330;--label:#f4f7fb;--muted:#aeb8c8;--placeholder:#768296;--primary:#4d6bfe;--primary-hover:#5a76ff;--secondary:#222a37;--secondary-hover:#2a3443;--danger:#ff7b84}
-:root[data-theme=light]{color-scheme:light;--page:#f6f8fc;--field:#e9edf5;--field-focus:#e2e8f3;--label:#182033;--muted:#5c687b;--placeholder:#7d8899;--primary:#405de6;--primary-hover:#3452dc;--secondary:#e1e7f1;--secondary-hover:#d8e0ed;--danger:#d93d54}
+:root{color-scheme:dark;--page:#090d13;--field:#151b25;--field-focus:#1b2330;--label:#f4f7fb;--muted:#aeb8c8;--placeholder:#768296;--primary:#4d6bfe;--primary-hover:#5a76ff;--secondary:#222a37;--secondary-hover:#2a3443;--danger:#ff7b84;--grid:rgb(105 132 255/.12)}
+:root[data-theme=light]{color-scheme:light;--page:#f6f8fc;--field:#e9edf5;--field-focus:#e2e8f3;--label:#182033;--muted:#5c687b;--placeholder:#7d8899;--primary:#405de6;--primary-hover:#3452dc;--secondary:#e1e7f1;--secondary-hover:#d8e0ed;--danger:#d93d54;--grid:rgb(77 107 254/.045)}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%;background:var(--page)}
 body{min-height:100dvh;margin:0;padding:max(32px,env(safe-area-inset-top)) 16px max(28px,env(safe-area-inset-bottom));background:var(--page);color:var(--label);font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-body::before{position:fixed;inset:0;content:"";pointer-events:none;background-image:linear-gradient(rgb(77 107 254/.045) 1px,transparent 1px),linear-gradient(90deg,rgb(77 107 254/.045) 1px,transparent 1px);background-size:32px 32px}
+body::before{position:fixed;inset:0;content:"";pointer-events:none;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:32px 32px}
 main{position:relative;width:min(100%,390px);margin:clamp(12px,5vh,48px) auto 0;padding:0 8px}
 .brand{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .brand img{display:block;width:min(195px,65%);height:auto}
@@ -57,7 +60,20 @@ main{position:relative;width:min(100%,390px);margin:clamp(12px,5vh,48px) auto 0;
 .preferences button[aria-pressed=true]{background:var(--primary);color:white}
 .intro{margin:30px 0 28px}
 h1{margin:0;font-size:22px;line-height:1.35;font-weight:650}
-.scanFirst{margin:0;color:var(--muted);font-size:13px}
+.scanFirst{display:grid;gap:14px;margin:0;color:var(--muted);font-size:13px}
+.scanFirst p{margin:0}
+.scanButton{max-width:220px}
+.scanner{position:fixed;inset:0;z-index:20;display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:#05070b;color:#f4f7fb;padding:max(12px,env(safe-area-inset-top)) 0 max(16px,env(safe-area-inset-bottom))}
+.scannerHeader{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 16px 12px}
+.scannerHeader h2{margin:0;font-size:18px;line-height:40px}
+.scannerClose{width:40px;height:40px;padding:0;border-radius:50%;background:rgb(255 255 255/.1);font-size:26px;font-weight:400;line-height:40px}
+.scannerClose:hover{background:rgb(255 255 255/.16)}
+.scannerStage{position:relative;min-height:0;overflow:hidden;background:#000}
+.scanner video{display:block;width:100%;height:100%;object-fit:cover}
+.scannerFrame{position:absolute;top:50%;left:50%;width:min(72vw,320px);aspect-ratio:1;transform:translate(-50%,-50%);border:2px solid #6f89ff;border-radius:8px;box-shadow:0 0 0 200vmax rgb(0 0 0/.34)}
+.scannerStatus{min-height:48px;margin:0;padding:14px 20px 0;color:#c6cedb;text-align:center}
+.scannerStatus.error{color:#ff9aa2}
+body.scannerOpen{overflow:hidden}
 [hidden]{display:none!important}
 #loginForm{padding-bottom:12px}
 .field{display:grid;gap:7px}
@@ -80,8 +96,8 @@ p.err{min-height:20px;margin:12px 0 0;color:var(--danger);font-size:13px;line-he
 @media(max-width:340px){main{padding:0 2px}.brand img{width:168px}.preferences{justify-content:flex-start}.preferences button{padding:0 8px}.codeRow{grid-template-columns:minmax(0,1fr) 82px}}
 @media(prefers-reduced-motion:reduce){button{transition:none}}
 </style></head><body>
-<main aria-labelledby="title"><header class="brand"><img src="${DEEPSEEK_LOGO_DATA_URL}" alt="DeepSeek"><span class="product">Harness Mobile</span></header><nav class="preferences" aria-label="显示偏好"><div class="segmented"><button id="langZh" type="button" aria-pressed="true">中文</button><button id="langEn" type="button" aria-pressed="false">EN</button></div><div class="segmented"><button id="themeLight" type="button" aria-pressed="false" data-i18n="light">浅色</button><button id="themeDark" type="button" aria-pressed="true" data-i18n="dark">深色</button></div></nav><div class="intro"><h1 id="title" data-i18n="title">移动连接</h1></div><p class="scanFirst" id="scanFirst" data-i18n="scanFirst">请扫描桌面端二维码</p><section id="loginForm" hidden><div class="field"><label for="e" data-i18n="email">邮箱</label><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="name@example.com" data-i18n-placeholder="emailPlaceholder"></div><div class="codeRow"><div class="field"><label for="c" data-i18n="code">验证码</label><input id="c" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码" data-i18n-placeholder="codePlaceholder"></div><button id="s" class="ghost" type="button" data-i18n="send">发送</button></div><div class="field"><label for="b" data-i18n="pairingCode">配对码</label><input id="b" autocomplete="off" placeholder="6 位字符" data-i18n-placeholder="pairingPlaceholder"></div><button id="l" type="button" data-i18n="connect">登录并连接</button><p class="err" id="x" role="alert"></p></section></main>
-<script src="/bridge/client.js"></script></body></html>`
+<main aria-labelledby="title"><header class="brand"><img src="${DEEPSEEK_LOGO_DATA_URL}" alt="DeepSeek"><span class="product">Harness Mobile</span></header><nav class="preferences" aria-label="显示偏好"><div class="segmented"><button id="langZh" type="button" aria-pressed="true">中文</button><button id="langEn" type="button" aria-pressed="false">EN</button></div><div class="segmented"><button id="themeLight" type="button" aria-pressed="false" data-i18n="light">浅色</button><button id="themeDark" type="button" aria-pressed="true" data-i18n="dark">深色</button></div></nav><div class="intro"><h1 id="title" data-i18n="title">移动连接</h1></div><section class="scanFirst" id="scanFirst"><p data-i18n="scanFirst">请扫描桌面端二维码</p><button id="openScanner" class="scanButton" type="button" data-i18n="openScanner">打开相机扫码</button></section><section id="loginForm" hidden><div class="field"><label for="e" data-i18n="email">邮箱</label><input id="e" type="email" inputmode="email" autocomplete="email" placeholder="name@example.com" data-i18n-placeholder="emailPlaceholder"></div><div class="codeRow"><div class="field"><label for="c" data-i18n="code">验证码</label><input id="c" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码" data-i18n-placeholder="codePlaceholder"></div><button id="s" class="ghost" type="button" data-i18n="send">发送</button></div><div class="field"><label for="b" data-i18n="pairingCode">配对码</label><input id="b" autocomplete="off" placeholder="6 位字符" data-i18n-placeholder="pairingPlaceholder"></div><button id="l" type="button" data-i18n="connect">登录并连接</button><p class="err" id="x" role="alert"></p></section></main><section id="scanner" class="scanner" role="dialog" aria-modal="true" aria-labelledby="scannerTitle" hidden><header class="scannerHeader"><h2 id="scannerTitle" data-i18n="scannerTitle">扫描配对二维码</h2><button id="closeScanner" class="scannerClose" type="button" aria-label="关闭相机" data-i18n-aria-label="closeScanner">×</button></header><div class="scannerStage"><video id="scannerVideo" autoplay muted playsinline></video><div class="scannerFrame" aria-hidden="true"></div></div><p id="scannerStatus" class="scannerStatus" role="status" data-i18n="cameraStarting">正在打开相机</p></section>
+<script src="/bridge/jsqr.js"></script><script src="/bridge/client.js"></script></body></html>`
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -117,12 +133,23 @@ export interface BridgeDeviceView extends DeviceRecord {
   online: boolean
 }
 
+const DEFAULT_SESSION_DAYS = 7
+const MAX_SESSION_DAYS = 365
+
+// 桌面桥接请求是保活期限的唯一输入边界；配对票据只保存已验证的整天数。
+function sessionDays(value: unknown): number {
+  if (value === undefined) return DEFAULT_SESSION_DAYS
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > MAX_SESSION_DAYS) throw new Error('session days must be an integer from 1 to 365')
+  return value
+}
+
 interface PairingTicketRecord {
   bridgeId: string
   code: string
   refreshToken: string
   expiresAt: number
   used: boolean
+  sessionDays: number
   email2fa?: string
 }
 
@@ -188,7 +215,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ control: 'devices', devices: deviceViews(bridgeId) }))
   }
 
-  const issueTicket = (bridgeId: string, email2fa?: string): PairingTicketRecord => {
+  const issueTicket = (bridgeId: string, cookieDays: number, email2fa?: string): PairingTicketRecord => {
     const previousCode = bridgeTickets.get(bridgeId)
     if (previousCode !== undefined) tickets.delete(previousCode)
     const createdAt = Date.now()
@@ -198,6 +225,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       refreshToken: randomBytes(24).toString('hex'),
       expiresAt: createdAt + ticketTtlMs,
       used: false,
+      sessionDays: cookieDays,
       ...email2fa ? { email2fa } : {},
     }
     tickets.set(ticket.code, ticket)
@@ -231,10 +259,10 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
     return { token, device }
   }
 
-  const respondLogin = (res: ServerResponse, token: string): void => {
+  const respondLogin = (res: ServerResponse, token: string, days: number): void => {
     res.writeHead(200, {
       'content-type': 'application/json',
-      'set-cookie': [COOKIE + '=' + encodeURIComponent(token) + '; HttpOnly; SameSite=Lax; Path=/'],
+      'set-cookie': [COOKIE + '=' + encodeURIComponent(token) + '; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=' + String(days * 86400)],
     })
     res.end(JSON.stringify({ token }))
   }
@@ -255,6 +283,11 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       if (url.pathname === '/bridge/deepseek-logo.svg') {
         res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=86400' })
         res.end(DEEPSEEK_LOGO)
+        return
+      }
+      if (url.pathname === '/bridge/jsqr.js') {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' })
+        res.end(JSQR_SOURCE)
         return
       }
       if (url.pathname === '/bridge/client.js') {
@@ -285,10 +318,12 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       if (req.method === 'POST' && url.pathname === '/bridge/api/login/email') {
         try {
           const { email, code, bridge } = JSON.parse(await readBody(req)) as { email: string; code: string; bridge?: string }
+          let days = DEFAULT_SESSION_DAYS
           store.consumeEmailCode(email, code)
           const token = store.loginExternal('email', email.trim().toLowerCase())
           if (typeof bridge === 'string' && bridge.trim() !== '') {
             const ticket = liveTicket(bridge.trim())
+            days = ticket.sessionDays
             const priorDevice = store.deviceFor(cookieToken(req))
             store.bindDevice(token, ticket.bridgeId, { name: requestDeviceName(req), ip: requestIp(req) }, priorDevice?.bridgeId === ticket.bridgeId ? priorDevice.id : undefined)
             ticket.used = true
@@ -299,7 +334,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             if (priorDevice === undefined) throw new Error('scan a desktop pairing QR first')
             store.bindDevice(token, priorDevice.bridgeId, { name: requestDeviceName(req), ip: requestIp(req) }, priorDevice.id)
           }
-          respondLogin(res, token)
+          respondLogin(res, token, days)
         } catch (error) { fail(res, 401, 'email login failed', error) }
         return
       }
@@ -309,7 +344,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           const verify = externalAuth[provider]
           if (verify === undefined) throw new Error('unknown provider')
           const externalId = await verify(payload)
-          respondLogin(res, store.loginExternal(provider, externalId))
+          respondLogin(res, store.loginExternal(provider, externalId), DEFAULT_SESSION_DAYS)
         } catch (error) { fail(res, 401, 'external login failed', error) }
         return
       }
@@ -324,7 +359,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             return
           }
           const { token } = pairDevice(req, ticket, 'bridge', randomBytes(12).toString('hex'))
-          respondLogin(res, token)
+          respondLogin(res, token, ticket.sessionDays)
         } catch (error) { fail(res, 401, 'pairing login failed', error) }
         return
       }
@@ -335,7 +370,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           if (ticket.email2fa === undefined) throw new Error('no pending challenge')
           store.consumeEmailCode(ticket.email2fa, emailCode)
           const { token } = pairDevice(req, ticket, 'bridge', randomBytes(12).toString('hex'))
-          respondLogin(res, token)
+          respondLogin(res, token, ticket.sessionDays)
         } catch (error) { fail(res, 401, 'pairing verification failed', error) }
         return
       }
@@ -376,8 +411,10 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
         try {
           const externalId = await verify({ code })
           const token = store.loginExternal('wechat', externalId)
+          let days = DEFAULT_SESSION_DAYS
           if (pair !== '') {
             const ticket = liveTicket(pair)
+            days = ticket.sessionDays
             const priorDevice = store.deviceFor(cookieToken(req))
             store.bindDevice(token, ticket.bridgeId, { name: requestDeviceName(req), ip: requestIp(req) }, priorDevice?.bridgeId === ticket.bridgeId ? priorDevice.id : undefined)
             ticket.used = true
@@ -385,7 +422,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ control: 'paired', devices: deviceViews(ticket.bridgeId) }))
           }
           res.writeHead(302, {
-            'set-cookie': [COOKIE + '=' + encodeURIComponent(token) + '; HttpOnly; SameSite=Lax; Path=/'],
+            'set-cookie': [COOKIE + '=' + encodeURIComponent(token) + '; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=' + String(days * 86400)],
             location: '/',
           })
           res.end()
@@ -403,10 +440,11 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       }
       if (req.method === 'POST' && url.pathname === '/bridge/api/bridge/start') {
         try {
-          const { bridgeId, bridgeToken, email2fa } = JSON.parse(await readBody(req)) as { bridgeId: string; bridgeToken: string; email2fa?: string }
+          const { bridgeId, bridgeToken, email2fa, sessionDays: requestedDays } = JSON.parse(await readBody(req)) as { bridgeId: string; bridgeToken: string; email2fa?: string; sessionDays?: number }
           if (!/^[a-f0-9]{32}$/u.test(bridgeId) || !/^[a-f0-9]{64}$/u.test(bridgeToken)) throw new Error('invalid bridge credentials')
+          const days = sessionDays(requestedDays)
           store.authenticateBridge(bridgeId, bridgeToken)
-          const ticket = issueTicket(bridgeId, typeof email2fa === 'string' && email2fa !== '' ? email2fa : undefined)
+          const ticket = issueTicket(bridgeId, days, typeof email2fa === 'string' && email2fa !== '' ? email2fa : undefined)
           json(res, 200, publicTicket(ticket))
         } catch (error) { fail(res, 401, 'bridge start failed', error) }
         return
@@ -418,7 +456,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           if (ticket === undefined || ticket.bridgeId !== bridgeId || !sameToken(ticket.refreshToken, refreshToken)) throw new Error('invalid pairing refresh token')
           const socket = bridges.get(bridgeId)
           if (socket?.readyState !== WebSocket.OPEN) throw new Error('bridge is offline')
-          json(res, 200, publicTicket(issueTicket(bridgeId, ticket.email2fa)))
+          json(res, 200, publicTicket(issueTicket(bridgeId, ticket.sessionDays, ticket.email2fa)))
         } catch (error) { fail(res, 401, 'pairing rotation failed', error) }
         return
       }

@@ -65,6 +65,7 @@ export function apply(ctx: MobileBridgeClientContext): void {
         userKey: row.value.userKey,
         ownerEmail: row.value.ownerEmail,
         emailTwoFactor: row.value.emailTwoFactor,
+        sessionDays: row.value.sessionDays,
         autoConnect: row.value.autoConnect,
       }
     },

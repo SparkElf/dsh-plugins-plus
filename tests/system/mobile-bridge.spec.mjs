@@ -35,7 +35,7 @@ async function decodeRenderedQr(qr) {
   return decoded.data
 }
 
-test('登录页显示 DeepSeek 品牌并保留语言与主题选择', async ({ browser }) => {
+test('登录页显示品牌与相机入口并保留显示偏好', async ({ browser }) => {
   const problems = []
   const context = await browser.newContext({ ...devices['Pixel 7'], locale: 'zh-CN' })
   const page = await context.newPage()
@@ -46,10 +46,12 @@ test('登录页显示 DeepSeek 品牌并保留语言与主题选择', async ({ b
     await expect(logo).toBeVisible()
     expect(await logo.evaluate(image => image.naturalWidth)).toBeGreaterThan(0)
     await expect(page.getByRole('heading', { name: '移动连接' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '打开相机扫码' })).toBeVisible()
+    await page.screenshot({ path: '/tmp/mobile-bridge-login-dark-camera.png', fullPage: true })
 
     await page.getByRole('button', { name: 'EN' }).click()
     await expect(page.getByRole('heading', { name: 'Mobile connection' })).toBeVisible()
-    await expect(page.getByText('Scan the QR code shown on the desktop')).toBeVisible()
+    await expect(page.getByText('Scan the pairing QR shown on the desktop')).toBeVisible()
     await page.getByRole('button', { name: 'Light' }).click()
     await expect(page.getByRole('button', { name: 'Light' })).toHaveAttribute('aria-pressed', 'true')
 
@@ -63,16 +65,16 @@ test('登录页显示 DeepSeek 品牌并保留语言与主题选择', async ({ b
   }
 })
 
-test('两台手机独立配对，桌面只下线目标设备并保留下一张配对票据', async ({ browser }) => {
+test('手机关闭页面后恢复登录，双设备独立配对并定向下线', async ({ browser }) => {
   const problems = []
   const desktopContext = await browser.newContext({ locale: 'zh-CN', viewport: { width: 1440, height: 1000 } })
   const phoneAContext = await browser.newContext({ ...devices['Pixel 7'], locale: 'zh-CN' })
   const phoneBContext = await browser.newContext({ ...devices['iPhone 13'], locale: 'zh-CN' })
   const desktop = await desktopContext.newPage()
-  const phoneA = await phoneAContext.newPage()
+  let phoneA = await phoneAContext.newPage()
   const phoneB = await phoneBContext.newPage()
   observePage(desktop, 'desktop', problems)
-  const pendingPhoneA = observePage(phoneA, 'phone A', problems)
+  let pendingPhoneA = observePage(phoneA, 'phone A', problems)
   const pendingPhoneB = observePage(phoneB, 'phone B', problems)
 
   try {
@@ -82,6 +84,7 @@ test('两台手机独立配对，桌面只下线目标设备并保留下一张�
     await desktop.getByRole('heading', { name: /^(移动连接|Mobile Bridge)$/ }).waitFor()
     await expect(desktop.getByLabel(/服务器地址|Server URL/)).toHaveValue(RELAY_URL)
     await expect(desktop.getByLabel(/本地端口|Local port/)).toHaveValue('3081')
+    await expect(desktop.getByLabel(/移动端登录保持天数|Mobile sign-in duration/)).toHaveValue('7')
 
     const offlineButtons = desktop.getByRole('button', { name: /^(下线|Take offline)$/ })
     while (await offlineButtons.count() > 0) {
@@ -231,6 +234,29 @@ test('两台手机独立配对，桌面只下线目标设备并保留下一张�
     await phoneA.screenshot({ path: '/tmp/better-sidebar-mobile.png', fullPage: true })
     await collapseBetterSidebar.click()
 
+    const modelButton = phoneA.getByRole('button', { name: /^(选择模型|Select model)/ }).first()
+    const contextButton = phoneA.getByRole('button', { name: /^(上下文已用|.*of context used)/ }).first()
+    const primaryButton = phoneA.getByRole('button', { name: /^(发送消息|Send message|停止生成|Stop generating)$/ }).last()
+    await expect(modelButton).toBeVisible()
+    await expect(contextButton).toBeVisible()
+    await expect(primaryButton).toBeVisible()
+    const [modelBox, contextBox, primaryBox] = await Promise.all([modelButton.boundingBox(), contextButton.boundingBox(), primaryButton.boundingBox()])
+    expect(modelBox).not.toBeNull()
+    expect(contextBox).not.toBeNull()
+    expect(primaryBox).not.toBeNull()
+    expect(modelBox.x + modelBox.width).toBeLessThanOrEqual(contextBox.x)
+    expect(contextBox.x + contextBox.width).toBeLessThanOrEqual(primaryBox.x)
+
+    const commandButton = phoneA.getByRole('button', { name: /^(命令|Commands)$/ })
+    await commandButton.focus()
+    const commandTooltip = phoneA.getByRole('tooltip').filter({ hasText: /^(命令|Commands)$/ })
+    await expect(commandTooltip).toBeVisible()
+    const commandBox = await commandButton.boundingBox()
+    expect(commandBox).not.toBeNull()
+    await phoneA.touchscreen.tap(commandBox.x + commandBox.width / 2, commandBox.y + commandBox.height / 2)
+    await expect(commandTooltip).toBeHidden()
+    await phoneA.keyboard.press('Escape')
+
     await expect(offlineButtons).toHaveCount(1)
     await expect(pairingCode).not.toHaveText(firstCode)
     await expect(qr).not.toHaveAttribute('src', firstQrSource)
@@ -250,7 +276,11 @@ test('两台手机独立配对，桌面只下线目标设备并保留下一张�
     await expect(iphoneRow).toContainText(/IP\s+\S+/)
     await expect(iphoneRow).toContainText(/在线|Online/)
 
-    await phoneA.reload({ waitUntil: 'domcontentloaded' })
+    phoneA.removeAllListeners('requestfailed')
+    await phoneA.close()
+    phoneA = await phoneAContext.newPage()
+    pendingPhoneA = observePage(phoneA, 'phone A reopened', problems)
+    await phoneA.goto(RELAY_URL + '/bridge/', { waitUntil: 'domcontentloaded' })
     await expect(phoneA.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })).toBeVisible({ timeout: 30_000 })
 
     await androidRow.getByRole('button', { name: /^(下线|Take offline)$/ }).click()
