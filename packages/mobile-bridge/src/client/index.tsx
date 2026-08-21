@@ -75,10 +75,9 @@ export function apply(ctx: MobileBridgeClientContext): void {
       }
     },
     saveValues: async values => {
-      await rpc('settings.update', {
-        ns: SETTINGS_NS,
-        patch: { ...values, serverUrl: normalizeServerUrl(values.serverUrl) },
-      })
+      const persisted = { ...values, serverUrl: normalizeServerUrl(values.serverUrl) }
+      await rpc('settings.update', { ns: SETTINGS_NS, patch: persisted })
+      return persisted
     },
     loadStatus: async () => {
       const response = await fetch('/mobile/bridge/status')
