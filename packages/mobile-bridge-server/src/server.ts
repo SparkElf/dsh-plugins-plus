@@ -258,6 +258,11 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
   const tickets = new Map<string, PairingTicketRecord>()
   const bridgeTickets = new Map<string, string>()
   const clientsByDevice = new Map<string, Set<WebSocket>>()
+  // Relay 诊断默认关闭，只记录外层传输元数据；密文、身份和请求路径不得进入日志。
+  const relayDiagnostics = process.env.MOBILE_BRIDGE_RELAY_DIAGNOSTICS === '1'
+  const relayDiagnostic = (event: string, fields: Record<string, unknown>): void => {
+    if (relayDiagnostics) console.info('[mobile-bridge relay] ' + JSON.stringify({ event, ...fields }))
+  }
 
   // 持久设备记录是事实源，在线状态只由当前 WebSocket 集合投影。
   const deviceViews = (bridgeId: string): BridgeDeviceView[] => store.devicesForBridge(bridgeId).map(device => ({
@@ -572,6 +577,8 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       const credential = bearerToken(req)
       if (ticket === undefined || !sameToken(ticket.refreshToken, credential)) { socket.destroy(); return }
       wss.handleUpgrade(req, socket, head, ws => {
+        const connectionId = randomBytes(4).toString('hex')
+        relayDiagnostic('desktop-connected', { connectionId })
         const previous = bridges.get(bridgeId)
         bridges.set(bridgeId, ws)
         if (previous !== undefined && previous !== ws) previous.close(4001, 'desktop reconnected')
@@ -583,15 +590,26 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             const separator = frame.id.indexOf(':')
             if (separator <= 0) throw new Error('relay response has an invalid route id')
             const deviceId = frame.id.slice(0, separator)
-            const outgoing = JSON.stringify({ ...frame, id: frame.id.slice(separator + 1) })
-            for (const client of clientsByDevice.get(deviceId) ?? []) {
-              if (client.readyState === WebSocket.OPEN) client.send(outgoing)
+            const requestId = frame.id.slice(separator + 1)
+            const outgoing = JSON.stringify({ ...frame, id: requestId })
+            const clients = [...(clientsByDevice.get(deviceId) ?? [])].filter(client => client.readyState === WebSocket.OPEN)
+            relayDiagnostic('desktop-frame', { connectionId, requestId, bytes: Buffer.byteLength(outgoing), clients: clients.length, desktopBuffered: ws.bufferedAmount })
+            for (const client of clients) {
+              const bufferedBefore = client.bufferedAmount
+              client.send(outgoing, error => {
+                if (error) {
+                  console.error('[mobile-bridge relay] desktop frame send failed', { connectionId, requestId, bytes: Buffer.byteLength(outgoing), bufferedBefore }, error)
+                  return
+                }
+                relayDiagnostic('desktop-frame-sent', { connectionId, requestId, bufferedBefore, bufferedAfter: client.bufferedAmount })
+              })
             }
           } catch (error) {
             console.error('[dsh-mobile-bridge-server] desktop relay frame failed', error)
           }
         })
-        ws.on('close', () => {
+        ws.on('close', (code, reason) => {
+          relayDiagnostic('desktop-closed', { connectionId, code, reason: String(reason).slice(0, 123) })
           if (bridges.get(bridgeId) === ws) bridges.delete(bridgeId)
         })
         notifyDevices(bridgeId)
@@ -611,6 +629,8 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
         return
       }
       wss.handleUpgrade(req, socket, head, client => {
+        const connectionId = randomBytes(4).toString('hex')
+        relayDiagnostic('phone-connected', { connectionId })
         let connections = clientsByDevice.get(device.id)
         if (connections === undefined) {
           connections = new Set()
@@ -625,13 +645,23 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             if (typeof frame.id !== 'string') throw new Error('relay request is missing id')
             const desktop = bridges.get(bridgeId)
             if (desktop?.readyState !== WebSocket.OPEN) { client.close(1012, 'desktop offline'); return }
-            desktop.send(JSON.stringify({ ...frame, id: device.id + ':' + frame.id }))
+            const outgoing = JSON.stringify({ ...frame, id: device.id + ':' + frame.id })
+            const bufferedBefore = desktop.bufferedAmount
+            relayDiagnostic('phone-frame', { connectionId, requestId: frame.id, bytes: Buffer.byteLength(outgoing), bufferedBefore })
+            desktop.send(outgoing, error => {
+              if (error) {
+                console.error('[mobile-bridge relay] phone frame send failed', { connectionId, requestId: frame.id, bytes: Buffer.byteLength(outgoing), bufferedBefore }, error)
+                return
+              }
+              relayDiagnostic('phone-frame-sent', { connectionId, requestId: frame.id, bufferedBefore, bufferedAfter: desktop.bufferedAmount })
+            })
           } catch (error) {
             console.error('[dsh-mobile-bridge-server] phone relay frame failed', error)
             client.close(1003, 'invalid relay frame')
           }
         })
-        client.on('close', () => {
+        client.on('close', (code, reason) => {
+          relayDiagnostic('phone-closed', { connectionId, code, reason: String(reason).slice(0, 123) })
           connections.delete(client)
           if (connections.size === 0) clientsByDevice.delete(device.id)
           notifyDevices(bridgeId)
