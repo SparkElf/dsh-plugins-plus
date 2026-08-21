@@ -105,6 +105,22 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expect(desktop.getByLabel(/服务器地址|Server URL/)).toHaveValue(RELAY_URL)
     await expect(desktop.getByLabel(/本地端口|Local port/)).toHaveValue('3081')
     await expect(desktop.getByLabel(/移动端登录保持天数|Mobile sign-in duration/)).toHaveValue('7')
+    await expect(desktop.getByLabel(/启动自动连接|Connect on startup/)).toBeChecked()
+    await expect(desktop.getByLabel(/断线自动重连|Reconnect after disconnection/)).toBeChecked()
+    const connectionButton = desktop.getByRole('button', { name: /^(主动连接|断开连接|Connect|Disconnect)$/ })
+    await expect(connectionButton).toBeVisible()
+
+    await desktop.getByLabel(/服务器地址|Server URL/).fill(RELAY_URL + '/bridge')
+    await desktop.getByRole('button', { name: /^(保存配置|Save)$/ }).click()
+    await expect(desktop.getByLabel(/服务器地址|Server URL/)).toHaveValue(RELAY_URL)
+    await expect(desktop.getByRole('status').filter({ hasText: /已保存，连接状态会单独更新|Saved; connection status will update separately/ })).toBeVisible({ timeout: 3_000 })
+
+    await expect(connectionButton).toHaveText(/^(断开连接|Disconnect)$/, { timeout: 30_000 })
+    await connectionButton.click()
+    await expect(desktop.getByRole('status').filter({ hasText: /未连接|Not connected/ })).toBeVisible()
+    await expect(connectionButton).toHaveText(/^(主动连接|Connect)$/)
+    await connectionButton.click()
+    await expect(desktop.getByRole('status').filter({ hasText: /已连接|Connected/ })).toBeVisible({ timeout: 30_000 })
 
     const offlineButtons = desktop.getByRole('button', { name: /^(下线|Take offline)$/ })
     while (await offlineButtons.count() > 0) {
