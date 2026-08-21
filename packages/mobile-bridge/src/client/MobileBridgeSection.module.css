@@ -28,8 +28,7 @@
 
 .toolbar,
 .status,
-.toggles,
-.actions {
+.toggles {
   display: flex;
   align-items: center;
 }
@@ -120,17 +119,24 @@
 }
 
 .pairingDisplay {
+  display: grid;
+  width: min(720px, 100%);
+  grid-template-columns: 240px minmax(280px, 1fr);
+  align-items: stretch;
+  gap: 32px;
+}
+
+.pairingQrBlock {
   display: flex;
-  width: 100%;
-  max-width: 100%;
-  align-items: flex-start;
-  gap: 20px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .qrRefreshing {
   box-sizing: border-box;
   display: grid;
-  width: min(448px, 100%);
+  width: min(720px, 100%);
   min-height: 240px;
   place-content: center;
   place-items: center;
@@ -164,30 +170,35 @@
 }
 
 .pairingCodeBlock {
-  display: flex;
-  width: min(188px, 100%);
-  max-width: 100%;
+  box-sizing: border-box;
+  display: grid;
+  width: 100%;
   min-width: 0;
-  flex-direction: column;
-  gap: 8px;
+  grid-template-rows: auto 1fr;
+  gap: 16px;
+  padding: 0 0 0 32px;
+  border-left: 1px solid var(--dsw-alias-border-l2);
 }
 
 .pairingCode {
   display: grid;
   width: 100%;
+  align-self: center;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 4px;
+  gap: 8px;
 }
 
 .pairingCode > span {
+  box-sizing: border-box;
   display: grid;
-  height: 36px;
+  height: 52px;
   place-items: center;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
   background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
-  font: var(--dsw-font-markdown-code);
+  font: var(--dsw-font-l-20);
+  font-family: var(--dsw-font-markdown-code-font-family);
 }
 
 .devices {
@@ -295,15 +306,6 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-.actions {
-  justify-content: flex-end;
-  gap: 12px;
-}
-
-.message {
-  margin-right: auto;
-}
-
 .error {
   color: var(--dsw-alias-state-error-primary);
 }
@@ -323,7 +325,21 @@
   }
 
   .pairingDisplay {
-    flex-direction: column;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+
+  .pairingCodeBlock {
+    width: min(360px, 100%);
+    gap: 12px;
+    padding: 20px 0 0;
+    border-top: 1px solid var(--dsw-alias-border-l2);
+    border-left: 0;
+  }
+
+  .pairingCode > span {
+    height: 44px;
   }
 
   .deviceRow {
@@ -341,12 +357,4 @@
     grid-column: 2;
   }
 
-  .actions {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .message {
-    margin-right: 0;
-  }
 }

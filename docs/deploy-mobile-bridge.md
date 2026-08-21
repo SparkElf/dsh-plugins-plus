@@ -52,10 +52,10 @@ location /ws/ {
 1. Install the complete Host and Client plugin into the Web profile:
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.7
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.8
 ```
 
-2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; set the mobile sign-in duration (seven days by default), and optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and wait for the new six-character pairing code and QR to appear with Connected status.
+2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; set the mobile sign-in duration (seven days by default), and optionally set a passphrase, owner email, and scan-time email second factor. Text and number fields save when editing finishes, while toggles save immediately; wait for the six-character pairing code and QR to appear with Connected status.
 3. Scan the displayed QR from each phone. The branded phone login scans through the rear camera, requests a high-resolution rear-camera stream, applies negative exposure compensation when supported, scores available focus distances once and locks the sharpest setting, decodes only the visible framing guide, outlines a recognized QR before continuing, persists language and theme choices, establishes Service Worker control before consuming the ticket, and reopens without another scan while the desktop-defined sign-in cookie remains valid. The desktop keeps one unconsumed five-minute ticket visible: expiry or a successful pairing replaces only that ticket, while existing devices retain their stable bridge and E2EE secret. Settings lists each device and IP; taking one device offline revokes its sessions immediately, suspends all of its Harness tunnel requests, and opens a scan-again modal over that phone’s current Harness page without affecting other devices. The server cannot rotate a ticket or manage devices without the private desktop credential.
 4. Disabling or removing the bundle removes the Host routes, outbound connection, and Settings entry together. There is no standalone HTML configuration panel.
 

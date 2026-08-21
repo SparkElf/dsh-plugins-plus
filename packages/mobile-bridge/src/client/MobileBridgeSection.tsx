@@ -1,7 +1,7 @@
 /** Mobile Bridge settings section: connection state, configuration, and pairing QR. */
 
-import { useEffect, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import QRCode from 'qrcode/lib/browser.js'
 import { Button, IconStopFill16, Input, Modal, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -43,7 +43,7 @@ export interface MobileBridgeStatus {
 /** Registration-side operations supplied by the Client plugin apply closure. */
 export interface MobileBridgeSectionInjected {
   loadValues(): Promise<MobileBridgeValues>
-  saveValues(values: MobileBridgeValues): Promise<void>
+  saveValues(values: MobileBridgeValues): Promise<MobileBridgeValues>
   loadStatus(): Promise<MobileBridgeStatus>
   subscribeStatus(listener: (status: MobileBridgeStatus) => void): () => void
   disconnectDevice(deviceId: string): Promise<MobileBridgeStatus>
@@ -67,11 +67,6 @@ function SettingsLabel({ label, hint }: { label: string; hint: string }): ReactN
 
 const DEFAULT_SERVER_URL = 'https://www.tokensfree.eu.cc'
 
-function normalizeServerUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/u, '')
-  return trimmed.endsWith('/bridge') ? trimmed.slice(0, -'/bridge'.length) : trimmed
-}
-
 const DEFAULTS: MobileBridgeValues = {
   serverUrl: DEFAULT_SERVER_URL,
   localPort: 3080,
@@ -87,6 +82,7 @@ const DEFAULTS: MobileBridgeValues = {
 export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode {
   const { connectNow, disconnectDevice, disconnectNow, loadStatus, loadValues, saveValues, subscribeStatus, t } = props
   const [values, setValues] = useState(DEFAULTS)
+  const persistedValues = useRef(DEFAULTS)
   const [status, setStatus] = useState<MobileBridgeStatus | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -102,6 +98,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     let live = true
     void Promise.all([loadValues(), loadStatus()]).then(([nextValues, nextStatus]) => {
       if (!live) return
+      persistedValues.current = nextValues
       setValues(nextValues)
       setStatus(nextStatus)
       setLoaded(true)
@@ -142,8 +139,37 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     return () => { live = false }
   }, [status?.qrUrl, t])
 
+  /** Persist one complete draft without coupling completion to relay state. */
+  const commit = async (nextValues: MobileBridgeValues): Promise<void> => {
+    if (nextValues === persistedValues.current) return
+    setSaving(true)
+    setMessage(t('saving'))
+    setError(null)
+    try {
+      const persisted = await saveValues(nextValues)
+      persistedValues.current = persisted
+      setValues(persisted)
+      setMessage(t('saved'))
+    } catch (caught) {
+      console.error('[dsh-mobile-bridge] settings save failed', caught)
+      setValues(persistedValues.current)
+      setMessage(null)
+      setError(t('saveFailed'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const set = <K extends keyof MobileBridgeValues>(key: K, value: MobileBridgeValues[K]): void => {
     setValues(current => ({ ...current, [key]: value }))
+    setMessage(null)
+  }
+
+  const setAndCommit = <K extends keyof MobileBridgeValues>(key: K, value: MobileBridgeValues[K]): void => {
+    const nextValues = { ...values, [key]: value }
+    setValues(nextValues)
+    setMessage(null)
+    void commit(nextValues)
   }
 
   const refreshStatus = async (): Promise<void> => {
@@ -156,25 +182,6 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
       setError(t('statusFailed'))
     } finally {
       setRefreshing(false)
-    }
-  }
-
-  /** 只持久化设置；中继连接由 Host 状态事件独立反馈，避免远程故障阻塞保存结果。 */
-  const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault()
-    const nextValues = { ...values, serverUrl: normalizeServerUrl(values.serverUrl) }
-    setSaving(true)
-    setMessage(null)
-    setError(null)
-    try {
-      await saveValues(nextValues)
-      setValues(nextValues)
-      setMessage(t('saved'))
-    } catch (caught) {
-      console.error('[dsh-mobile-bridge] settings save failed', caught)
-      setError(t('saveFailed'))
-    } finally {
-      setSaving(false)
     }
   }
 
@@ -231,63 +238,70 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
         </div>
       </header>
 
-      <form className={css.form} onSubmit={event => { void save(event) }}>
+      <form className={css.form} onSubmit={event => { event.preventDefault(); void commit(values) }}>
         <div className={css.fields}>
           <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-server-url">
             <SettingsLabel label={t('serverUrl')} hint={t('serverUrlHint')} />
-            <Input id="dshmb-server-url" className={css.control} type="url" value={values.serverUrl} disabled={!loaded || saving} onChange={event => set('serverUrl', event.currentTarget.value)} />
+            <Input id="dshmb-server-url" className={css.control} type="url" value={values.serverUrl} disabled={!loaded || saving} onChange={event => set('serverUrl', event.currentTarget.value)} onBlur={() => { void commit(values) }} />
           </label>
           <label className={css.field} htmlFor="dshmb-local-port">
             <SettingsLabel label={t('localPort')} hint={t('localPortHint')} />
-            <Input id="dshmb-local-port" className={css.control} type="number" min={1} step={1} value={values.localPort} disabled={!loaded || saving} onChange={event => set('localPort', event.currentTarget.valueAsNumber)} />
+            <Input id="dshmb-local-port" className={css.control} type="number" min={1} step={1} value={values.localPort} disabled={!loaded || saving} onChange={event => set('localPort', event.currentTarget.valueAsNumber)} onBlur={() => { void commit(values) }} />
           </label>
           <label className={css.field} htmlFor="dshmb-session-days">
             <SettingsLabel label={t('sessionDays')} hint={t('sessionDaysHint')} />
-            <Input id="dshmb-session-days" className={css.control} type="number" min={1} max={365} step={1} value={values.sessionDays} disabled={!loaded || saving} onChange={event => set('sessionDays', event.currentTarget.valueAsNumber)} />
+            <Input id="dshmb-session-days" className={css.control} type="number" min={1} max={365} step={1} value={values.sessionDays} disabled={!loaded || saving} onChange={event => set('sessionDays', event.currentTarget.valueAsNumber)} onBlur={() => { void commit(values) }} />
           </label>
           <label className={css.field} htmlFor="dshmb-user-key">
             <SettingsLabel label={t('userKey')} hint={t('userKeyHint')} />
-            <Input id="dshmb-user-key" className={css.control} type="password" value={values.userKey} disabled={!loaded || saving} onChange={event => set('userKey', event.currentTarget.value)} />
+            <Input id="dshmb-user-key" className={css.control} type="password" value={values.userKey} disabled={!loaded || saving} onChange={event => set('userKey', event.currentTarget.value)} onBlur={() => { void commit(values) }} />
           </label>
           <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-owner-email">
             <SettingsLabel label={t('ownerEmail')} hint={t('ownerEmailHint')} />
-            <Input id="dshmb-owner-email" className={css.control} type="email" value={values.ownerEmail} disabled={!loaded || saving} onChange={event => set('ownerEmail', event.currentTarget.value)} />
+            <Input id="dshmb-owner-email" className={css.control} type="email" value={values.ownerEmail} disabled={!loaded || saving} onChange={event => set('ownerEmail', event.currentTarget.value)} onBlur={() => { void commit(values) }} />
           </label>
         </div>
         <div className={css.toggles}>
           <label className={css.toggle} htmlFor="dshmb-email-two-factor">
-            <input id="dshmb-email-two-factor" className={css.checkbox} type="checkbox" checked={values.emailTwoFactor} disabled={!loaded || saving} onChange={event => set('emailTwoFactor', event.currentTarget.checked)} />
+            <input id="dshmb-email-two-factor" className={css.checkbox} type="checkbox" checked={values.emailTwoFactor} disabled={!loaded || saving} onChange={event => setAndCommit('emailTwoFactor', event.currentTarget.checked)} />
             <span>{t('twoFactor')}</span>
           </label>
           <label className={css.toggle} htmlFor="dshmb-auto-connect">
-            <input id="dshmb-auto-connect" className={css.checkbox} type="checkbox" checked={values.autoConnect} disabled={!loaded || saving} onChange={event => set('autoConnect', event.currentTarget.checked)} />
+            <input id="dshmb-auto-connect" className={css.checkbox} type="checkbox" checked={values.autoConnect} disabled={!loaded || saving} onChange={event => setAndCommit('autoConnect', event.currentTarget.checked)} />
             <span>{t('autoConnect')}</span>
           </label>
           <label className={css.toggle} htmlFor="dshmb-auto-reconnect">
-            <input id="dshmb-auto-reconnect" className={css.checkbox} type="checkbox" checked={values.autoReconnect} disabled={!loaded || saving} onChange={event => set('autoReconnect', event.currentTarget.checked)} />
+            <input id="dshmb-auto-reconnect" className={css.checkbox} type="checkbox" checked={values.autoReconnect} disabled={!loaded || saving} onChange={event => setAndCommit('autoReconnect', event.currentTarget.checked)} />
             <span>{t('autoReconnect')}</span>
           </label>
         </div>
-        <div className={css.actions}>
-          {message !== null ? <p className={css.message} role="status">{message}</p> : null}
-          <Button variant="primary" type="submit" disabled={!loaded || saving}>{saving ? t('saving') : t('save')}</Button>
-        </div>
+        {message !== null ? <p className={css.message} role="status">{message}</p> : null}
       </form>
 
       <div className={css.pairing}>
-        <SettingsLabel label={t('pair')} hint={t('pairHint')} />
         {pairingRefreshing
           ? (
-              <div className={css.qrRefreshing} role="status">
-                <span className={css.qrSpinner} aria-hidden="true" />
-                <span>{t('pairingRefreshing')}</span>
-              </div>
+              <>
+                <SettingsLabel label={t('pair')} hint={t('pairHint')} />
+                <div className={css.qrRefreshing} role="status">
+                  <span className={css.qrSpinner} aria-hidden="true" />
+                  <span>{t('pairingRefreshing')}</span>
+                </div>
+              </>
             )
           : currentQrSource === null
-            ? <span className={css.qrEmpty}>{t('qrUnavailable')}</span>
+            ? (
+                <>
+                  <SettingsLabel label={t('pair')} hint={t('pairHint')} />
+                  <span className={css.qrEmpty}>{t('qrUnavailable')}</span>
+                </>
+              )
             : (
                 <div className={css.pairingDisplay}>
-                  <img className={css.qr} src={currentQrSource} alt={t('qrAlt')} width={240} height={240} />
+                  <div className={css.pairingQrBlock}>
+                    <SettingsLabel label={t('pair')} hint={t('pairHint')} />
+                    <img className={css.qr} src={currentQrSource} alt={t('qrAlt')} width={240} height={240} />
+                  </div>
                   <div className={css.pairingCodeBlock}>
                     <span className={css.label}>{t('pairingCode')}</span>
                     <output className={css.pairingCode} aria-label={t('pairingCode')}>
