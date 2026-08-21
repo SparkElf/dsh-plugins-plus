@@ -2,6 +2,8 @@
     - id: mobile-bridge
       name: '@sparkelf/dsh-mobile-bridge'
       config:
-        serverUrl: ''
-        secret: ''
+        serverUrl: 'https://www.tokensfree.eu.cc'
+        userKey: ''
         localPort: 3080
+        autoConnect: true
+        autoReconnect: true

@@ -9,13 +9,16 @@ import { en, zh } from './locales.ts'
 
 const LOCALE_NS = 'settingsMobileBridge' as const
 const SETTINGS_NS = 'mobile-bridge'
+const DEFAULT_SERVER_URL = 'https://www.tokensfree.eu.cc'
 
-interface MobileBridgeSettings extends MobileBridgeValues {
-  autoReconnect: boolean
+/** 浏览器保存前把历史 `/bridge` 输入收敛为Host使用的中继基址。 */
+function normalizeServerUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/u, '')
+  return trimmed.endsWith('/bridge') ? trimmed.slice(0, -'/bridge'.length) : trimmed
 }
 
 interface SettingsDescription {
-  namespaces: Array<{ ns: string; value: MobileBridgeSettings }>
+  namespaces: Array<{ ns: string; value: MobileBridgeValues }>
 }
 
 type RpcResult<T> =
@@ -61,19 +64,20 @@ export function apply(ctx: MobileBridgeClientContext): void {
       const row = value.namespaces.find(candidate => candidate.ns === SETTINGS_NS)
       if (row === undefined) throw new Error('mobile-bridge settings namespace is unavailable')
       return {
-        serverUrl: row.value.serverUrl,
+        serverUrl: normalizeServerUrl(row.value.serverUrl),
         localPort: row.value.localPort,
         userKey: row.value.userKey,
         ownerEmail: row.value.ownerEmail,
         emailTwoFactor: row.value.emailTwoFactor,
         sessionDays: row.value.sessionDays,
         autoConnect: row.value.autoConnect,
+        autoReconnect: row.value.autoReconnect,
       }
     },
     saveValues: async values => {
       await rpc('settings.update', {
         ns: SETTINGS_NS,
-        patch: { ...values, autoReconnect: values.autoConnect },
+        patch: { ...values, serverUrl: normalizeServerUrl(values.serverUrl) },
       })
     },
     loadStatus: async () => {
@@ -95,6 +99,16 @@ export function apply(ctx: MobileBridgeClientContext): void {
     disconnectDevice: async deviceId => {
       const response = await fetch('/mobile/bridge/devices/' + encodeURIComponent(deviceId), { method: 'DELETE' })
       if (!response.ok) throw new Error(`Mobile Bridge device disconnect failed with HTTP ${response.status}: ${await response.text()}`)
+      return await response.json() as MobileBridgeStatus
+    },
+    connectNow: async () => {
+      const response = await fetch('/mobile/bridge/connect', { method: 'POST' })
+      if (!response.ok) throw new Error(`Mobile Bridge connect failed with HTTP ${response.status}: ${await response.text()}`)
+      return await response.json() as MobileBridgeStatus
+    },
+    disconnectNow: async () => {
+      const response = await fetch('/mobile/bridge/disconnect', { method: 'POST' })
+      if (!response.ok) throw new Error(`Mobile Bridge disconnect failed with HTTP ${response.status}: ${await response.text()}`)
       return await response.json() as MobileBridgeStatus
     },
   }

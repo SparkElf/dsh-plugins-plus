@@ -1,6 +1,6 @@
 /** Mobile Bridge settings section: connection state, configuration, and pairing QR. */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import QRCode from 'qrcode/lib/browser.js'
 import { Button, IconStopFill16, Input, Modal, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -17,6 +17,7 @@ export interface MobileBridgeValues {
   emailTwoFactor: boolean
   sessionDays: number
   autoConnect: boolean
+  autoReconnect: boolean
 }
 
 /** One phone device projected by the Host. */
@@ -46,6 +47,8 @@ export interface MobileBridgeSectionInjected {
   loadStatus(): Promise<MobileBridgeStatus>
   subscribeStatus(listener: (status: MobileBridgeStatus) => void): () => void
   disconnectDevice(deviceId: string): Promise<MobileBridgeStatus>
+  connectNow(): Promise<MobileBridgeStatus>
+  disconnectNow(): Promise<MobileBridgeStatus>
 }
 
 /** Full settings component props derived from the public Slot shares. */
@@ -62,38 +65,27 @@ function SettingsLabel({ label, hint }: { label: string; hint: string }): ReactN
   )
 }
 
-function waitForDelay(delayMs: number, signal: AbortSignal): Promise<void> {
-  return new Promise(resolve => {
-    if (signal.aborted) {
-      resolve()
-      return
-    }
-    let timer: ReturnType<typeof setTimeout>
-    const onAbort = (): void => {
-      clearTimeout(timer)
-      resolve()
-    }
-    timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, delayMs)
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
+const DEFAULT_SERVER_URL = 'https://www.tokensfree.eu.cc'
+
+function normalizeServerUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/u, '')
+  return trimmed.endsWith('/bridge') ? trimmed.slice(0, -'/bridge'.length) : trimmed
 }
 
 const DEFAULTS: MobileBridgeValues = {
-  serverUrl: '',
+  serverUrl: DEFAULT_SERVER_URL,
   localPort: 3080,
   userKey: '',
   ownerEmail: '',
   emailTwoFactor: false,
   sessionDays: 7,
   autoConnect: true,
+  autoReconnect: true,
 }
 
 /** Render and operate the Mobile Bridge settings page. */
 export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode {
-  const { disconnectDevice, loadStatus, loadValues, saveValues, subscribeStatus, t } = props
+  const { connectNow, disconnectDevice, disconnectNow, loadStatus, loadValues, saveValues, subscribeStatus, t } = props
   const [values, setValues] = useState(DEFAULTS)
   const [status, setStatus] = useState<MobileBridgeStatus | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -104,13 +96,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   const [qrSource, setQrSource] = useState<{ url: string; source: string } | null>(null)
   const [disconnectTarget, setDisconnectTarget] = useState<MobileBridgeDevice | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
-  const saveRefresh = useRef<AbortController | null>(null)
-
-  useEffect(() => () => {
-    const controller = saveRefresh.current
-    saveRefresh.current = null
-    controller?.abort()
-  }, [])
+  const [connectionAction, setConnectionAction] = useState<'connect' | 'disconnect' | null>(null)
 
   useEffect(() => {
     let live = true
@@ -173,48 +159,38 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     }
   }
 
-  const confirmFreshStatus = async (previousQrUrl: string, expectQr: boolean, signal: AbortSignal): Promise<boolean> => {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (signal.aborted) return false
-      const nextStatus = await loadStatus()
-      if (signal.aborted) return false
-      setStatus(nextStatus)
-      if (!expectQr || (nextStatus.connected && nextStatus.qrUrl !== '' && nextStatus.qrUrl !== previousQrUrl && /^[0-9a-f]{6}$/i.test(nextStatus.pairingCode))) return true
-      if (attempt < 19) await waitForDelay(500, signal)
-    }
-    return false
-  }
-
+  /** 只持久化设置；中继连接由 Host 状态事件独立反馈，避免远程故障阻塞保存结果。 */
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
-    saveRefresh.current?.abort()
-    const controller = new AbortController()
-    saveRefresh.current = controller
-    const previousQrUrl = status?.qrUrl ?? ''
-    const expectQr = values.autoConnect && values.serverUrl.trim() !== ''
-    let persisted = false
+    const nextValues = { ...values, serverUrl: normalizeServerUrl(values.serverUrl) }
     setSaving(true)
     setMessage(null)
     setError(null)
     try {
-      await saveValues(values)
-      persisted = true
-      if (expectQr) setStatus(current => current === null ? current : { ...current, connected: false, qrUrl: '', pairingCode: '', pairingRefreshing: true })
-      const ready = await confirmFreshStatus(previousQrUrl, expectQr, controller.signal)
-      if (controller.signal.aborted) return
-      if (!ready) {
-        setError(t('reconnectFailed'))
-        return
-      }
+      await saveValues(nextValues)
+      setValues(nextValues)
       setMessage(t('saved'))
     } catch (caught) {
-      console.error('[dsh-mobile-bridge] settings save confirmation failed', caught)
-      if (!controller.signal.aborted) setError(t(persisted ? 'reconnectFailed' : 'saveFailed'))
+      console.error('[dsh-mobile-bridge] settings save failed', caught)
+      setError(t('saveFailed'))
     } finally {
-      if (saveRefresh.current === controller) {
-        saveRefresh.current = null
-        setSaving(false)
-      }
+      setSaving(false)
+    }
+  }
+
+  /** 触发一次明确的桌面连接动作；连接结果随后由状态订阅持续投影。 */
+  const toggleConnection = async (): Promise<void> => {
+    const action = status?.connected === true ? 'disconnect' : 'connect'
+    setConnectionAction(action)
+    setMessage(null)
+    setError(null)
+    try {
+      setStatus(await (action === 'connect' ? connectNow() : disconnectNow()))
+    } catch (caught) {
+      console.error('[dsh-mobile-bridge] connection action failed', caught)
+      setError(t('connectionActionFailed'))
+    } finally {
+      setConnectionAction(null)
     }
   }
 
@@ -236,9 +212,11 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   }
 
   const statusLabel = status === null ? t('loading') : status.connected ? t('connected') : t('disconnected')
-  const statusState = refreshing || status === null ? 'ongoing' : status.connected ? 'done' : 'warning'
+  const statusState = refreshing || status === null || status.pairingRefreshing ? 'ongoing' : status.connected ? 'done' : 'warning'
   const currentQrSource = status !== null && qrSource?.url === status.qrUrl ? qrSource.source : null
   const pairingRefreshing = status !== null && (status.pairingRefreshing || (status.qrUrl !== '' && currentQrSource === null))
+  const connectionBusy = connectionAction !== null || (status?.pairingRefreshing ?? false)
+  const connectionLabel = connectionAction === 'disconnect' ? t('disconnectingConnection') : connectionAction === 'connect' || status?.pairingRefreshing ? t('connecting') : status?.connected ? t('disconnectConnection') : t('connect')
 
   return (
     <section className={css.section}>
@@ -248,7 +226,8 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
         </Tooltip>
         <div className={css.toolbar}>
           <span className={css.status} role="status"><StateDot state={statusState} />{statusLabel}</span>
-          <Button variant="outline" size="sm" disabled={refreshing} onClick={() => { void refreshStatus() }}>{refreshing ? t('refreshing') : t('refresh')}</Button>
+          <Button variant={status?.connected ? 'outline' : 'primary'} size="sm" disabled={!loaded || connectionBusy} onClick={() => { void toggleConnection() }}>{connectionLabel}</Button>
+          <Button variant="outline" size="sm" disabled={refreshing || connectionAction !== null} onClick={() => { void refreshStatus() }}>{refreshing ? t('refreshing') : t('refresh')}</Button>
         </div>
       </header>
 
@@ -283,6 +262,10 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
           <label className={css.toggle} htmlFor="dshmb-auto-connect">
             <input id="dshmb-auto-connect" className={css.checkbox} type="checkbox" checked={values.autoConnect} disabled={!loaded || saving} onChange={event => set('autoConnect', event.currentTarget.checked)} />
             <span>{t('autoConnect')}</span>
+          </label>
+          <label className={css.toggle} htmlFor="dshmb-auto-reconnect">
+            <input id="dshmb-auto-reconnect" className={css.checkbox} type="checkbox" checked={values.autoReconnect} disabled={!loaded || saving} onChange={event => set('autoReconnect', event.currentTarget.checked)} />
+            <span>{t('autoReconnect')}</span>
           </label>
         </div>
         <div className={css.actions}>
