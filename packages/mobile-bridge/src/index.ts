@@ -15,6 +15,19 @@ import { gzipSync } from 'node:zlib'
 import WebSocket from 'ws'
 import { base64ToBytes, bytesToBase64, decryptJSON, deriveKey, encryptJSON } from './crypto.ts'
 
+const DEFAULT_SERVER_URL = 'https://www.tokensfree.eu.cc'
+
+/** 服务器配置只保存中继基址；手机入口路径由插件统一追加。 */
+function normalizeServerUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/u, '')
+  return trimmed.endsWith('/bridge') ? trimmed.slice(0, -'/bridge'.length) : trimmed
+}
+
+/** 在Host唯一配置边界归一化历史设置，避免连接请求重复追加 `/bridge`。 */
+function normalizeConfig(value: MobileBridgeConfig): MobileBridgeConfig {
+  return { ...value, serverUrl: normalizeServerUrl(value.serverUrl) }
+}
+
 /** Plugin row config rendered by the stock settings page. */
 export interface MobileBridgeConfig {
   serverUrl: string
@@ -41,7 +54,7 @@ export const MOBILE_BRIDGE_SETTINGS_NAMESPACE = settingsNamespace('mobile-bridge
 
 /** Schema for the settings section; secrets render masked. */
 export const Config: z<MobileBridgeConfig> = z.object({
-  serverUrl: z.string().default(''),
+  serverUrl: z.string().default(DEFAULT_SERVER_URL),
   localPort: z.number().step(1).min(1).default(3080),
   userKey: z.string().role('secret').default(''),
   autoConnect: z.boolean().default(true),
@@ -210,10 +223,18 @@ interface MobileBridgeStatusView {
 
 /** Register local routes and maintain the stable outbound encrypted bridge. */
 export function apply(ctx: Context, config: MobileBridgeConfig): void {
-  let current: () => MobileBridgeConfig = () => config
+  let current: () => MobileBridgeConfig = () => normalizeConfig(config)
+  let connectionRequested = current().autoConnect
+  // 用户动作和设置提交都可能终止一次尚未完成的取票请求；代次只用于丢弃这次旧尝试。
+  let connectionGeneration = 0
+  let reconnectImmediately = false
   let restartConnection = (): void => {}
+  let connectNow = (): MobileBridgeStatusView => statusView()
+  let disconnectNow = (): MobileBridgeStatusView => statusView()
   installSettingsSection(ctx, MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => { current = source },
+    setSource: source => {
+      current = () => normalizeConfig(source())
+    },
     onChange: () => { restartConnection() },
   })
   ctx.inject(['settings'], settingsCtx => {
@@ -230,7 +251,6 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   const state = {
     socket: undefined as WebSocket | undefined,
     connected: false,
-    restartRequested: false,
     pairing: undefined as PairingTicket | undefined,
     lastQrUrl: '',
     pairingRefreshing: false,
@@ -257,7 +277,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   }
 
   const scheduleConnect = (delayMs: number): void => {
-    if (disposed) return
+    if (disposed || !connectionRequested) return
     if (retryTimer !== undefined) clearTimeout(retryTimer)
     retryTimer = setTimeout(() => {
       retryTimer = undefined
@@ -269,6 +289,20 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     if (pairingTimer === undefined) return
     clearTimeout(pairingTimer)
     pairingTimer = undefined
+  }
+
+  /** 清理桌面连接及其派生状态；主动断开和Socket关闭共用这一状态投影。 */
+  const clearConnectionState = (): void => {
+    state.socket = undefined
+    state.connected = false
+    state.pairing = undefined
+    state.lastQrUrl = ''
+    state.pairingRefreshing = false
+    state.devices = state.devices.map(device => ({ ...device, online: false }))
+    for (const local of localSockets.values()) local.close(1012, 'bridge offline')
+    localSockets.clear()
+    clearPairingTimer()
+    emitStatus()
   }
 
   const schedulePairingRotation = (delayMs: number): void => {
@@ -335,7 +369,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       console.error('[dsh-mobile-bridge] pairing rotation failed', error)
       if (state.pairing !== pairing) return
       if (Date.now() >= pairing.expiresAt) {
-        state.restartRequested = true
+        reconnectImmediately = true
         socket.close()
         return
       }
@@ -394,11 +428,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     local.close(request.code, request.reason)
   }
 
-  // 每次重连复用 Settings 持久化身份；取票到 WebSocket 就绪期间发布刷新进度，再投影全部设备状态。
+  // 连接动作复用持久化身份；取票和Socket建立期间只更新状态，不阻塞设置保存。
   async function connect(): Promise<void> {
-    if (disposed) return
+    if (disposed || !connectionRequested || state.socket !== undefined) return
+    const generation = connectionGeneration
     const live = current()
-    if (!live.serverUrl || !live.autoConnect || !live.bridgeId || !live.bridgeToken || !live.bridgeSecret) return
+    if (!live.serverUrl || !live.bridgeId || !live.bridgeToken || !live.bridgeSecret) return
     state.pairingRefreshing = true
     emitStatus()
     try {
@@ -414,9 +449,11 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       })
       if (!response.ok) throw new Error('pairing start failed with ' + response.status + ': ' + await response.text())
       const started = await response.json() as PairingTicket
+      if (generation !== connectionGeneration || !connectionRequested) return
       state.pairing = started
       state.lastQrUrl = ''
       const key = await deriveKey(live.userKey, live.bridgeSecret)
+      if (generation !== connectionGeneration || !connectionRequested) return
       const wsUrl = live.serverUrl.replace(/^http/u, 'ws') + '/ws/bridge?bridgeId=' + encodeURIComponent(live.bridgeId)
       const socket = new WebSocket(wsUrl, { headers: { authorization: 'Bearer ' + started.refreshToken } })
       let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -465,45 +502,63 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       socket.on('close', (code, reason) => {
         if (heartbeat !== undefined) clearInterval(heartbeat)
         console.info('[dsh-mobile-bridge] bridge websocket closed', { code, reason: reason.toString('utf8') })
-        if (state.socket === socket) {
-          state.socket = undefined
-          state.connected = false
-          state.pairing = undefined
-          state.lastQrUrl = ''
-          state.pairingRefreshing = false
-          state.devices = state.devices.map(device => ({ ...device, online: false }))
-          for (const local of localSockets.values()) local.close(1012, 'bridge offline')
-          localSockets.clear()
-          clearPairingTimer()
-          emitStatus()
-        }
-        const restartNow = state.restartRequested
-        state.restartRequested = false
-        if (restartNow || current().autoReconnect) scheduleConnect(restartNow ? 0 : 5000)
+        if (state.socket !== socket) return
+        const immediate = reconnectImmediately
+        reconnectImmediately = false
+        clearConnectionState()
+        if (connectionRequested && (immediate || current().autoReconnect)) scheduleConnect(immediate ? 0 : 5000)
       })
       socket.on('error', error => {
         console.error('[dsh-mobile-bridge] websocket failed', error)
         socket.close()
       })
     } catch (error) {
+      if (generation !== connectionGeneration || !connectionRequested) return
       console.error('[dsh-mobile-bridge] connection failed', error)
-      clearPairingTimer()
-      state.pairing = undefined
-      state.lastQrUrl = ''
-      state.pairingRefreshing = false
-      state.socket?.close()
-      emitStatus()
+      const socket = state.socket
+      clearConnectionState()
+      socket?.close()
       if (current().autoReconnect) scheduleConnect(5000)
     }
   }
 
+  /** 设置提交后按启动策略重建唯一桌面连接。 */
   restartConnection = () => {
-    if (state.socket === undefined) {
-      scheduleConnect(0)
-      return
+    connectionGeneration += 1
+    connectionRequested = current().autoConnect
+    reconnectImmediately = false
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
     }
-    state.restartRequested = true
-    state.socket.close()
+    const socket = state.socket
+    clearConnectionState()
+    socket?.close()
+    if (connectionRequested) scheduleConnect(0)
+  }
+
+  /** 用户明确要求连接时启动一次连接尝试，不修改自动重连策略。 */
+  connectNow = () => {
+    connectionRequested = true
+    if (state.connected || state.socket !== undefined) return statusView()
+    connectionGeneration += 1
+    scheduleConnect(0)
+    return statusView()
+  }
+
+  /** 用户明确断开时取消重试并关闭当前Socket。 */
+  disconnectNow = () => {
+    connectionRequested = false
+    connectionGeneration += 1
+    reconnectImmediately = false
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
+    }
+    const socket = state.socket
+    clearConnectionState()
+    socket?.close()
+    return statusView()
   }
 
   ctx.effect(function* () {
@@ -522,6 +577,16 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
           statusStreams.add(res)
           res.write('data: ' + JSON.stringify(statusView()) + '\n\n')
           req.on('close', () => { statusStreams.delete(res) })
+          return
+        }
+        if (req.method === 'POST' && path === '/mobile/bridge/connect') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(connectNow()))
+          return
+        }
+        if (req.method === 'POST' && path === '/mobile/bridge/disconnect') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(disconnectNow()))
           return
         }
         if (path.startsWith('/mobile/bridge/status')) {
@@ -550,9 +615,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         res.end('not found')
       },
     })
-    void connect()
+    connectionRequested = current().autoConnect
+    if (connectionRequested) void connect()
     yield () => {
       disposed = true
+      connectionRequested = false
+      connectionGeneration += 1
       if (retryTimer !== undefined) clearTimeout(retryTimer)
       clearPairingTimer()
       state.socket?.close()
