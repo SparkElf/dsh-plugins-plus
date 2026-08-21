@@ -177,6 +177,7 @@ export interface MobileBridgeDevice {
 
 const PAIRING_ROTATE_LEAD_MS = 60_000
 const PAIRING_ROTATE_RETRY_MS = 5_000
+const BRIDGE_HEARTBEAT_MS = 30_000
 
 interface MobileRequest {
   url?: string
@@ -418,8 +419,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       const key = await deriveKey(live.userKey, live.bridgeSecret)
       const wsUrl = live.serverUrl.replace(/^http/u, 'ws') + '/ws/bridge?bridgeId=' + encodeURIComponent(live.bridgeId)
       const socket = new WebSocket(wsUrl, { headers: { authorization: 'Bearer ' + started.refreshToken } })
+      let heartbeat: ReturnType<typeof setInterval> | undefined
       state.socket = socket
       socket.on('open', () => {
+        heartbeat = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) socket.ping()
+        }, BRIDGE_HEARTBEAT_MS)
         state.connected = true
         state.lastQrUrl = pairingUrl(live.serverUrl, started.code, live.bridgeSecret, live.userKey)
         state.pairingRefreshing = false
@@ -457,7 +462,9 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
           })
         })().catch(error => { console.error('[dsh-mobile-bridge] relay request failed', error) })
       })
-      socket.on('close', () => {
+      socket.on('close', (code, reason) => {
+        if (heartbeat !== undefined) clearInterval(heartbeat)
+        console.info('[dsh-mobile-bridge] bridge websocket closed', { code, reason: reason.toString('utf8') })
         if (state.socket === socket) {
           state.socket = undefined
           state.connected = false
