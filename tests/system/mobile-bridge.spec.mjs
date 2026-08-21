@@ -4,6 +4,7 @@ import { PNG } from 'pngjs'
 
 const HARNESS_URL = process.env.DSH_SYSTEM_URL ?? 'http://127.0.0.1:3081'
 const RELAY_URL = 'https://www.tokensfree.eu.cc'
+const LOCAL_PORT = process.env.DSH_LOCAL_PORT ?? '3081'
 
 async function settleSettingsJoins(page, pending) {
   const render = () => new Promise(resolve => { requestAnimationFrame(() => { requestAnimationFrame(resolve) }) })
@@ -103,7 +104,7 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await desktop.getByRole('button', { name: /^(移动连接|Mobile Bridge)$/ }).click()
     await desktop.getByRole('heading', { name: /^(移动连接|Mobile Bridge)$/ }).waitFor()
     await expect(desktop.getByLabel(/服务器地址|Server URL/)).toHaveValue(RELAY_URL)
-    await expect(desktop.getByLabel(/本地端口|Local port/)).toHaveValue('3081')
+    await expect(desktop.getByLabel(/本地端口|Local port/)).toHaveValue(LOCAL_PORT)
     await expect(desktop.getByLabel(/移动端登录保持天数|Mobile sign-in duration/)).toHaveValue('7')
     await expect(desktop.getByLabel(/启动自动连接|Connect on startup/)).toBeChecked()
     await expect(desktop.getByLabel(/断线自动重连|Reconnect after disconnection/)).toBeChecked()
