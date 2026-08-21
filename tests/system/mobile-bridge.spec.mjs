@@ -116,11 +116,16 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expect(desktop.getByRole('status').filter({ hasText: /已保存，连接状态会单独更新|Saved; connection status will update separately/ })).toBeVisible({ timeout: 3_000 })
 
     await expect(connectionButton).toHaveText(/^(断开连接|Disconnect)$/, { timeout: 30_000 })
+    const qr = desktop.getByRole('img', { name: /移动连接配对二维码|Mobile Bridge pairing QR code/ })
+    const pairingCode = desktop.locator('output[aria-label="配对码"], output[aria-label="Pairing code"]')
+    await expect(qr).toBeVisible()
+    const qrBeforeConnectionAction = await qr.getAttribute('src')
     await connectionButton.click()
     await expect(desktop.getByRole('status').filter({ hasText: /未连接|Not connected/ })).toBeVisible()
     await expect(connectionButton).toHaveText(/^(主动连接|Connect)$/)
     await connectionButton.click()
     await expect(desktop.getByRole('status').filter({ hasText: /已连接|Connected/ })).toBeVisible({ timeout: 30_000 })
+    if (qrBeforeConnectionAction !== null) await expect(qr).not.toHaveAttribute('src', qrBeforeConnectionAction, { timeout: 30_000 })
 
     const offlineButtons = desktop.getByRole('button', { name: /^(下线|Take offline)$/ })
     while (await offlineButtons.count() > 0) {
@@ -132,8 +137,6 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
       await expect(offlineButtons).toHaveCount(previousCount - 1)
     }
 
-    const qr = desktop.getByRole('img', { name: /移动连接配对二维码|Mobile Bridge pairing QR code/ })
-    const pairingCode = desktop.locator('output[aria-label="配对码"], output[aria-label="Pairing code"]')
     await expect(qr).toBeVisible()
     await expect(pairingCode).toHaveText(/^[0-9A-F]{6}$/)
     const firstCode = await pairingCode.innerText()
