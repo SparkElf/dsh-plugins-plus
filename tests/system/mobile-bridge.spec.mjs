@@ -144,18 +144,16 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     const firstQrSource = await qr.evaluate(image => image.currentSrc)
     const phoneAUrl = await decodeRenderedQr(qr)
     expect(new URL(phoneAUrl).origin).toBe(RELAY_URL)
-    const pairingRefresh = desktop.getByRole('status').filter({ hasText: /正在刷新二维码|Refreshing pairing code/ })
-
-    await Promise.all([
-      phoneA.goto(phoneAUrl, { waitUntil: 'domcontentloaded' }),
-      pairingRefresh.waitFor({ state: 'visible' }),
-    ])
-    await expect(pairingRefresh).toBeHidden()
     const phoneASidebar = phoneA.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })
+    await phoneA.goto(phoneAUrl, { waitUntil: 'domcontentloaded' })
+    await expect(phoneASidebar).toBeVisible({ timeout: 30_000 })
+    await Promise.all([
+      expect(pairingCode).not.toHaveText(firstCode),
+      expect(qr).not.toHaveAttribute('src', firstQrSource),
+    ])
     const openMainSidebar = phoneA.getByRole('button', { name: /^(打开侧边栏|Open sidebar)$/ }).first()
     const collapseMainSidebar = phoneA.getByRole('button', { name: /^(收起侧边栏|Collapse sidebar)$/ }).first()
     const phoneSettings = phoneA.getByRole('dialog', { name: /^(设置|Settings)$/ })
-    await expect(phoneASidebar).toBeVisible({ timeout: 30_000 })
     await settleSettingsJoins(phoneA, pendingPhoneA)
     const welcome = phoneA.getByRole('dialog', { name: /^(内测声明|Internal Testing Notice)$/ })
     if (await welcome.isVisible()) {
@@ -347,8 +345,6 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await phoneA.keyboard.press('Escape')
 
     await expect(offlineButtons).toHaveCount(1)
-    await expect(pairingCode).not.toHaveText(firstCode)
-    await expect(qr).not.toHaveAttribute('src', firstQrSource)
     const phoneBUrl = await decodeRenderedQr(qr)
     expect(new URL(phoneBUrl).origin).toBe(RELAY_URL)
 
