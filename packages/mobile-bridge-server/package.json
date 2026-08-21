@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-mobile-bridge-server",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "description": "Multi-user bridge server connecting mobile browsers to local DeepSeek Harness instances through outbound tunnels.",
   "license": "MIT",

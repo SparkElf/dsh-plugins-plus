@@ -40,18 +40,19 @@ location /ws/ {
    - `MOBILE_BRIDGE_SECRET` — 32-byte hex, HMAC secret for session tokens.
    - `MOBILE_BRIDGE_DATA` — users JSON path (e.g. `/var/lib/dsh-mobile-bridge/users.json`).
    - `MOBILE_BRIDGE_PORT` — loopback port behind the TLS proxy (8787).
+   - `MOBILE_BRIDGE_RELAY_DIAGNOSTICS` — optional `1` enables metadata-only WebSocket relay diagnostics (connection id, outer request id, frame size, target count, buffered bytes, close code, and full send errors); ciphertext, credentials, bridge ids, device ids, and request paths are never logged. Leave unset during normal operation.
    - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` — email verification delivery (QQ/163/Gmail SMTP all work; absent disables email login).
    - `WECHAT_APP_ID`, `WECHAT_APP_SECRET` — optional WeChat QR login.
 4. systemd unit with `EnvironmentFile` and `ExecStart=/usr/bin/node /opt/dsh-mobile-bridge/bridge-server.mjs`, `Restart=on-failure`; enable and start.
 5. Verify the mobile login in a browser: `/sw.js` must return `Content-Type: text/javascript` plus `Service-Worker-Allowed: /`; scan a live desktop QR and confirm the mobile Harness renders. The co-hosted app behind `/` remains unaffected before service-worker registration. The scanner accepts only the same relay hostname with an optional leading `www.` difference and then navigates to the exact origin encoded by the desktop QR; provision valid TLS and an nginx redirect for both aliases so users never need to bypass a certificate warning.
-6. While the camera scanner is open, `journalctl -u dsh-mobile-bridge -f` records bounded `[mobile-bridge scanner]` events every two seconds: library/camera readiness, actual track settings, scan attempts, decoder errors, and accepted/rejected transitions. The diagnostic channel accepts only structured text telemetry; it never sends or accepts camera frames, decoded QR contents, cookies, or pairing credentials. Messages remain limited to 8 KiB and 180 per connection, and the whole connection remains limited to ten minutes.
+6. While the camera scanner is open, `journalctl -u dsh-mobile-bridge -f` records bounded `[mobile-bridge scanner]` events every two seconds: library/camera readiness, actual track settings, scan attempts, decoder errors, and accepted/rejected transitions. The diagnostic channel accepts only structured text telemetry; it never sends or accepts camera frames, decoded QR contents, cookies, or pairing credentials. Messages remain limited to 8 KiB and 180 per connection, and the whole connection remains limited to ten minutes. For intermittent tunnel delivery diagnosis, temporarily set `MOBILE_BRIDGE_RELAY_DIAGNOSTICS=1` and restart the service; `[mobile-bridge relay]` records only metadata and send callback failures. Remove the variable and restart after capture.
 
 ## Local Harness side
 
 1. Install the complete Host and Client plugin into the Web profile:
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.5
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.7
 ```
 
 2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; set the mobile sign-in duration (seven days by default), and optionally set a passphrase, owner email, and scan-time email second factor. Save the configuration and wait for the new six-character pairing code and QR to appear with Connected status.

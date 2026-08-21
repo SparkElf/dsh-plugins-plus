@@ -6,11 +6,29 @@ const HARNESS_URL = process.env.DSH_SYSTEM_URL ?? 'http://127.0.0.1:3081'
 const RELAY_URL = 'https://www.tokensfree.eu.cc'
 const LOCAL_PORT = process.env.DSH_LOCAL_PORT ?? '3081'
 
-async function settleSettingsJoins(page, pending) {
+// 启动 join 必须至少真实发生一次，不能把请求尚未开始时的空 pending 集合误判为已就绪。
+async function settleSettingsJoins(page, requests, afterCount = 0) {
   const render = () => new Promise(resolve => { requestAnimationFrame(() => { requestAnimationFrame(resolve) }) })
+  await expect.poll(() => requests.settingsJoinCount).toBeGreaterThan(afterCount)
+  await expect.poll(() => [...requests.pending].some(request => /\/api\/(?:settings|credentials|llm)\./.test(new URL(request.url()).pathname))).toBe(false)
   await page.evaluate(render)
-  await expect.poll(() => [...pending].some(url => /\/api\/(?:settings|credentials|llm)\./.test(new URL(url).pathname))).toBe(false)
-  await page.evaluate(render)
+}
+
+// 无 Provider 的候选环境只经可见 UI 选择稍后配置，保持真实 Provider e2e 的显式 waived 状态。
+async function deferProviderOnboarding(page, requests) {
+  await settleSettingsJoins(page, requests)
+  const welcome = page.getByRole('dialog', { name: /^(内测声明|Internal Testing Notice)$/ })
+  if (await welcome.isVisible()) {
+    const previousJoinCount = requests.settingsJoinCount
+    await welcome.getByRole('button', { name: /^(继续|Continue)$/ }).click()
+    await expect(welcome).toBeHidden()
+    await settleSettingsJoins(page, requests, previousJoinCount)
+  }
+  const credentialOnboarding = page.getByRole('dialog', { name: /^(添加一个 API Key 开始使用|Add an API Key to get started)$/ })
+  if (await credentialOnboarding.isVisible()) {
+    await credentialOnboarding.getByRole('button', { name: /^(稍后配置|Configure later|Set up later)$/ }).click()
+    await expect(credentialOnboarding).toBeHidden()
+  }
 }
 
 async function expectMainSidebarHalf(page) {
@@ -26,9 +44,12 @@ async function settleMainSidebarCollapsed(page) {
 }
 
 function observePage(page, label, problems) {
-  const pending = new Set()
-  page.on('request', request => { pending.add(request.url()) })
-  page.on('requestfinished', request => { pending.delete(request.url()) })
+  const requests = { pending: new Set(), settingsJoinCount: 0 }
+  page.on('request', request => {
+    requests.pending.add(request)
+    if (/\/api\/(?:settings|credentials|llm)\./.test(new URL(request.url()).pathname)) requests.settingsJoinCount += 1
+  })
+  page.on('requestfinished', request => { requests.pending.delete(request) })
   page.on('console', message => {
     if (message.type() === 'error' || message.type() === 'warning') {
       const location = message.location()
@@ -37,11 +58,11 @@ function observePage(page, label, problems) {
     }
   })
   page.on('pageerror', error => { problems.push(label + ' pageerror: ' + (error.stack ?? error.message)) })
-  page.on('requestfailed', request => { pending.delete(request.url()); problems.push(label + ' requestfailed: ' + request.url() + ' ' + (request.failure()?.errorText ?? 'failed')) })
+  page.on('requestfailed', request => { requests.pending.delete(request); problems.push(label + ' requestfailed: ' + request.url() + ' ' + (request.failure()?.errorText ?? 'failed')) })
   page.on('response', response => {
     if (response.status() >= 500) problems.push(label + ' HTTP ' + response.status() + ': ' + response.url())
   })
-  return pending
+  return requests
 }
 
 async function decodeRenderedQr(qr) {
@@ -94,12 +115,13 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
   const desktop = await desktopContext.newPage()
   let phoneA = await phoneAContext.newPage()
   const phoneB = await phoneBContext.newPage()
-  observePage(desktop, 'desktop', problems)
+  const pendingDesktop = observePage(desktop, 'desktop', problems)
   let pendingPhoneA = observePage(phoneA, 'phone A', problems)
   const pendingPhoneB = observePage(phoneB, 'phone B', problems)
 
   try {
     await desktop.goto(HARNESS_URL, { waitUntil: 'domcontentloaded' })
+    await deferProviderOnboarding(desktop, pendingDesktop)
     await desktop.getByRole('button', { name: /^(设置|Settings)$/ }).click()
     await desktop.getByRole('button', { name: /^(移动连接|Mobile Bridge)$/ }).click()
     await desktop.getByRole('heading', { name: /^(移动连接|Mobile Bridge)$/ }).waitFor()
@@ -154,18 +176,7 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     const openMainSidebar = phoneA.getByRole('button', { name: /^(打开侧边栏|Open sidebar)$/ }).first()
     const collapseMainSidebar = phoneA.getByRole('button', { name: /^(收起侧边栏|Collapse sidebar)$/ }).first()
     const phoneSettings = phoneA.getByRole('dialog', { name: /^(设置|Settings)$/ })
-    await settleSettingsJoins(phoneA, pendingPhoneA)
-    const welcome = phoneA.getByRole('dialog', { name: /^(内测声明|Internal Testing Notice)$/ })
-    if (await welcome.isVisible()) {
-      await welcome.getByRole('button', { name: /^(继续|Continue)$/ }).click()
-      await expect(welcome).toBeHidden()
-      await settleSettingsJoins(phoneA, pendingPhoneA)
-      const credentialOnboarding = phoneA.getByRole('dialog', { name: /^(添加一个 API Key 开始使用|Add an API Key to get started)$/ })
-      if (await credentialOnboarding.isVisible()) {
-        await credentialOnboarding.getByRole('button', { name: /^(稍后配置|Configure later)$/ }).click()
-        await expect(credentialOnboarding).toBeHidden()
-      }
-    }
+    await deferProviderOnboarding(phoneA, pendingPhoneA)
 
     if (await openMainSidebar.isVisible()) await openMainSidebar.click()
     await expect(collapseMainSidebar).toBeVisible()
@@ -294,29 +305,39 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expandBetterSidebar.click()
     const newTabButton = phoneA.getByRole('button', { name: /^(新建标签页|New tab)$/ }).first()
     await expect(newTabButton).toBeVisible()
-    await expect.poll(() => newTabButton.evaluate(button => {
-      let panel = button.parentElement
-      while (panel !== null && getComputedStyle(panel).position !== 'absolute') panel = panel.parentElement
-      return Math.abs(panel.getBoundingClientRect().x)
-    })).toBeLessThanOrEqual(1)
-    const drawerGeometry = await newTabButton.evaluate(button => {
-      let panel = button.parentElement
-      while (panel !== null && getComputedStyle(panel).position !== 'absolute') panel = panel.parentElement
-      const panelRect = panel.getBoundingClientRect()
-      const buttonRect = button.getBoundingClientRect()
+    const betterSidebarDrawer = phoneA.locator('[data-dsh-better-sidebar] div[style*="width: 100vw"]').filter({ has: newTabButton })
+    await expect(betterSidebarDrawer).toBeVisible()
+    await expect.poll(() => betterSidebarDrawer.evaluate(drawer => {
+      const rect = drawer.getBoundingClientRect()
       return {
-        x: panelRect.x,
-        width: panelRect.width,
-        viewportWidth: window.innerWidth,
-        buttonX: buttonRect.x,
-        buttonRight: buttonRect.right,
-        mobileMedia: window.matchMedia('(max-width: 767px)').matches,
-        computedWidth: getComputedStyle(panel).width,
+        leftEdgeCovered: rect.left <= 0 && rect.left >= -1,
+        rightEdgeCovered: Math.abs(rect.right - window.innerWidth) <= 1,
+        widthWithinBorder: Math.abs(rect.width - window.innerWidth) <= 1,
       }
-    })
-    expect(drawerGeometry).toMatchObject({ x: 0, width: drawerGeometry.viewportWidth, mobileMedia: true })
-    expect(drawerGeometry.buttonX).toBeGreaterThanOrEqual(0)
-    expect(drawerGeometry.buttonRight).toBeLessThanOrEqual(drawerGeometry.viewportWidth)
+    })).toEqual({ leftEdgeCovered: true, rightEdgeCovered: true, widthWithinBorder: true })
+    const [drawerGeometry, buttonGeometry] = await Promise.all([
+      betterSidebarDrawer.evaluate(drawer => {
+        const rect = drawer.getBoundingClientRect()
+        return {
+          x: rect.x,
+          width: rect.width,
+          viewportWidth: window.innerWidth,
+          mobileMedia: window.matchMedia('(max-width: 767px)').matches,
+          position: getComputedStyle(drawer).position,
+        }
+      }),
+      newTabButton.evaluate(button => {
+        const rect = button.getBoundingClientRect()
+        return { x: rect.x, right: rect.right }
+      }),
+    ])
+    expect(drawerGeometry).toMatchObject({ mobileMedia: true, position: 'fixed' })
+    expect(drawerGeometry.x).toBeGreaterThanOrEqual(-1)
+    expect(drawerGeometry.x).toBeLessThanOrEqual(0)
+    expect(Math.abs(drawerGeometry.x + drawerGeometry.width - drawerGeometry.viewportWidth)).toBeLessThanOrEqual(1)
+    expect(Math.abs(drawerGeometry.width - drawerGeometry.viewportWidth)).toBeLessThanOrEqual(1)
+    expect(buttonGeometry.x).toBeGreaterThanOrEqual(0)
+    expect(buttonGeometry.right).toBeLessThanOrEqual(drawerGeometry.viewportWidth)
     const collapseBetterSidebar = phoneA.getByRole('button', { name: /^(折叠侧边栏|Collapse sidebar)$/ })
     await expect(collapseBetterSidebar).toBeVisible()
     await phoneA.screenshot({ path: '/tmp/better-sidebar-mobile.png', fullPage: true })
@@ -389,7 +410,7 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await desktop.screenshot({ path: '/tmp/mobile-bridge-two-devices-revoked-a.png', fullPage: true })
     expect(problems).toEqual([])
   } catch (error) {
-    console.error(JSON.stringify({ problems, pendingPhoneA: [...pendingPhoneA], pendingPhoneB: [...pendingPhoneB] }, null, 2))
+    console.error(JSON.stringify({ problems, pendingPhoneA: [...pendingPhoneA.pending].map(request => request.url()), pendingPhoneB: [...pendingPhoneB.pending].map(request => request.url()) }, null, 2))
     throw error
   } finally {
     await Promise.all([desktopContext.close(), phoneAContext.close(), phoneBContext.close()])
