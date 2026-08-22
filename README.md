@@ -19,6 +19,7 @@
 
 - CI（`ci.yml`）：每次 push 和 PR 都执行 pnpm install、`tsc --noEmit`、Vitest 单元测试和可发布制品构建。
 - CD（`publish.yml`）：`v*` tag 触发后，重新执行 typecheck、测试和构建，再使用 `NPM_TOKEN` secret 将包发布到 npm。
+- UI 系统测试只断言可操作交互和可见状态变化；间距、对齐、像素几何、计算样式和截图由人在目标视口审查，截图不作通过条件。
 
 ### 添加插件
 
@@ -47,6 +48,7 @@ This repository contains independent [DeepSeek Harness](https://github.com/deeps
 
 - CI (`ci.yml`): runs pnpm install, `tsc --noEmit`, Vitest unit tests, and publishable artifact builds on every push and PR.
 - CD (`publish.yml`): on `v*` tags, repeats typecheck, tests, and builds before publishing packages to npm with the `NPM_TOKEN` secret.
+- UI system tests assert only operable interactions and visible state changes. Humans review spacing, alignment, pixel geometry, computed CSS, and screenshots at target viewports; screenshots are not pass criteria.
 
 ### Adding a plugin
 
