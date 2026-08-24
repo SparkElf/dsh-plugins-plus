@@ -11,6 +11,10 @@ const mocks = vi.hoisted(() => ({
   init: vi.fn(),
 }))
 
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  IconInspectOutline12: () => null,
+}))
+
 vi.mock('echarts', () => ({
   init: mocks.init,
 }))
