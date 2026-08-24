@@ -9,10 +9,14 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { JsonValue, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
 
 const PLUGIN_ID = '@sparkelf/dsh-query-result-analysis'
 const READ_TOOL = 'read_query_result'
 const ANALYSIS_REF_PREFIX = 'qa1_'
+const ANALYSIS_REF_PATTERN = /^qa1_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const READ_PAGE_LIMIT = 2000
 const BATCH_OUTPUT_MAX_TOKENS = 1200
 const REDUCE_OUTPUT_MAX_TOKENS = 1600
@@ -34,7 +38,6 @@ type ResultPage = {
 }
 
 type BatchCheckpoint = {
-  analysisRef: string
   batchIndex: number
   rowStart: number
   rowEnd: number
@@ -45,9 +48,6 @@ type BatchCheckpoint = {
 }
 
 type CompleteCheckpoint = {
-  analysisRef: string
-  sourceResultRef: string
-  instruction: string
   rowCount: number
   batchCount: number
   summary: string
@@ -55,18 +55,14 @@ type CompleteCheckpoint = {
   model: string
 }
 
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    'query-analysis/start': {
-      analysisRef: string
-      sourceResultRef: string
-      instruction: string
-      provider: string
-      model: string
-    }
-    'query-analysis/batch': BatchCheckpoint
-    'query-analysis/complete': CompleteCheckpoint
-  }
+type AnalysisCheckpoint = {
+  version: 1
+  analysisRef: string
+  sourceResultRef: string
+  instruction: string
+  createdAt: string
+  batches: BatchCheckpoint[]
+  complete?: CompleteCheckpoint
 }
 
 class ModelAttemptError extends Error {
@@ -108,6 +104,99 @@ function parseResultPage(value: JsonValue): ResultPage {
     totalCount,
     hasMore,
     nextCursor,
+  }
+}
+
+function parseBatch(value: unknown): BatchCheckpoint | null {
+  if (!isRecord(value)) return null
+  if (
+    typeof value.batchIndex !== 'number'
+    || typeof value.rowStart !== 'number'
+    || typeof value.rowEnd !== 'number'
+    || !(value.nextCursor === null || typeof value.nextCursor === 'string')
+    || typeof value.summary !== 'string'
+    || typeof value.provider !== 'string'
+    || typeof value.model !== 'string'
+  ) return null
+  return value as BatchCheckpoint
+}
+
+function parseComplete(value: unknown): CompleteCheckpoint | undefined {
+  if (!isRecord(value)) return undefined
+  if (
+    typeof value.rowCount !== 'number'
+    || typeof value.batchCount !== 'number'
+    || typeof value.summary !== 'string'
+    || typeof value.provider !== 'string'
+    || typeof value.model !== 'string'
+  ) return undefined
+  return value as CompleteCheckpoint
+}
+
+function parseCheckpoint(value: unknown): AnalysisCheckpoint {
+  if (!isRecord(value)) throw new Error('analysis checkpoint is not an object')
+  const batches = Array.isArray(value.batches) ? value.batches.map(parseBatch) : []
+  if (
+    value.version !== 1
+    || typeof value.analysisRef !== 'string'
+    || !ANALYSIS_REF_PATTERN.test(value.analysisRef)
+    || typeof value.sourceResultRef !== 'string'
+    || typeof value.instruction !== 'string'
+    || typeof value.createdAt !== 'string'
+    || batches.some(batch => batch === null)
+  ) throw new Error('analysis checkpoint is incompatible')
+  const complete = value.complete === undefined ? undefined : parseComplete(value.complete)
+  if (value.complete !== undefined && complete === undefined) {
+    throw new Error('analysis checkpoint completion is incompatible')
+  }
+  return {
+    version: 1,
+    analysisRef: value.analysisRef,
+    sourceResultRef: value.sourceResultRef,
+    instruction: value.instruction,
+    createdAt: value.createdAt,
+    batches: batches as BatchCheckpoint[],
+    ...(complete === undefined ? {} : { complete }),
+  }
+}
+
+function checkpointRoot(): string {
+  const dshHome = process.env.DSH_HOME?.trim()
+  if (!dshHome) throw new Error('analyze_query_result requires DSH_HOME for durable checkpoints')
+  return resolve(dshHome, 'query-result-analysis')
+}
+
+function sessionCheckpointDir(sessionId: SessionId): string {
+  const sessionKey = createHash('sha256').update(sessionId, 'utf8').digest('hex')
+  return resolve(checkpointRoot(), sessionKey)
+}
+
+function checkpointPath(sessionId: SessionId, analysisRef: string): string {
+  if (!ANALYSIS_REF_PATTERN.test(analysisRef)) throw new Error('resumeAnalysisRef is invalid')
+  return resolve(sessionCheckpointDir(sessionId), `${analysisRef}.json`)
+}
+
+async function writeCheckpoint(sessionId: SessionId, checkpoint: AnalysisCheckpoint): Promise<void> {
+  const path = checkpointPath(sessionId, checkpoint.analysisRef)
+  await mkdir(dirname(path), { recursive: true })
+  const temporary = `${path}.tmp-${randomUUID()}`
+  await writeFile(temporary, JSON.stringify(checkpoint), 'utf8')
+  await rename(temporary, path)
+}
+
+async function readCheckpoint(sessionId: SessionId, analysisRef: string): Promise<AnalysisCheckpoint> {
+  const path = checkpointPath(sessionId, analysisRef)
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    throw new Error(`analysisRef ${analysisRef} does not exist for this session`)
+  }
+  try {
+    return parseCheckpoint(JSON.parse(text) as unknown)
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('analysis checkpoint')) throw error
+    throw new Error('analysis checkpoint is incompatible')
   }
 }
 
@@ -189,7 +278,7 @@ async function readPage(
   cursor?: string | null,
 ): Promise<ResultPage> {
   const result = await ctx.tools.execute({
-    callId: CallId(`${exec.callId}:query-analysis:${crypto.randomUUID()}`),
+    callId: CallId(`${exec.callId}:query-analysis:${randomUUID()}`),
     rootCallId: exec.rootCallId,
     name: READ_TOOL,
     arguments: {
@@ -271,31 +360,10 @@ async function reduceSummaries(
   return layer[0]!.summary
 }
 
-function loadResume(agent: NonNullable<ToolRunContext['agent']>, analysisRef: string) {
-  const starts = agent.session.events.filter(event =>
-    event.type === 'query-analysis/start' && event.data.analysisRef === analysisRef)
-  const start = starts.at(-1)
-  if (start === undefined || start.type !== 'query-analysis/start') {
-    throw new Error(`analysisRef ${analysisRef} does not exist in this session`)
-  }
-  const batches = agent.session.events
-    .filter(event => event.type === 'query-analysis/batch' && event.data.analysisRef === analysisRef)
-    .map(event => event.type === 'query-analysis/batch' ? event.data : null)
-    .filter((event): event is BatchCheckpoint => event !== null)
-  const complete = agent.session.events
-    .filter(event => event.type === 'query-analysis/complete' && event.data.analysisRef === analysisRef)
-    .at(-1)
-  return {
-    start: start.data,
-    batches,
-    complete: complete?.type === 'query-analysis/complete' ? complete.data : undefined,
-  }
-}
-
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'analyze_query_result',
-    description: 'Analyze an entire immutable query result with bounded model batches. The tool repeatedly invokes the visible read_query_result capability under the same Agent, checkpoints each completed batch in the DSH session, retries provider/model failures within the configured limit, and hierarchically reduces batch findings. Use resumeAnalysisRef to continue an interrupted analysis without rereading completed pages.',
+    description: 'Analyze an entire immutable query result with bounded model batches. The tool repeatedly invokes the visible read_query_result capability under the same Agent, checkpoints each completed batch under DSH_HOME, retries provider/model failures within the configured limit, and hierarchically reduces batch findings. Use resumeAnalysisRef to continue an interrupted analysis without rereading completed pages.',
     parameters: {
       resultRef: {
         type: 'string',
@@ -347,16 +415,12 @@ export function apply(ctx: Context): void {
       const config = header.config
       const requestedResumeRef = args.resumeAnalysisRef?.trim()
       const resumed = Boolean(requestedResumeRef)
-      const analysisRef = requestedResumeRef || `${ANALYSIS_REF_PREFIX}${crypto.randomUUID()}`
+      const analysisRef = requestedResumeRef || `${ANALYSIS_REF_PREFIX}${randomUUID()}`
 
-      let cursor: string | null | undefined
-      let rowCount = 0
-      let batchIndex = 0
-      let summaries: string[] = []
-
+      let checkpoint: AnalysisCheckpoint
       if (resumed) {
-        const checkpoint = loadResume(agent, analysisRef)
-        if (checkpoint.start.sourceResultRef !== resultRef || checkpoint.start.instruction !== instruction) {
+        checkpoint = await readCheckpoint(agent.id, analysisRef)
+        if (checkpoint.sourceResultRef !== resultRef || checkpoint.instruction !== instruction) {
           throw new Error('resumeAnalysisRef belongs to a different resultRef or instruction')
         }
         if (checkpoint.complete !== undefined) {
@@ -371,22 +435,23 @@ export function apply(ctx: Context): void {
             model: checkpoint.complete.model,
           }
         }
-        summaries = checkpoint.batches.map(batch => batch.summary)
-        const last = checkpoint.batches.at(-1)
-        if (last !== undefined) {
-          cursor = last.nextCursor
-          rowCount = last.rowEnd
-          batchIndex = last.batchIndex + 1
-        }
       } else {
-        agent.session.append('query-analysis/start', {
+        checkpoint = {
+          version: 1,
           analysisRef,
           sourceResultRef: resultRef,
           instruction,
-          provider: config.provider,
-          model: config.model,
-        })
+          createdAt: new Date().toISOString(),
+          batches: [],
+        }
+        await writeCheckpoint(agent.id, checkpoint)
       }
+
+      const last = checkpoint.batches.at(-1)
+      let cursor: string | null | undefined = last?.nextCursor
+      let rowCount = last?.rowEnd ?? 0
+      let batchIndex = last === undefined ? 0 : last.batchIndex + 1
+      const summaries = checkpoint.batches.map(batch => batch.summary)
 
       try {
         while (cursor !== null) {
@@ -414,8 +479,7 @@ export function apply(ctx: Context): void {
           )
           rowCount += page.items.length
           cursor = page.hasMore ? page.nextCursor : null
-          const checkpoint: BatchCheckpoint = {
-            analysisRef,
+          const batch: BatchCheckpoint = {
             batchIndex,
             rowStart,
             rowEnd: rowCount,
@@ -424,7 +488,8 @@ export function apply(ctx: Context): void {
             provider: config.provider,
             model: config.model,
           }
-          agent.session.append('query-analysis/batch', checkpoint)
+          checkpoint.batches.push(batch)
+          await writeCheckpoint(agent.id, checkpoint)
           summaries.push(summary)
           batchIndex += 1
         }
@@ -438,17 +503,14 @@ export function apply(ctx: Context): void {
           exec.signal,
           retryLimit,
         )
-        const completed: CompleteCheckpoint = {
-          analysisRef,
-          sourceResultRef: resultRef,
-          instruction,
+        checkpoint.complete = {
           rowCount,
           batchCount: summaries.length,
           summary,
           provider: config.provider,
           model: config.model,
         }
-        agent.session.append('query-analysis/complete', completed)
+        await writeCheckpoint(agent.id, checkpoint)
         return {
           analysisRef,
           sourceResultRef: resultRef,
