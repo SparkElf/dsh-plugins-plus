@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { CallId } from '@deepseek-ai/dsh-llm'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as Chart from '../src/index.ts'
 
@@ -8,11 +9,17 @@ function text(result: { content: readonly { type: string; text?: string }[] }): 
   return result.content.filter(block => block.type === 'text').map(block => block.text ?? '').join('')
 }
 
+async function setup() {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt).await()
+  await ctx.plugin(ToolRuntime).await()
+  await ctx.plugin(Chart).await()
+  return ctx
+}
+
 describe('render_chart', () => {
   it('keeps the canonical result compact and persists the complete option in presentation metadata', async () => {
-    const ctx = new Context()
-    await ctx.plugin(ToolRuntime).await()
-    await ctx.plugin(Chart).await()
+    const ctx = await setup()
 
     const option = {
       tooltip: { trigger: 'axis' },
@@ -46,9 +53,7 @@ describe('render_chart', () => {
   })
 
   it('rejects a blank provenance reference instead of recording an ambiguous chart', async () => {
-    const ctx = new Context()
-    await ctx.plugin(ToolRuntime).await()
-    await ctx.plugin(Chart).await()
+    const ctx = await setup()
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
       callId: CallId('chart-blank-ref'),
