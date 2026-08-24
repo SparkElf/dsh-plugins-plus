@@ -7,10 +7,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import * as ChartClient from '../src/client/index.ts'
 import { ChartRow } from '../src/client/ChartRow.tsx'
+import { mountClientServices, type ClientSlotsFixture } from './client-services.ts'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   IconInspectOutline12: () => null,
@@ -26,7 +25,7 @@ afterEach(async () => {
   root = undefined
 })
 
-async function boot(): Promise<{ ctx: Context; slots: SlotRegistry }> {
+async function boot(): Promise<{ ctx: Context; slots: ClientSlotsFixture }> {
   root = await mkdtemp(join(tmpdir(), 'sparkelf-chart-client-loader-'))
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
@@ -37,16 +36,7 @@ async function boot(): Promise<{ ctx: Context; slots: SlotRegistry }> {
   const ctx = new Context()
   context = ctx
   ctx.baseUrl = pathToFileURL(root).href + '/'
-  await ctx.plugin(SlotRegistry).await()
-  const locale = new LocaleRuntime(ctx)
-  ctx.provide('locale', locale)
-  const slots = ctx.get('slots') as SlotRegistry
-  slots.register({
-    name: 'root',
-    children: {
-      'tool.call.toolview': { kind: 'keyed', scope: 'session' },
-    },
-  } as never, () => null)
+  const { slots } = await mountClientServices(ctx)
 
   await ctx.plugin(Loader)
   ctx.loader.builtins.include = Include
@@ -67,9 +57,12 @@ async function boot(): Promise<{ ctx: Context; slots: SlotRegistry }> {
 describe('chart client real Loader composition through cordis.yml', () => {
   it('loads the keyed render_chart browser view through the public client entry', async () => {
     const { slots } = await boot()
-    const entries = slots.entries('tool.call.toolview')
-    expect(entries).toHaveLength(1)
-    expect(entries[0]!.component).toBe(ChartRow)
-    expect(entries[0]!.options).toMatchObject({ key: 'render_chart', locale: 'chart' })
+    expect(slots.entries).toHaveLength(1)
+    expect(slots.entries[0]!.component).toBe(ChartRow)
+    expect(slots.entries[0]!.options).toMatchObject({
+      name: 'tool.call.toolview',
+      key: 'render_chart',
+      locale: 'chart',
+    })
   }, 30_000)
 })
