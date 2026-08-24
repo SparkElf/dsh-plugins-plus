@@ -6,6 +6,8 @@ import {
   createUserMessage,
   type FinishReason,
   type LlmCallConfig,
+  type LlmFailure,
+  type ResolvedRetryPolicy,
 } from '@deepseek-ai/dsh-llm'
 import type { JsonValue, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -66,7 +68,11 @@ type AnalysisCheckpoint = {
 }
 
 class ModelAttemptError extends Error {
-  constructor(message: string, readonly retryable: boolean) {
+  constructor(
+    message: string,
+    readonly retryCandidate: boolean,
+    readonly failure?: LlmFailure,
+  ) {
     super(message)
     this.name = 'ModelAttemptError'
   }
@@ -206,9 +212,9 @@ function finishFailure(reason: FinishReason | undefined): ModelAttemptError | nu
     case 'stop':
       return null
     case 'error':
-      return new ModelAttemptError(reason.failure.message, true)
+      return new ModelAttemptError(reason.failure.message, true, reason.failure)
     case 'aborted':
-      return new ModelAttemptError(reason.failure.message, false)
+      return new ModelAttemptError(reason.failure.message, false, reason.failure)
     case 'max-tokens':
       return new ModelAttemptError('analysis model output reached its token limit', false)
     case 'tool-calls':
@@ -216,6 +222,43 @@ function finishFailure(reason: FinishReason | undefined): ModelAttemptError | nu
     default:
       return new ModelAttemptError(`analysis model stopped with unsupported reason ${(reason as { kind: string }).kind}`, false)
   }
+}
+
+function localRetryDelay(policy: ResolvedRetryPolicy, retry: number): number {
+  const exponent = Math.min(retry - 1, 1024)
+  const exponential = Math.min(policy.initialDelayMs * 2 ** exponent, policy.maxDelayMs)
+  const jitter = 1 - policy.jitterRatio + 2 * policy.jitterRatio * Math.random()
+  return Math.min(exponential * jitter, policy.maxDelayMs)
+}
+
+function retryDelay(
+  error: ModelAttemptError,
+  policy: ResolvedRetryPolicy,
+  retry: number,
+): number | null {
+  if (!error.retryCandidate || error.failure === undefined) return null
+  if (policy.mode === 'normal' && !policy.retryableCodes.includes(error.failure.code)) return null
+  const providerDelay = error.failure.providerRetryAfterMs
+  if (providerDelay !== undefined && Number.isFinite(providerDelay) && providerDelay > 0) {
+    if (providerDelay <= policy.maxDelayMs) return providerDelay
+    if (policy.mode === 'normal') return null
+  }
+  return localRetryDelay(policy, retry)
+}
+
+function cancellableDelay(delayMs: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false)
+  return new Promise((resolveDelay) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolveDelay(true)
+    }, delayMs)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      resolveDelay(false)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 async function modelText(
@@ -261,12 +304,19 @@ async function modelTextWithRetry(
   maxTokens: number,
   retryLimit: number,
 ): Promise<string> {
+  const policy = ctx.llm.providerRetryPolicy(config.provider)
   for (let attempt = 0; ; attempt += 1) {
     if (signal.aborted) throw signal.reason ?? new Error('analysis aborted')
     try {
       return await modelText(ctx, config, sessionId, system, prompt, signal, maxTokens)
     } catch (error) {
-      if (!(error instanceof ModelAttemptError) || !error.retryable || attempt >= retryLimit) throw error
+      if (!(error instanceof ModelAttemptError) || attempt >= retryLimit) throw error
+      if (policy.mode === 'normal' && attempt >= policy.maxRetries) throw error
+      const delayMs = retryDelay(error, policy, attempt + 1)
+      if (delayMs === null) throw error
+      if (!await cancellableDelay(delayMs, signal)) {
+        throw signal.reason ?? new Error('analysis aborted')
+      }
     }
   }
 }
@@ -363,7 +413,7 @@ async function reduceSummaries(
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'analyze_query_result',
-    description: 'Analyze an entire immutable query result with bounded model batches. The tool repeatedly invokes the visible read_query_result capability under the same Agent, checkpoints each completed batch under DSH_HOME, retries provider/model failures within the configured limit, and hierarchically reduces batch findings. Use resumeAnalysisRef to continue an interrupted analysis without rereading completed pages.',
+    description: 'Analyze an entire immutable query result with bounded model batches. The tool repeatedly invokes the visible read_query_result capability under the same Agent, checkpoints each completed batch under DSH_HOME, follows the selected provider retry policy within a caller-bounded retry limit, and hierarchically reduces batch findings. Use resumeAnalysisRef to continue an interrupted analysis without rereading completed pages.',
     parameters: {
       resultRef: {
         type: 'string',
@@ -382,7 +432,7 @@ export function apply(ctx: Context): void {
       maxBatchRetries: {
         type: 'integer',
         enum: [0, 1, 2, 3],
-        description: 'Retries for a provider/model error on each bounded analysis or reduction call. Defaults to 1.',
+        description: 'Maximum retries for each bounded analysis/reduction model call. The provider retry policy still decides which failures are eligible. Defaults to 1.',
       },
     },
     output: {
