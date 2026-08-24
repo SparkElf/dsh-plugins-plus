@@ -7,7 +7,7 @@ import {
   type FinishReason,
   type LlmCallConfig,
 } from '@deepseek-ai/dsh-llm'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 const PLUGIN_ID = '@sparkelf/dsh-query-result-analysis'
@@ -97,6 +97,7 @@ function parseResultPage(value: JsonValue): ResultPage {
     || typeof totalCount !== 'number'
     || typeof hasMore !== 'boolean'
     || !(nextCursor === null || typeof nextCursor === 'string')
+    || (hasMore && nextCursor === null)
   ) {
     throw new Error(`${READ_TOOL} returned an incompatible result page`)
   }
@@ -131,7 +132,7 @@ function finishFailure(reason: FinishReason | undefined): ModelAttemptError | nu
 async function modelText(
   ctx: Context,
   config: LlmCallConfig,
-  sessionId: string,
+  sessionId: SessionId,
   system: string,
   prompt: string,
   signal: AbortSignal,
@@ -149,7 +150,7 @@ async function modelText(
     system,
     maxTokens: Math.min(config.maxTokens ?? maxTokens, maxTokens),
     signal,
-    sessionId: sessionId as never,
+    sessionId,
   })) {
     if (chunk.type === 'text-delta') text += chunk.text
     if (chunk.type === 'finish') finish = chunk.reason
@@ -164,7 +165,7 @@ async function modelText(
 async function modelTextWithRetry(
   ctx: Context,
   config: LlmCallConfig,
-  sessionId: string,
+  sessionId: SessionId,
   system: string,
   prompt: string,
   signal: AbortSignal,
@@ -241,7 +242,7 @@ const REDUCE_SYSTEM = [
 async function reduceSummaries(
   ctx: Context,
   config: LlmCallConfig,
-  sessionId: string,
+  sessionId: SessionId,
   instruction: string,
   summaries: string[],
   signal: AbortSignal,
@@ -312,8 +313,7 @@ export function apply(ctx: Context): void {
       },
       maxBatchRetries: {
         type: 'integer',
-        minimum: 0,
-        maximum: 3,
+        enum: [0, 1, 2, 3],
         description: 'Retries for a provider/model error on each bounded analysis or reduction call. Defaults to 1.',
       },
     },
