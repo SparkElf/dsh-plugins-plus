@@ -1,8 +1,9 @@
+// @vitest-environment jsdom
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -10,6 +11,10 @@ import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import * as ChartClient from '../src/client/index.ts'
 import { ChartRow } from '../src/client/ChartRow.tsx'
+
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  IconInspectOutline12: () => null,
+}))
 
 let root: string | undefined
 let context: Context | undefined
