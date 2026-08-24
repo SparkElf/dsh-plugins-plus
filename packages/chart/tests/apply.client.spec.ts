@@ -1,9 +1,14 @@
+// @vitest-environment jsdom
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { apply, inject } from '../src/client/index.ts'
 import { ChartRow } from '../src/client/ChartRow.tsx'
+
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  IconInspectOutline12: () => null,
+}))
 
 async function bench() {
   const ctx = new Context()
