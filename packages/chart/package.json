@@ -1,0 +1,92 @@
+{
+  "name": "@sparkelf/dsh-chart",
+  "version": "0.1.0",
+  "description": "Interactive ECharts rendering plugin for DeepSeek Harness tool results.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
+    "bundle": "tsdown",
+    "prepack": "pnpm run build"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SparkElf/dsh-plugins-plus.git",
+    "directory": "packages/chart"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "echarts": "^6.1.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <1",
+    "@deepseek-ai/dsh-client-locale": ">=0.0.1-rc.1 <1",
+    "@deepseek-ai/dsh-client-runtime": ">=0.0.1-rc.1 <1",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.0.1-rc.1 <1",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc.1 <1",
+    "@deepseek-ai/dsh-client-ui-tool": ">=0.0.1-rc.1 <1",
+    "react": ">=18.2.0 <20"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/cordis-plugin-include": "1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.2",
+    "@deepseek-ai/dsh-client-locale": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-runtime": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-tool": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "0.0.1-rc.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "~18.3.1",
+    "jsdom": "^26.1.0",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsdown": "^0.22.2"
+  }
+}
