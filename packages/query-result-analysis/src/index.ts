@@ -104,7 +104,7 @@ function parseResultPage(value: JsonValue): ResultPage {
     throw new Error(`${READ_TOOL} returned an incompatible result page`)
   }
   return {
-    columns,
+    columns: columns as string[],
     items: items as ResultRow[],
     returnedCount,
     totalCount,
