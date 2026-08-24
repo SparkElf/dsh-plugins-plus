@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { ChartRow, type ChartRowProps } from '../src/client/ChartRow.tsx'
+import type { ChartKey } from '../src/client/locales.ts'
 
 const mocks = vi.hoisted(() => ({
   setOption: vi.fn(),
@@ -19,14 +20,14 @@ class ResizeObserverStub {
   disconnect() {}
 }
 
-const copy = {
+const copy: Record<ChartKey, string> = {
   'row.title': 'Interactive chart',
   'state.rendering': 'Rendering chart…',
   'state.failed': 'Chart rendering failed',
   'state.unavailable': 'Chart data is unavailable',
   'action.inspect': 'Inspect',
   'chart.aria': 'Interactive data chart',
-} as const
+}
 
 function props(meta: Record<string, unknown>): ChartRowProps {
   return {
@@ -48,7 +49,7 @@ function props(meta: Record<string, unknown>): ChartRowProps {
       subCalls: [],
     },
     openFile: () => {},
-    t: key => copy[key],
+    t: (key: ChartKey) => copy[key],
   } as unknown as ChartRowProps
 }
 
