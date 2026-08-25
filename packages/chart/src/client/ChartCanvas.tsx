@@ -37,7 +37,8 @@ export function ChartCanvas({
       try {
         setFailed(false)
         mount()
-      } catch {
+      } catch (error) {
+        console.error('dsh-chart: ECharts render failed', error)
         chart?.dispose()
         chart = undefined
         setFailed(true)

@@ -75,6 +75,7 @@ afterEach(() => {
   cleanup()
   document.body.removeAttribute('data-ds-dark-theme')
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('ChartRow', () => {
@@ -104,9 +105,12 @@ describe('ChartRow', () => {
   })
 
   it('shows a user-facing failure without exposing an ECharts exception', () => {
-    mocks.setOption.mockImplementationOnce(() => { throw new Error('internal option parser detail') })
+    const failure = new Error('internal option parser detail')
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mocks.setOption.mockImplementationOnce(() => { throw failure })
     render(<ChartRow {...props({ version: 1, sourceResultRef: 'qr1_bad', option: { series: [] } })} />)
 
+    expect(consoleError).toHaveBeenCalledWith('dsh-chart: ECharts render failed', failure)
     expect(screen.getByRole('alert').textContent).toBe('Chart rendering failed')
     expect(screen.queryByText('internal option parser detail')).toBeNull()
     expect(mocks.dispose).toHaveBeenCalledTimes(1)
