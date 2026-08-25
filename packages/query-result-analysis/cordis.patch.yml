@@ -1,2 +1,3 @@
-insert:
-  - '@sparkelf/dsh-query-result-analysis'
+- insert:
+    - id: query-result-analysis
+      name: '@sparkelf/dsh-query-result-analysis'
