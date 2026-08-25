@@ -4,7 +4,7 @@ import { IconInspectOutline12 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
 import { ChartCanvas } from './ChartCanvas.tsx'
-import { chartMetaFromUnknown } from './meta.ts'
+import { chartMetaFromContent, chartMetaFromUnknown } from './meta.ts'
 import css from './ChartRow.module.css'
 
 export type ChartRowProps = PropsRuntime<'tool.call.toolview'> & PropsLocale<'chart'>
@@ -12,7 +12,9 @@ export type ChartRowProps = PropsRuntime<'tool.call.toolview'> & PropsLocale<'ch
 /** Render pending, failed, or durable interactive chart state for one tool call. */
 export function ChartRow({ block, inspect, t }: ChartRowProps) {
   const result = 'kind' in block && block.kind === 'tool-result' ? block : null
-  const meta = result === null ? undefined : chartMetaFromUnknown(result.meta)
+  const meta = result === null
+    ? undefined
+    : chartMetaFromUnknown(result.meta) ?? chartMetaFromContent(result.content)
   const title = meta?.title ?? t('row.title')
 
   if (result === null) {

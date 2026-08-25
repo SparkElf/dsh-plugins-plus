@@ -14,7 +14,7 @@
 - `option`：完整、JSON 可序列化的 ECharts option；必须包含历史 replay 所需的数据。
 - `title`：可选的短图表标题。
 
-Host 将完整 option 写入 durable tool-result presentation metadata。历史 replay、resume 和 fork 因而不依赖仍然存活的 DataOps resultRef；`sourceResultRef` 只记录来源。
+Host将完整option写入durable tool result。直接调用使用presentation metadata；Code Mode nested调用在`tool/code-dispatch.content`中追加chart-owned block，因为该日志内容不会回流模型。Web Client经同一校验器读取两种投影。历史replay、resume和fork因而不依赖仍然存活的DataOps resultRef；`sourceResultRef`只记录来源。
 
 Web Client 为 `render_chart` 注册 keyed tool view，并负责 ECharts 初始化、`setOption`、容器 resize、Harness light/dark theme 切换和 disposal。正常结果只显示标题与交互图表，不显示 option JSON、resultRef、包名或 Host/Client 实现说明。加载、不可用和失败状态只显示必要的用户状态；底层渲染异常不会直接泄露到普通 UI。
 
@@ -62,7 +62,7 @@ The current `feat/chart` branch is release-candidate source. This document does 
 - `option`: a complete JSON-serializable ECharts option containing the data required for history replay.
 - `title`: an optional short chart title.
 
-The Host stores the complete option in durable tool-result presentation metadata. History replay, resume, and fork therefore do not depend on a still-live DataOps resultRef; `sourceResultRef` records provenance only.
+The Host stores the complete option in the durable tool result. A direct call uses presentation metadata; a nested Code Mode call appends a chart-owned block to `tool/code-dispatch.content`, whose log-only content never re-enters model context. The Web Client validates both projections through the same parser. History replay, resume, and fork therefore do not depend on a still-live DataOps resultRef; `sourceResultRef` records provenance only.
 
 The Web Client registers a keyed tool view for `render_chart` and owns ECharts initialization, `setOption`, container resize, Harness light/dark theme changes, and disposal. The normal completed result shows the title and interactive chart rather than option JSON, resultRef, package names, or Host/Client implementation explanations. Loading, unavailable, and failure states expose only necessary user-facing state, and raw renderer exceptions are not surfaced in the normal UI.
 

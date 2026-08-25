@@ -25,3 +25,14 @@ export function chartMetaFromUnknown(value: unknown): ChartPresentationMeta | un
     ...(title === undefined ? {} : { title }),
   }
 }
+
+/** Read the chart payload appended to a nested Code Mode dispatch result. */
+export function chartMetaFromContent(value: unknown): ChartPresentationMeta | undefined {
+  if (!Array.isArray(value)) return undefined
+  for (const block of value) {
+    if (!isRecord(block) || block.type !== 'sparkelf/chart') continue
+    const meta = chartMetaFromUnknown(block.meta)
+    if (meta !== undefined) return meta
+  }
+  return undefined
+}

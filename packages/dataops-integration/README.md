@@ -2,7 +2,7 @@
 
 ## 中文
 
-`@sparkelf/dsh-dataops-integration`是SparkElf维护的DeepSeek Harness独立DataOps连接插件。一个owner package同时包含Host授权routes、Web Settings、credential生命周期和generic MCP client组合；DSH core不包含DataOps身份、endpoint或授权逻辑。
+`@sparkelf/dsh-dataops-integration`是SparkElf维护的DeepSeek Harness直接连接DataOps插件，面向用户直接打开并自行维护`DSH_HOME`的standalone形态。一个owner package同时包含Host授权routes、Web Settings、credential生命周期和generic MCP client组合；DSH core不包含DataOps身份、endpoint或授权逻辑。
 
 当前branch是发布候选源码，本文不声明已发布npm版本或生产pin。正式发布状态以仓库CI、打包产物和实际npm publication为准。
 
@@ -10,9 +10,9 @@
 
 安装package后，DSH Settings出现DataOps页面。用户点击“连接DataOps”，在DataOps原生页面完成登录、MFA和明确账号选择，批准后回到DSH并看到已绑定账号。一次delegated access token在其DataOps `AuthSession`有效期间持续工作，不做后台refresh、周期轮换或周期remount。
 
-同一`DSH_HOME`只生成一个持久`target_ref`。DataOps首次批准会把它永久绑定到所选owner；后续“重新授权”只能更新同一owner的access credential，并且只在该次用户操作后重挂一次DataOps MCP child。退出登录、session过期或撤销、账号停用、权限变更和Disconnect由DataOps现有管理机制即时执行。
+standalone `DSH_HOME`的可写`target_ref`在一次连接期间绑定所选owner；“重新授权”快速更新同一owner的access credential，不重复选择账号，并且只在该次用户操作后重挂一次DataOps MCP child。退出登录、session过期或撤销、账号停用和权限变更由DataOps现有管理机制即时执行。
 
-Disconnect先让DataOps撤销当前delegated access token；成功后再卸载DataOps工具并清除本地access credential。`target_ref`和owner绑定保留，因此重新连接仍回到同一账号。
+Disconnect先让DataOps撤销当前delegated access token并释放standalone owner；成功后再卸载DataOps工具、清除本地access credential并生成新的target。下次连接可以重新选择DataOps账号。管理员注入的只读target不重建，其账号仍由部署方指定。
 
 ### 配置
 
@@ -46,7 +46,7 @@ DataOps托管容器不安装本package；托管模式使用DataOps-owned Unix br
 
 ### 已知限制与后续工作
 
-一个`DSH_HOME`没有账号切换、target unbind或owner重置。绑定owner的DataOps `AuthSession`结束后，用户在Settings重新连接；package不在后台延长DataOps session。完整八工具取数、chart和analysis的用户验收由真实DataOps与DSH Playwright路径统一完成。
+绑定owner的DataOps `AuthSession`结束后，用户在Settings重新连接；package不在后台延长DataOps session。切换账号通过显式Disconnect后重新Connect完成，不允许在仍连接时静默换号。完整八工具取数、chart和analysis的用户验收由真实DataOps与DSH Playwright路径统一完成。
 
 ## English
 
@@ -58,9 +58,9 @@ The current branch is release-candidate source. This document does not claim an 
 
 After installation, DSH Settings contains a DataOps page. The user selects Connect DataOps, completes login, MFA, and explicit account selection on the native DataOps page, then returns to DSH and sees the bound account. One delegated access token remains usable while its DataOps `AuthSession` remains active. There is no background refresh, periodic rotation, or periodic remount.
 
-One `DSH_HOME` creates one persistent `target_ref`. The first DataOps approval permanently binds it to the selected owner. Later authorization can only replace the same owner's access credential and remounts the DataOps MCP child once after that explicit action. Logout, session expiry or revocation, account disablement, permission changes, and Disconnect remain owned by existing DataOps administration.
+A writable standalone `target_ref` is bound to the selected owner for one connection. Authorize again quickly replaces the same owner's access credential without another account choice and remounts the DataOps MCP child once after that explicit action. Logout, session expiry or revocation, account disablement, and permission changes remain owned by existing DataOps administration.
 
-Disconnect first asks DataOps to revoke the current delegated access token. After success it removes the DataOps tools and clears the local access credential. The `target_ref` and owner binding remain, so reconnecting returns to the same account.
+Disconnect first asks DataOps to revoke the current delegated access token and release the standalone owner. After success it removes the DataOps tools, clears the local access credential, and creates a new target, so the next connection can select a DataOps account again. An administrator-supplied read-only target is not recreated and remains assigned by deployment.
 
 ### Configuration
 
@@ -94,4 +94,4 @@ A DataOps-managed container does not install this package. Managed mode uses the
 
 ### Known Limitations and Deferred Work
 
-One `DSH_HOME` has no account switch, target unbind, or owner reset. When the bound owner's DataOps `AuthSession` ends, the user reconnects from Settings; the package does not extend that session in the background. The complete eight-tool query, chart, and analysis user acceptance is covered through the real DataOps and DSH Playwright path.
+When the bound owner's DataOps `AuthSession` ends, the user reconnects from Settings; the package does not extend that session in the background. Account switching requires an explicit Disconnect followed by Connect and never happens silently while connected. The complete eight-tool query, chart, and analysis user acceptance is covered through the real DataOps and DSH Playwright path.

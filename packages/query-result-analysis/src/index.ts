@@ -93,6 +93,15 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string')
 }
 
+function resultPagePayload(value: JsonValue): JsonValue {
+  if (
+    isRecord(value)
+    && Array.isArray(value.content)
+    && value.structuredContent !== undefined
+  ) return value.structuredContent as JsonValue
+  return value
+}
+
 function parseResultPage(value: JsonValue, readToolName: string): ResultPage {
   if (!isRecord(value)) throw new Error(`${readToolName} returned a non-object value`)
   const columns = value.columns
@@ -315,7 +324,7 @@ async function readPage(
   })
   for (const context of result.additionalContexts ?? []) exec.deferContext(context)
   if (result.isError) throw new Error(`${readToolName} failed: ${result.error.message}`)
-  return parseResultPage(result.value, readToolName)
+  return parseResultPage(resultPagePayload(result.value), readToolName)
 }
 
 function batchPrompt(input: {

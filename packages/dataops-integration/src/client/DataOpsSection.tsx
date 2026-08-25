@@ -18,6 +18,7 @@ interface Account {
 interface Status {
   credentialConfigured: boolean
   credentialWritable: boolean
+  disconnectReleasesAccount: boolean
   authorizationAccepted: boolean
   account: Account | null
 }
@@ -195,7 +196,9 @@ function Loaded({ t }: { t: DataOpsSectionInjected['t'] }) {
         {confirmingDisconnect && (
           <div className={styles.confirmBox}>
             <h3 className={styles.confirmTitle}>{t('confirmDisconnect')}</h3>
-            <p className={styles.confirmCopy}>{t('confirmDisconnectDetail')}</p>
+            <p className={styles.confirmCopy}>
+              {t(status!.disconnectReleasesAccount ? 'confirmDisconnectSwitchableDetail' : 'confirmDisconnectDetail')}
+            </p>
             <div className={styles.confirmActions}>
               <Button variant="ghost" disabled={disconnecting} onClick={() => { setConfirmingDisconnect(false) }}>
                 {t('keepConnected')}

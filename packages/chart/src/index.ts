@@ -3,7 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
-import type { ChartPresentationMeta, RenderChartArgs, RenderChartResult } from './types.ts'
+import type { ChartContentBlock, ChartPresentationMeta, RenderChartArgs, RenderChartResult } from './types.ts'
 
 export type { ChartPresentationMeta, RenderChartArgs, RenderChartResult } from './types.ts'
 
@@ -23,15 +23,18 @@ function normalizeArgs(args: RenderChartArgs): RenderChartResult {
   }
 }
 
-/** Build the complete replay metadata while keeping the canonical result compact. */
-export function chartPresentationMeta(args: RenderChartArgs, value: RenderChartResult): JsonValue {
-  const meta: ChartPresentationMeta = {
+function buildChartPresentationMeta(args: RenderChartArgs, value: RenderChartResult): ChartPresentationMeta {
+  return {
     version: 1,
     sourceResultRef: value.sourceResultRef,
     option: args.option,
     ...(value.title === undefined ? {} : { title: value.title }),
   }
-  return meta as unknown as JsonValue
+}
+
+/** Build the complete replay metadata while keeping the canonical result compact. */
+export function chartPresentationMeta(args: RenderChartArgs, value: RenderChartResult): JsonValue {
+  return buildChartPresentationMeta(args, value) as unknown as JsonValue
 }
 
 /** Register the model-facing chart tool; the browser half is shipped by the same npm package. */
@@ -75,6 +78,14 @@ export function apply(ctx: Context): void {
       presentationMeta: (args, value) => chartPresentationMeta(args, value),
     },
     isConcurrencySafe: () => true,
+    finalizeContent(exec, result) {
+      if (exec.parent === undefined || result.isError) return
+      const block: ChartContentBlock = {
+        type: 'sparkelf/chart',
+        meta: buildChartPresentationMeta(exec.arguments as RenderChartArgs, result.value as unknown as RenderChartResult),
+      }
+      return [...result.content, block]
+    },
     execute(args) {
       return Promise.resolve(normalizeArgs(args))
     },

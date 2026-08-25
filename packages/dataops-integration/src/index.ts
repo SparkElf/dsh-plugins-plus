@@ -1,6 +1,6 @@
 /**
  * Standalone DataOps integration for DSH. The plugin owns browser authorization,
- * one persistent target identity, one delegated access credential, and generic
+ * one connection-scoped target identity, one delegated access credential, and generic
  * Streamable HTTP MCP composition.
  */
 import { createHash, randomBytes } from 'node:crypto'
@@ -37,7 +37,7 @@ export interface Config {
   serverName: string
   /** Credential reference that stores the delegated access token. */
   credentialRef: string
-  /** Persistent target identity credential retained across disconnects. */
+  /** Target identity credential for this DSH home. */
   targetCredentialRef: string
   /** Explicit DSH browser origin for non-loopback deployments. */
   callbackOrigin?: string
@@ -199,7 +199,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const accessRef: CredentialRef = credentialRef(config.credentialRef)
   const targetRefKey: CredentialRef = credentialRef(config.targetCredentialRef)
 
-  // target_ref属于当前DSH_HOME，disconnect只清access token，绝不重建target。
+  // standalone target使用可写credential；Disconnect后换新target，管理员注入的只读target保持不变。
   const targetState = await ctx.credentials.describe(targetRefKey)
   if (!targetState.configured) {
     if (!targetState.writable) {
@@ -209,7 +209,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   const resolvedTarget = await ctx.credentials.resolve(targetRefKey)
   if (resolvedTarget === undefined) throw new Error('dataops-integration: target credential could not be resolved')
-  const targetRef = parseTargetRef(resolvedTarget.value)
+  let targetRef = parseTargetRef(resolvedTarget.value)
 
   const pending = new Map<string, PendingAuthorization>()
   let mcpFiber: Fiber | undefined
@@ -219,7 +219,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const unmountMcp = async (): Promise<void> => {
     const fiber = mcpFiber
     mcpFiber = undefined
-    if (fiber !== undefined && fiber.uid !== null) await fiber.dispose()
+    if (fiber !== undefined && fiber.uid !== null) {
+      ctx.logger.info('dataops-integration: mcp.dispose.started')
+      await fiber.dispose()
+      ctx.logger.info('dataops-integration: mcp.dispose.complete')
+    }
   }
 
   // 用户显式授权时只重挂一次DataOps child，不做后台轮换或周期remount。
@@ -306,6 +310,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         sendJson(response, 200, {
           credentialConfigured: state.credential.configured,
           credentialWritable: state.credential.writable,
+          disconnectReleasesAccount: targetState.writable,
           authorizationAccepted: state.authorizationAccepted,
           account: state.account,
         })
@@ -402,7 +407,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     },
   }), 'dataops-integration: callback route')
 
-  // Disconnect先完成DataOps撤销，成功后才卸载工具并清本地access credential。
+  // Disconnect先释放DataOps grant，再卸载工具、清access并为standalone home换新target。
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: DISCONNECT_PATH,
@@ -416,8 +421,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       try {
         const access = await ctx.credentials.resolve(accessRef)
         if (access !== undefined) await requestRevocation(access.value)
+        ctx.logger.info('dataops-integration: disconnect.revoke.complete')
         await unmountMcp()
         await ctx.credentials.unset(accessRef)
+        ctx.logger.info('dataops-integration: disconnect.access-unset.complete')
+        if (targetState.writable) {
+          const nextTargetRef = randomBytes(32).toString('base64url')
+          await ctx.credentials.set(targetRefKey, nextTargetRef)
+          targetRef = parseTargetRef(nextTargetRef)
+          ctx.logger.info('dataops-integration: disconnect.target-rotate.complete')
+        }
         pending.clear()
         sendJson(response, 200, { disconnected: true })
       } catch (error) {

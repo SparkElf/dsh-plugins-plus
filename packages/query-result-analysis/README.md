@@ -30,7 +30,7 @@ analyze_query_result
 
 ### 批处理
 
-配置的不可变结果工具返回的每个页面构成一个分析批次。DataOps 先按字节限制结果页面，再按行数限制，因此插件不会把完整结果装入一次模型请求。
+配置的不可变结果工具返回的每个页面构成一个分析批次。工具直接返回页面时读取其canonical value；generic MCP client返回标准`{ content, structuredContent }` envelope时读取`structuredContent`中的同一页面。DataOps先按字节限制结果页面，再按行数限制，因此插件不会把完整结果装入一次模型请求。
 
 每行使用从不可变结果引用派生的稳定证据标签：
 
@@ -137,7 +137,7 @@ The plugin never knows the DataOps URL, workspace token, database credentials, o
 
 ## Batching
 
-Each page returned by the configured immutable-result tool is one analysis batch. DataOps currently caps each result page by bytes before rows, so the plugin does not load the complete result into one model request.
+Each page returned by the configured immutable-result tool is one analysis batch. A direct tool supplies that page as its canonical value; the generic MCP client's standard `{ content, structuredContent }` envelope supplies the same page in `structuredContent`. DataOps currently caps each result page by bytes before rows, so the plugin does not load the complete result into one model request.
 
 Rows receive stable evidence labels derived from the immutable result reference:
 

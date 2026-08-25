@@ -22,13 +22,16 @@ test('用户通过真实 DataOps 结果完成语义分析和交互图表，并�
     await expect(testingNotice).toBeHidden()
   }
 
+  await page.getByRole('button', { name: /^(新建会话|New session)$/i }).first().click()
   const composer = page.getByPlaceholder(/^(给智能体发消息|Message the agent|描述你想要构建的内容|Describe what you want to build)$/)
   await composer.fill(QUERY_PROMPT)
   await page.getByRole('button', { name: /^(发送消息|Send message)$/ }).click()
   await expect(page.getByRole('button', { name: /^(停止生成|Stop generating)$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /^(发送消息|Send message)$/ })).toBeVisible({ timeout: 540_000 })
 
-  await expect(page.getByText('Analyze complete query result', { exact: true })).toBeVisible()
+  const analysisCall = page.getByRole('button', { name: /^Tool call analyze_query_result\b/i }).last()
+  await expect(analysisCall).toBeVisible()
+  await expect(page.getByText(/incompatible result page/i)).toHaveCount(0)
   await expect(page.getByText(ANALYSIS_MARKER, { exact: false }).last()).toBeVisible()
   const chart = page.getByRole('img', { name: CHART_TITLE, exact: true })
   await expect(chart).toBeVisible()
@@ -36,7 +39,7 @@ test('用户通过真实 DataOps 结果完成语义分析和交互图表，并�
   await expect(page.getByText(/^(无法渲染该图表。|Unable to render this chart.)$/)).toHaveCount(0)
 
   await page.reload({ waitUntil: 'domcontentloaded' })
-  await expect(page.getByText('Analyze complete query result', { exact: true })).toBeVisible()
+  await expect(analysisCall).toBeVisible()
   await expect(page.getByText(ANALYSIS_MARKER, { exact: false }).last()).toBeVisible()
   const replayedChart = page.getByRole('img', { name: CHART_TITLE, exact: true })
   await expect(replayedChart).toBeVisible()
