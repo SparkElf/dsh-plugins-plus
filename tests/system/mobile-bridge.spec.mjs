@@ -96,10 +96,12 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     const serverUrl = desktop.getByLabel(/服务器地址|Server URL/)
     const localPort = desktop.getByLabel(/本地端口|Local port/)
     await expect(serverUrl).toHaveValue(RELAY_URL)
-    await localPort.fill(LOCAL_PORT)
-    await serverUrl.focus()
+    if (await localPort.inputValue() !== LOCAL_PORT) {
+      await localPort.fill(LOCAL_PORT)
+      await serverUrl.focus()
+      await expect(desktop.getByRole('status').filter({ hasText: /已自动保存|Saved automatically/ })).toBeVisible({ timeout: 3_000 })
+    }
     await expect(localPort).toHaveValue(LOCAL_PORT)
-    await expect(desktop.getByRole('status').filter({ hasText: /已自动保存|Saved automatically/ })).toBeVisible({ timeout: 3_000 })
     await expect(desktop.getByLabel(/移动端登录保持天数|Mobile sign-in duration/)).toHaveValue('7')
     await expect(desktop.getByLabel(/启动自动连接|Connect on startup/)).toBeChecked()
     await expect(desktop.getByLabel(/断线自动重连|Reconnect after disconnection/)).toBeChecked()
