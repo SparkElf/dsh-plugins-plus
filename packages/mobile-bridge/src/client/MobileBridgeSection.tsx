@@ -82,7 +82,9 @@ const DEFAULTS: MobileBridgeValues = {
 export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode {
   const { connectNow, disconnectDevice, disconnectNow, loadStatus, loadValues, saveValues, subscribeStatus, t } = props
   const [values, setValues] = useState(DEFAULTS)
+  const draftValues = useRef(DEFAULTS)
   const persistedValues = useRef(DEFAULTS)
+  const saveOperation = useRef<Promise<boolean> | null>(null)
   const [status, setStatus] = useState<MobileBridgeStatus | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -98,6 +100,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     let live = true
     void Promise.all([loadValues(), loadStatus()]).then(([nextValues, nextStatus]) => {
       if (!live) return
+      draftValues.current = nextValues
       persistedValues.current = nextValues
       setValues(nextValues)
       setStatus(nextStatus)
@@ -139,43 +142,59 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     return () => { live = false }
   }, [status?.qrUrl, t])
 
-  /** Persist one complete draft without coupling completion to relay state. */
-  const commit = async (nextValues: MobileBridgeValues): Promise<void> => {
-    if (nextValues === persistedValues.current) return
+  /** Persist the latest draft and absorb edits made while that save is in flight. */
+  const commit = (): Promise<boolean> => {
+    if (saveOperation.current !== null) return saveOperation.current
+    if (draftValues.current === persistedValues.current) return Promise.resolve(true)
+
     setSaving(true)
     setMessage(t('saving'))
     setError(null)
-    try {
-      const persisted = await saveValues(nextValues)
-      persistedValues.current = persisted
-      setValues(persisted)
-      setMessage(t('saved'))
-    } catch (caught) {
-      console.error('[dsh-mobile-bridge] settings save failed', caught)
-      setValues(persistedValues.current)
-      setMessage(null)
-      setError(t('saveFailed'))
-    } finally {
-      setSaving(false)
-    }
+    const operation = (async (): Promise<boolean> => {
+      try {
+        while (draftValues.current !== persistedValues.current) {
+          const candidate = draftValues.current
+          const persisted = await saveValues(candidate)
+          persistedValues.current = persisted
+          if (draftValues.current === candidate) {
+            draftValues.current = persisted
+            setValues(persisted)
+          }
+        }
+        setMessage(t('saved'))
+        return true
+      } catch {
+        draftValues.current = persistedValues.current
+        setValues(persistedValues.current)
+        setMessage(null)
+        setError(t('saveFailed'))
+        return false
+      } finally {
+        saveOperation.current = null
+        setSaving(false)
+      }
+    })()
+    saveOperation.current = operation
+    return operation
   }
 
   const set = <K extends keyof MobileBridgeValues>(key: K, value: MobileBridgeValues[K]): void => {
-    setValues(current => ({ ...current, [key]: value }))
+    const nextValues = { ...draftValues.current, [key]: value }
+    draftValues.current = nextValues
+    setValues(nextValues)
     setMessage(null)
   }
 
   const setAndCommit = <K extends keyof MobileBridgeValues>(key: K, value: MobileBridgeValues[K]): void => {
-    const nextValues = { ...values, [key]: value }
-    setValues(nextValues)
-    setMessage(null)
-    void commit(nextValues)
+    set(key, value)
+    void commit()
   }
 
   const refreshStatus = async (): Promise<void> => {
     setRefreshing(true)
     setError(null)
     try {
+      if (!await commit()) return
       setStatus(await loadStatus())
     } catch (caught) {
       console.error('[dsh-mobile-bridge] status refresh failed', caught)
@@ -192,6 +211,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
     setMessage(null)
     setError(null)
     try {
+      if (!await commit()) return
       setStatus(await (action === 'connect' ? connectNow() : disconnectNow()))
     } catch (caught) {
       console.error('[dsh-mobile-bridge] connection action failed', caught)
@@ -238,40 +258,40 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
         </div>
       </header>
 
-      <form className={css.form} onSubmit={event => { event.preventDefault(); void commit(values) }}>
+      <form className={css.form} aria-busy={saving} onSubmit={event => { event.preventDefault(); void commit() }}>
         <div className={css.fields}>
           <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-server-url">
             <SettingsLabel label={t('serverUrl')} hint={t('serverUrlHint')} />
-            <Input id="dshmb-server-url" className={css.control} type="url" value={values.serverUrl} disabled={!loaded || saving} onChange={event => set('serverUrl', event.currentTarget.value)} onBlur={() => { void commit(values) }} />
+            <Input id="dshmb-server-url" className={css.control} type="url" value={values.serverUrl} disabled={!loaded} onChange={event => set('serverUrl', event.currentTarget.value)} onBlur={() => { void commit() }} />
           </label>
           <label className={css.field} htmlFor="dshmb-local-port">
             <SettingsLabel label={t('localPort')} hint={t('localPortHint')} />
-            <Input id="dshmb-local-port" className={css.control} type="number" min={1} step={1} value={values.localPort} disabled={!loaded || saving} onChange={event => set('localPort', event.currentTarget.valueAsNumber)} onBlur={() => { void commit(values) }} />
+            <Input id="dshmb-local-port" className={css.control} type="number" min={1} step={1} value={values.localPort} disabled={!loaded} onChange={event => set('localPort', event.currentTarget.valueAsNumber)} onBlur={() => { void commit() }} />
           </label>
           <label className={css.field} htmlFor="dshmb-session-days">
             <SettingsLabel label={t('sessionDays')} hint={t('sessionDaysHint')} />
-            <Input id="dshmb-session-days" className={css.control} type="number" min={1} max={365} step={1} value={values.sessionDays} disabled={!loaded || saving} onChange={event => set('sessionDays', event.currentTarget.valueAsNumber)} onBlur={() => { void commit(values) }} />
+            <Input id="dshmb-session-days" className={css.control} type="number" min={1} max={365} step={1} value={values.sessionDays} disabled={!loaded} onChange={event => set('sessionDays', event.currentTarget.valueAsNumber)} onBlur={() => { void commit() }} />
           </label>
           <label className={css.field} htmlFor="dshmb-user-key">
             <SettingsLabel label={t('userKey')} hint={t('userKeyHint')} />
-            <Input id="dshmb-user-key" className={css.control} type="password" value={values.userKey} disabled={!loaded || saving} onChange={event => set('userKey', event.currentTarget.value)} onBlur={() => { void commit(values) }} />
+            <Input id="dshmb-user-key" className={css.control} type="password" value={values.userKey} disabled={!loaded} onChange={event => set('userKey', event.currentTarget.value)} onBlur={() => { void commit() }} />
           </label>
           <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-owner-email">
             <SettingsLabel label={t('ownerEmail')} hint={t('ownerEmailHint')} />
-            <Input id="dshmb-owner-email" className={css.control} type="email" value={values.ownerEmail} disabled={!loaded || saving} onChange={event => set('ownerEmail', event.currentTarget.value)} onBlur={() => { void commit(values) }} />
+            <Input id="dshmb-owner-email" className={css.control} type="email" value={values.ownerEmail} disabled={!loaded} onChange={event => set('ownerEmail', event.currentTarget.value)} onBlur={() => { void commit() }} />
           </label>
         </div>
         <div className={css.toggles}>
           <label className={css.toggle} htmlFor="dshmb-email-two-factor">
-            <input id="dshmb-email-two-factor" className={css.checkbox} type="checkbox" checked={values.emailTwoFactor} disabled={!loaded || saving} onChange={event => setAndCommit('emailTwoFactor', event.currentTarget.checked)} />
+            <input id="dshmb-email-two-factor" className={css.checkbox} type="checkbox" checked={values.emailTwoFactor} disabled={!loaded} onChange={event => setAndCommit('emailTwoFactor', event.currentTarget.checked)} />
             <span>{t('twoFactor')}</span>
           </label>
           <label className={css.toggle} htmlFor="dshmb-auto-connect">
-            <input id="dshmb-auto-connect" className={css.checkbox} type="checkbox" checked={values.autoConnect} disabled={!loaded || saving} onChange={event => setAndCommit('autoConnect', event.currentTarget.checked)} />
+            <input id="dshmb-auto-connect" className={css.checkbox} type="checkbox" checked={values.autoConnect} disabled={!loaded} onChange={event => setAndCommit('autoConnect', event.currentTarget.checked)} />
             <span>{t('autoConnect')}</span>
           </label>
           <label className={css.toggle} htmlFor="dshmb-auto-reconnect">
-            <input id="dshmb-auto-reconnect" className={css.checkbox} type="checkbox" checked={values.autoReconnect} disabled={!loaded || saving} onChange={event => setAndCommit('autoReconnect', event.currentTarget.checked)} />
+            <input id="dshmb-auto-reconnect" className={css.checkbox} type="checkbox" checked={values.autoReconnect} disabled={!loaded} onChange={event => setAndCommit('autoReconnect', event.currentTarget.checked)} />
             <span>{t('autoReconnect')}</span>
           </label>
         </div>
