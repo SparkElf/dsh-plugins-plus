@@ -58,7 +58,7 @@ self.addEventListener('message', event => {
       const replacedError = new Error('pair replaced')
       for (const entry of pending.values()) {
         if (entry.websocketPort) { entry.websocketPort.postMessage({ kind: 'websocket-error', message: replacedError.message }); entry.websocketPort.close() }
-        else if (entry.controller) void entry.controller.abort(replacedError)
+        else if (entry.controller) entry.controller.error(replacedError)
         else entry.reject(replacedError)
       }
     }
@@ -115,7 +115,7 @@ function wsReady() {
             entry.websocketPort.postMessage({ kind: 'websocket-error', message: error.message })
             entry.websocketPort.close()
           } else if (entry.controller) {
-            void entry.controller.abort(error).catch(streamError => { console.error('[dsh-mobile-bridge] event stream settlement failed', streamError) })
+            entry.controller.error(error)
           } else entry.reject(error)
         }
         pending.clear()
@@ -166,7 +166,7 @@ function wsReady() {
         }
         pending.delete(frame.id)
         entry.resolve(new Response(body, { status: full.status, headers: full.headers }))
-      })().catch(error => { console.error('[dsh-mobile-bridge] response decrypt failed', error); entry.reject(error); pending.delete(frame.id) })
+      })().catch(error => { console.error('[dsh-mobile-bridge] response decrypt failed', error); if (entry.controller) entry.controller.error(error); else entry.reject(error); pending.delete(frame.id) })
     }
   })
   return wsPromise
@@ -243,8 +243,12 @@ self.addEventListener('fetch', event => {
     }
     if ((request.headers.get('accept') ?? '').includes('text/event-stream')) {
       return new Promise((resolve, reject) => {
-        const controller = new TransformStream()
-        pending.set(id, { key, controller: controller.writable.getWriter(), resolve: () => resolve(new Response(controller.readable, { headers: { 'content-type': 'text/event-stream' } })), reject, status: 200, headers: {} })
+        let controller
+        const readable = new ReadableStream({
+          start(value) { controller = value },
+          cancel() { pending.delete(id) },
+        })
+        pending.set(id, { key, controller, resolve: () => resolve(new Response(readable, { headers: { 'content-type': 'text/event-stream' } })), reject, status: 200, headers: {} })
         ws.send(JSON.stringify({ id, blob, streamHint: true }))
       })
     }

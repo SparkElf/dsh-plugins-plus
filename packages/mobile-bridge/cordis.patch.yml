@@ -7,3 +7,4 @@
         localPort: 3080
         autoConnect: true
         autoReconnect: true
+        domDiagnostics: false

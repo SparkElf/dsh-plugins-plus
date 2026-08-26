@@ -18,6 +18,7 @@ export interface MobileBridgeValues {
   sessionDays: number
   autoConnect: boolean
   autoReconnect: boolean
+  domDiagnostics: boolean
 }
 
 /** One phone device projected by the Host. */
@@ -31,13 +32,23 @@ export interface MobileBridgeDevice {
   online: boolean
 }
 
-/** Current Host connection, pairing ticket, and device projection. */
+/** Latest remote geometry capture projected in the paired device row. */
+export interface MobileDomDiagnosticSummary {
+  deviceId: string
+  capturedAt: number
+  viewport: { width: number; height: number; dpr: number }
+  elementCount: number
+}
+
+/** Current Host connection, pairing ticket, devices, and opt-in diagnostics projection. */
 export interface MobileBridgeStatus {
   connected: boolean
   qrUrl: string
   pairingCode: string
   pairingRefreshing: boolean
   devices: MobileBridgeDevice[]
+  domDiagnosticsEnabled: boolean
+  domDiagnostics: MobileDomDiagnosticSummary[]
 }
 
 /** Registration-side operations supplied by the Client plugin apply closure. */
@@ -76,6 +87,7 @@ const DEFAULTS: MobileBridgeValues = {
   sessionDays: 7,
   autoConnect: true,
   autoReconnect: true,
+  domDiagnostics: false,
 }
 
 /** Render and operate the Mobile Bridge settings page. */
@@ -243,6 +255,13 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
   const currentQrSource = status !== null && qrSource?.url === status.qrUrl ? qrSource.source : null
   const pairingRefreshing = status !== null && (status.pairingRefreshing || (status.qrUrl !== '' && currentQrSource === null))
   const connectionBusy = connectionAction !== null || (status?.pairingRefreshing ?? false)
+  const diagnosticsByDevice = new Map(status?.domDiagnostics.map(capture => [capture.deviceId, capture]) ?? [])
+  const diagnosticText = (deviceId: string): string => {
+    const capture = diagnosticsByDevice.get(deviceId)
+    return capture === undefined
+      ? t('diagnosticsWaiting')
+      : `${t('diagnosticsCaptured')} ${capture.viewport.width} × ${capture.viewport.height} · ${capture.elementCount} · ${new Date(capture.capturedAt).toLocaleTimeString()}`
+  }
   const connectionLabel = connectionAction === 'disconnect' ? t('disconnectingConnection') : connectionAction === 'connect' || status?.pairingRefreshing ? t('connecting') : status?.connected ? t('disconnectConnection') : t('connect')
 
   return (
@@ -293,6 +312,10 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
           <label className={css.toggle} htmlFor="dshmb-auto-reconnect">
             <input id="dshmb-auto-reconnect" className={css.checkbox} type="checkbox" checked={values.autoReconnect} disabled={!loaded} onChange={event => setAndCommit('autoReconnect', event.currentTarget.checked)} />
             <span>{t('autoReconnect')}</span>
+          </label>
+          <label className={css.toggle} htmlFor="dshmb-dom-diagnostics">
+            <input id="dshmb-dom-diagnostics" className={css.checkbox} type="checkbox" checked={values.domDiagnostics} disabled={!loaded} onChange={event => setAndCommit('domDiagnostics', event.currentTarget.checked)} />
+            <span>{t('domDiagnostics')}</span>
           </label>
         </div>
         {message !== null ? <p className={css.message} role="status">{message}</p> : null}
@@ -345,7 +368,11 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
                     <span className={css.deviceState}><StateDot state={device.online ? 'done' : 'warning'} />{device.online ? t('online') : t('offline')}</span>
                     <strong className={css.deviceName}>{device.name}</strong>
                     <span className={css.deviceMeta}>IP {device.ip}</span>
-                    <span className={css.deviceTimes}><span>{t('pairedAt')} {new Date(device.pairedAt).toLocaleString()}</span><span>{t('lastSeen')} {new Date(device.lastSeenAt).toLocaleString()}</span></span>
+                    <span className={css.deviceTimes}>
+                      <span>{t('pairedAt')} {new Date(device.pairedAt).toLocaleString()}</span>
+                      <span>{t('lastSeen')} {new Date(device.lastSeenAt).toLocaleString()}</span>
+                      {status.domDiagnosticsEnabled ? <span>{diagnosticText(device.id)}</span> : null}
+                    </span>
                     <Button variant="outline" size="sm" icon={<IconStopFill16 size={14} />} className={css.disconnectButton} onClick={() => { setDisconnectTarget(device) }}>
                       {t('disconnect')}
                     </Button>

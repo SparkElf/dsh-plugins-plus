@@ -5,6 +5,10 @@ export function observePage(page, label, problems) {
     requests.pending.add(request)
     if (/\/api\/(?:settings|credentials|llm)\./.test(new URL(request.url()).pathname)) requests.settingsJoinCount += 1
   })
+  page.on('framenavigated', frame => {
+    // 新document提交后，旧页面发起但浏览器未结算的请求不再拥有当前用户结果。
+    if (frame === page.mainFrame()) requests.pending.clear()
+  })
   page.on('requestfinished', request => { requests.pending.delete(request) })
   page.on('console', message => {
     if (message.type() === 'error' || message.type() === 'warning') {
@@ -15,7 +19,7 @@ export function observePage(page, label, problems) {
   })
   page.on('pageerror', error => { problems.push(label + ' pageerror: ' + (error.stack ?? error.message)) })
   page.on('requestfailed', request => {
-    requests.pending.delete(request)
+    if (!requests.pending.delete(request)) return
     problems.push(label + ' requestfailed: ' + request.url() + ' ' + (request.failure()?.errorText ?? 'failed'))
   })
   page.on('response', response => {
