@@ -5,7 +5,7 @@
   "description": "SparkElf-maintained independent plugins for DeepSeek Harness (dsh). Installable on upstream dsh via profile composition bundles; never dependent on the deepseek-harness-plus product fork.",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "build": "pnpm --filter @sparkelf/dsh-mobile-bridge build",
+    "build": "pnpm --filter @sparkelf/dsh-mobile-bridge build && pnpm --filter @sparkelf/dsh-dataops-integration build && pnpm --filter @sparkelf/dsh-chart build && pnpm --filter @sparkelf/dsh-query-result-analysis build",
     "test": "vitest run packages",
     "test:system": "playwright test --config=playwright.config.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
