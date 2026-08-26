@@ -501,12 +501,15 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       })
       socket.on('close', (code, reason) => {
         if (heartbeat !== undefined) clearInterval(heartbeat)
-        console.info('[dsh-mobile-bridge] bridge websocket closed', { code, reason: reason.toString('utf8') })
+        const reasonText = reason.toString('utf8')
+        console.info('[dsh-mobile-bridge] bridge websocket closed', { code, reason: reasonText })
         if (state.socket !== socket) return
         const immediate = reconnectImmediately
         reconnectImmediately = false
         clearConnectionState()
-        if (connectionRequested && (immediate || current().autoReconnect)) scheduleConnect(immediate ? 0 : 5000)
+        // 4001 表示同一持久化桌面身份已被另一实例接管；当前实例重连只会让两端互相下线。
+        const displaced = code === 4001 && reasonText === 'desktop reconnected'
+        if (!displaced && connectionRequested && (immediate || current().autoReconnect)) scheduleConnect(immediate ? 0 : 5000)
       })
       socket.on('error', error => {
         console.error('[dsh-mobile-bridge] websocket failed', error)
