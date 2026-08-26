@@ -16,6 +16,10 @@ import WebSocket from 'ws'
 import { base64ToBytes, bytesToBase64, decryptJSON, deriveKey, encryptJSON } from './crypto.ts'
 
 const DEFAULT_SERVER_URL = 'https://www.tokensfree.eu.cc'
+const DOM_DIAGNOSTICS_MARKER_HEADER = 'x-dsh-mobile-bridge-diagnostics'
+const DOM_DIAGNOSTICS_DEVICE_HEADER = 'x-dsh-mobile-bridge-device'
+const DOM_DIAGNOSTICS_MAX_BYTES = 128 * 1024
+const DOM_DIAGNOSTICS_MAX_ELEMENTS = 96
 
 /** 服务器配置只保存中继基址；手机入口路径由插件统一追加。 */
 function normalizeServerUrl(value: string): string {
@@ -36,6 +40,8 @@ export interface MobileBridgeConfig {
   userKey: string
   autoConnect: boolean
   autoReconnect: boolean
+  /** Opt-in remote phone geometry capture for local UI diagnosis. */
+  domDiagnostics: boolean
   /** Optional owner email; when set with emailTwoFactor, scans need an inbox code. */
   ownerEmail: string
   emailTwoFactor: boolean
@@ -59,6 +65,7 @@ export const Config: z<MobileBridgeConfig> = z.object({
   userKey: z.string().role('secret').default(''),
   autoConnect: z.boolean().default(true),
   autoReconnect: z.boolean().default(true),
+  domDiagnostics: z.boolean().default(false),
   ownerEmail: z.string().default(''),
   emailTwoFactor: z.boolean().default(false),
   sessionDays: z.number().step(1).min(1).max(365).default(7),
@@ -66,6 +73,21 @@ export const Config: z<MobileBridgeConfig> = z.object({
   bridgeToken: z.string().role('secret').default(''),
   bridgeSecret: z.string().role('secret').default(''),
 })
+
+/** 诊断开关不改变中继连接参数，切换时不应重建手机隧道。 */
+function sameConnectionConfig(left: MobileBridgeConfig, right: MobileBridgeConfig): boolean {
+  return left.serverUrl === right.serverUrl
+    && left.localPort === right.localPort
+    && left.userKey === right.userKey
+    && left.autoConnect === right.autoConnect
+    && left.autoReconnect === right.autoReconnect
+    && left.ownerEmail === right.ownerEmail
+    && left.emailTwoFactor === right.emailTwoFactor
+    && left.sessionDays === right.sessionDays
+    && left.bridgeId === right.bridgeId
+    && left.bridgeToken === right.bridgeToken
+    && left.bridgeSecret === right.bridgeSecret
+}
 
 /** Cordis 装配必须先提供 WebServer，插件才可注册移动端路由。 */
 export const inject = ['webServer']
@@ -123,6 +145,7 @@ const TEXTUAL = /^(text\/|application\/(javascript|json|.*\+json))/
  * @param localPort - local Harness web port.
  * @param send - outbound plaintext frame sink (caller encrypts).
  * @param fetchImpl - fetch seam for tests.
+ * @param relayHeaders - Host-only headers proving the request traversed a paired phone tunnel.
  * @returns resolves when the local response completes.
  */
 export async function relayToLocalWeb(
@@ -130,12 +153,13 @@ export async function relayToLocalWeb(
   localPort: number,
   send: (frame: RelayFrame) => void = () => {},
   fetchImpl: typeof fetch = fetch,
+  relayHeaders: Record<string, string> = {},
 ): Promise<RelayFrame> {
   try {
     const decoded = request.bodyEncoding === 'base64' ? Buffer.from(request.body, 'base64') : Buffer.from(request.body, 'utf8')
     const response = await fetchImpl(`http://127.0.0.1:${localPort}${request.path}`, {
       method: request.method,
-      headers: { ...request.headers, host: `127.0.0.1:${localPort}` },
+      headers: { ...request.headers, ...relayHeaders, host: `127.0.0.1:${localPort}` },
       body: request.method === 'GET' || request.method === 'HEAD' ? undefined : decoded,
     })
     const contentType = response.headers.get('content-type') ?? ''
@@ -188,6 +212,103 @@ export interface MobileBridgeDevice {
   online: boolean
 }
 
+interface MobileDomDiagnosticRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface MobileDomDiagnosticElement {
+  locator: string
+  tag: string
+  role: string
+  label: string
+  classes: string[]
+  dataAttributes: string[]
+  rect: MobileDomDiagnosticRect
+  styles: Record<string, string>
+}
+
+interface MobileDomDiagnosticSnapshotPayload {
+  path: string
+  viewport: { width: number; height: number; dpr: number }
+  elements: MobileDomDiagnosticElement[]
+}
+
+interface MobileDomDiagnosticSnapshot extends MobileDomDiagnosticSnapshotPayload {
+  deviceId: string
+  capturedAt: number
+}
+
+interface MobileDomDiagnosticSummary {
+  deviceId: string
+  capturedAt: number
+  viewport: MobileDomDiagnosticSnapshotPayload['viewport']
+  elementCount: number
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function readFiniteNumber(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`mobile DOM diagnostics: ${field} must be a finite number`)
+  return value
+}
+
+function readBoundedString(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.length > maxLength) throw new Error(`mobile DOM diagnostics: ${field} must be a string no longer than ${maxLength}`)
+  return value
+}
+
+function readStringArray(value: unknown, field: string, maxItems: number, maxLength: number): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) throw new Error(`mobile DOM diagnostics: ${field} must contain at most ${maxItems} strings`)
+  return value.map((item, index) => readBoundedString(item, `${field}[${index}]`, maxLength))
+}
+
+/** 在Host唯一不可信JSON入口校验有界几何快照；下游只消费该函数返回的字段。 */
+function parseMobileDomDiagnosticSnapshot(raw: string, deviceId: string): MobileDomDiagnosticSnapshot {
+  const value: unknown = JSON.parse(raw)
+  if (!isRecord(value) || !isRecord(value.viewport) || !Array.isArray(value.elements) || value.elements.length > DOM_DIAGNOSTICS_MAX_ELEMENTS) {
+    throw new Error('mobile DOM diagnostics: invalid snapshot')
+  }
+  const elements = value.elements.map((entry, index): MobileDomDiagnosticElement => {
+    if (!isRecord(entry) || !isRecord(entry.rect) || !isRecord(entry.styles)) throw new Error(`mobile DOM diagnostics: elements[${index}] is invalid`)
+    const styleEntries = Object.entries(entry.styles)
+    if (styleEntries.length > 20) throw new Error(`mobile DOM diagnostics: elements[${index}].styles has too many entries`)
+    return {
+      locator: readBoundedString(entry.locator, `elements[${index}].locator`, 240),
+      tag: readBoundedString(entry.tag, `elements[${index}].tag`, 32),
+      role: readBoundedString(entry.role, `elements[${index}].role`, 80),
+      label: readBoundedString(entry.label, `elements[${index}].label`, 160),
+      classes: readStringArray(entry.classes, `elements[${index}].classes`, 8, 120),
+      dataAttributes: readStringArray(entry.dataAttributes, `elements[${index}].dataAttributes`, 12, 120),
+      rect: {
+        x: readFiniteNumber(entry.rect.x, `elements[${index}].rect.x`),
+        y: readFiniteNumber(entry.rect.y, `elements[${index}].rect.y`),
+        width: readFiniteNumber(entry.rect.width, `elements[${index}].rect.width`),
+        height: readFiniteNumber(entry.rect.height, `elements[${index}].rect.height`),
+      },
+      styles: Object.fromEntries(styleEntries.map(([key, item]) => [
+        readBoundedString(key, `elements[${index}].styles key`, 64),
+        readBoundedString(item, `elements[${index}].styles.${key}`, 160),
+      ])),
+    }
+  })
+  return {
+    deviceId,
+    capturedAt: Date.now(),
+    path: readBoundedString(value.path, 'path', 2048),
+    viewport: {
+      width: readFiniteNumber(value.viewport.width, 'viewport.width'),
+      height: readFiniteNumber(value.viewport.height, 'viewport.height'),
+      dpr: readFiniteNumber(value.viewport.dpr, 'viewport.dpr'),
+    },
+    elements,
+  }
+}
+
 const PAIRING_ROTATE_LEAD_MS = 60_000
 const PAIRING_ROTATE_RETRY_MS = 5_000
 const BRIDGE_HEARTBEAT_MS = 30_000
@@ -195,7 +316,9 @@ const BRIDGE_HEARTBEAT_MS = 30_000
 interface MobileRequest {
   url?: string
   method?: string
+  headers?: Record<string, string | string[] | undefined>
   on(event: 'close', listener: () => void): void
+  [Symbol.asyncIterator](): AsyncIterator<string | Uint8Array>
 }
 
 interface MobileResponse {
@@ -219,23 +342,29 @@ interface MobileBridgeStatusView {
   pairingCode: string
   pairingRefreshing: boolean
   devices: MobileBridgeDevice[]
+  domDiagnosticsEnabled: boolean
+  domDiagnostics: MobileDomDiagnosticSummary[]
 }
 
 /** Register local routes and maintain the stable outbound encrypted bridge. */
 export function apply(ctx: Context, config: MobileBridgeConfig): void {
+  const diagnosticsMarker = randomBytes(32).toString('hex')
   let current: () => MobileBridgeConfig = () => normalizeConfig(config)
+  let lastConnectionConfig = current()
   let connectionRequested = current().autoConnect
   // 用户动作和设置提交都可能终止一次尚未完成的取票请求；代次只用于丢弃这次旧尝试。
   let connectionGeneration = 0
   let reconnectImmediately = false
   let restartConnection = (): void => {}
+  let handleSettingsChange = (): void => { restartConnection() }
   let connectNow = (): MobileBridgeStatusView => statusView()
   let disconnectNow = (): MobileBridgeStatusView => statusView()
   installSettingsSection(ctx, MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, config, {
     setSource: source => {
       current = () => normalizeConfig(source())
+      lastConnectionConfig = current()
     },
-    onChange: () => { restartConnection() },
+    onChange: () => { handleSettingsChange() },
   })
   ctx.inject(['settings'], settingsCtx => {
     const settings = (settingsCtx as Context & { settings: SettingsProvider }).settings
@@ -255,6 +384,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     lastQrUrl: '',
     pairingRefreshing: false,
     devices: [] as MobileBridgeDevice[],
+    domDiagnostics: new Map<string, MobileDomDiagnosticSnapshot>(),
   }
   const statusStreams = new Set<MobileResponse>()
   const localSockets = new Map<string, WebSocket>()
@@ -269,11 +399,34 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     pairingCode: state.pairing?.code ?? '',
     pairingRefreshing: state.pairingRefreshing,
     devices: state.devices,
+    domDiagnosticsEnabled: current().domDiagnostics,
+    domDiagnostics: [...state.domDiagnostics.values()].map(snapshot => ({
+      deviceId: snapshot.deviceId,
+      capturedAt: snapshot.capturedAt,
+      viewport: snapshot.viewport,
+      elementCount: snapshot.elements.length,
+    })),
   })
 
   const emitStatus = (): void => {
     const event = 'data: ' + JSON.stringify(statusView()) + '\n\n'
     for (const stream of statusStreams) stream.write(event)
+  }
+
+  handleSettingsChange = (): void => {
+    const next = current()
+    const connectionChanged = !sameConnectionConfig(lastConnectionConfig, next)
+    lastConnectionConfig = next
+    if (!next.domDiagnostics) state.domDiagnostics.clear()
+    emitStatus()
+    if (connectionChanged) restartConnection()
+  }
+
+  const retainDiagnosticsForDevices = (): void => {
+    const retained = new Set(state.devices.map(device => device.id))
+    for (const deviceId of state.domDiagnostics.keys()) {
+      if (!retained.has(deviceId)) state.domDiagnostics.delete(deviceId)
+    }
   }
 
   const scheduleConnect = (delayMs: number): void => {
@@ -328,6 +481,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     if (!response.ok) throw new Error('device list failed with ' + response.status + ': ' + await response.text())
     const body = await response.json() as { devices: MobileBridgeDevice[] }
     state.devices = body.devices
+    retainDiagnosticsForDevices()
     emitStatus()
   }
 
@@ -340,6 +494,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     if (!response.ok) throw new Error('device disconnect failed with ' + response.status + ': ' + await response.text())
     const body = await response.json() as { devices: MobileBridgeDevice[] }
     state.devices = body.devices
+    retainDiagnosticsForDevices()
     emitStatus()
     return statusView()
   }
@@ -474,6 +629,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
           if (wire.control === 'paired' || wire.control === 'devices') {
             if (!Array.isArray(wire.devices)) throw new Error('device control frame is missing devices')
             state.devices = wire.devices as MobileBridgeDevice[]
+            retainDiagnosticsForDevices()
             const onlineDevices = new Set(state.devices.filter(device => device.online).map(device => device.id))
             for (const [id, local] of localSockets) {
               const separator = id.indexOf(':')
@@ -489,6 +645,13 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
             relayApplicationSocket(request, wire.id, live.localPort, socket, key)
             return
           }
+          const separator = wire.id.indexOf(':')
+          const deviceId = separator === -1 ? '' : wire.id.slice(0, separator)
+          const diagnosticsHeaders: Record<string, string> = {}
+          if (deviceId !== '') {
+            diagnosticsHeaders[DOM_DIAGNOSTICS_MARKER_HEADER] = diagnosticsMarker
+            diagnosticsHeaders[DOM_DIAGNOSTICS_DEVICE_HEADER] = deviceId
+          }
           await relayToLocalWeb({ ...request, id: wire.id }, live.localPort, frame => {
             void (async () => {
               if (frame.end) { socket.send(JSON.stringify({ id: frame.id, end: true })); return }
@@ -496,7 +659,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
               if (frame.chunk !== undefined) { socket.send(JSON.stringify({ id: frame.id, chunk: await encryptJSON(key, { d: frame.chunk }) })); return }
               socket.send(JSON.stringify({ id: frame.id, blob: await encryptJSON(key, { status: frame.status, headers: frame.headers, body: frame.body, bodyEncoding: 'base64', compression: frame.compression }) }))
             })().catch(error => { console.error('[dsh-mobile-bridge] relay frame failed', error) })
-          })
+          }, fetch, diagnosticsHeaders)
         })().catch(error => { console.error('[dsh-mobile-bridge] relay request failed', error) })
       })
       socket.on('close', (code, reason) => {
@@ -564,6 +727,33 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     return statusView()
   }
 
+  const headerValue = (req: MobileRequest, name: string): string => {
+    const value = req.headers?.[name]
+    return Array.isArray(value) ? (value[0] ?? '') : (value ?? '')
+  }
+
+  const isDiagnosticRelay = (req: MobileRequest): boolean =>
+    headerValue(req, DOM_DIAGNOSTICS_MARKER_HEADER) === diagnosticsMarker
+
+  const diagnosticDeviceId = (req: MobileRequest): string | null => {
+    if (!isDiagnosticRelay(req)) return null
+    const deviceId = headerValue(req, DOM_DIAGNOSTICS_DEVICE_HEADER)
+    return deviceId === '' ? null : deviceId
+  }
+
+  /** 在paired relay入口限制body字节数，避免debug开关扩大手机请求的内存占用。 */
+  const readDiagnosticBody = async (req: MobileRequest): Promise<string> => {
+    const chunks: Buffer[] = []
+    let size = 0
+    for await (const chunk of req) {
+      const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk)
+      size += buffer.length
+      if (size > DOM_DIAGNOSTICS_MAX_BYTES) throw new Error('mobile DOM diagnostics: payload too large')
+      chunks.push(buffer)
+    }
+    return Buffer.concat(chunks).toString('utf8')
+  }
+
   ctx.effect(function* () {
     const web = (ctx as Context & { webServer: MobileWebServer }).webServer
     const dispose = web.register({
@@ -571,6 +761,59 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       path: '/mobile',
       handler: (req, res) => {
         const path = String(req.url ?? '/mobile/')
+        const routePath = path.split('?')[0]
+        if (req.method === 'GET' && routePath === '/mobile/bridge/diagnostics/capability') {
+          const deviceId = diagnosticDeviceId(req)
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(JSON.stringify({ mobile: deviceId !== null, enabled: deviceId !== null && current().domDiagnostics }))
+          return
+        }
+        if (routePath === '/mobile/bridge/diagnostics') {
+          const deviceId = diagnosticDeviceId(req)
+          if (req.method === 'POST') {
+            if (deviceId === null) {
+              res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+              res.end(JSON.stringify({ error: 'paired mobile diagnostics are required' }))
+              return
+            }
+            if (!current().domDiagnostics) {
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+              res.end(JSON.stringify({ stored: false }))
+              return
+            }
+            void readDiagnosticBody(req).then(body => {
+              state.domDiagnostics.set(deviceId, parseMobileDomDiagnosticSnapshot(body, deviceId))
+              emitStatus()
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+              res.end(JSON.stringify({ stored: true }))
+            }).catch(error => {
+              console.error('[dsh-mobile-bridge] mobile DOM diagnostic capture failed', error)
+              res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+              res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+            })
+            return
+          }
+          if (isDiagnosticRelay(req)) {
+            res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: 'diagnostic snapshots are available only to the local Harness' }))
+            return
+          }
+          if (req.method === 'DELETE') {
+            state.domDiagnostics.clear()
+            emitStatus()
+            res.writeHead(204, { 'cache-control': 'no-store' })
+            res.end()
+            return
+          }
+          if (req.method === 'GET') {
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            res.end(JSON.stringify({ enabled: current().domDiagnostics, snapshots: [...state.domDiagnostics.values()] }))
+            return
+          }
+          res.writeHead(405, { allow: 'GET, DELETE, POST' })
+          res.end()
+          return
+        }
         if (path.startsWith('/mobile/bridge/events')) {
           res.writeHead(200, {
             'content-type': 'text/event-stream; charset=utf-8',
@@ -631,6 +874,7 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       localSockets.clear()
       for (const stream of statusStreams) stream.end()
       statusStreams.clear()
+      state.domDiagnostics.clear()
       dispose()
     }
   }, 'dsh-mobile-bridge lifecycle')

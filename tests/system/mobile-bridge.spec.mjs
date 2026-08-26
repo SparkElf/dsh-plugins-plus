@@ -75,7 +75,7 @@ test('登录页显示品牌与相机入口并保留显示偏好', async ({ brows
   }
 })
 
-test('手机关闭页面后恢复登录，双设备独立配对并定向下线', async ({ browser }) => {
+test('手机诊断按需采集，页面关闭后恢复登录，双设备独立配对并定向下线', async ({ browser }) => {
   const problems = []
   const desktopContext = await browser.newContext({ locale: 'zh-CN', viewport: { width: 1440, height: 1000 } })
   const phoneAContext = await browser.newContext({ ...devices['Pixel 7'], locale: 'zh-CN' })
@@ -95,6 +95,7 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await desktop.getByRole('heading', { name: /^(移动连接|Mobile Bridge)$/ }).waitFor()
     const serverUrl = desktop.getByLabel(/服务器地址|Server URL/)
     const localPort = desktop.getByLabel(/本地端口|Local port/)
+    await expect(localPort).toBeEnabled()
     await expect(serverUrl).toHaveValue(RELAY_URL)
     if (await localPort.inputValue() !== LOCAL_PORT) {
       await localPort.fill(LOCAL_PORT)
@@ -105,6 +106,9 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expect(desktop.getByLabel(/移动端登录保持天数|Mobile sign-in duration/)).toHaveValue('7')
     await expect(desktop.getByLabel(/启动自动连接|Connect on startup/)).toBeChecked()
     await expect(desktop.getByLabel(/断线自动重连|Reconnect after disconnection/)).toBeChecked()
+    const domDiagnostics = desktop.getByLabel(/远程 DOM 诊断|Remote DOM diagnostics/)
+    if (await domDiagnostics.isChecked()) await domDiagnostics.uncheck()
+    await expect(domDiagnostics).not.toBeChecked()
     const connectionButton = desktop.getByRole('button', { name: /^(主动连接|断开连接|Connect|Disconnect)$/ })
     await expect(connectionButton).toBeVisible()
 
@@ -171,6 +175,12 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     const phoneASidebar = phoneA.getByRole('button', { name: /Open sidebar|打开侧边栏|展开侧栏/ })
     await phoneA.goto(phoneAUrl, { waitUntil: 'domcontentloaded' })
     await expect(phoneASidebar).toBeVisible({ timeout: 30_000 })
+    await domDiagnostics.check()
+    await expect(domDiagnostics).toBeChecked()
+    await phoneA.reload({ waitUntil: 'domcontentloaded' })
+    await expect(phoneASidebar, 'diagnostics must start after reopening an already paired phone without scanning again').toBeVisible({ timeout: 30_000 })
+    const diagnosticCapture = desktop.getByText(/^(诊断采集|Diagnostic capture) [0-9.]+ × [0-9.]+ · [0-9]+ ·/)
+    await expect(diagnosticCapture).toBeVisible({ timeout: 30_000 })
     await Promise.all([
       expect(pairingCode).not.toHaveText(firstCode),
       expect(qr).not.toHaveAttribute('src', firstQrSource),
@@ -200,6 +210,11 @@ test('手机关闭页面后恢复登录，双设备独立配对并定向下线',
     await expect(presetLabel).toBeHidden()
     await phoneSettings.getByRole('button', { name: /^(关闭|Close)$/ }).tap()
     await expect(collapseMainSidebar).toBeVisible()
+
+    await domDiagnostics.uncheck()
+    await expect(domDiagnostics).not.toBeChecked()
+    await expect(diagnosticCapture, 'disabling diagnostics must clear the visible in-memory capture').toBeHidden()
+    await expect(collapseMainSidebar, 'disabling diagnostics must not reconnect the paired phone').toBeVisible()
     await collapseMainSidebar.tap()
     await expect(openMainSidebar).toBeVisible()
 

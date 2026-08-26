@@ -5,6 +5,7 @@ import { MobileBridgeSection } from './MobileBridgeSection.tsx'
 import { RevokedDeviceModal } from './RevokedDeviceModal.tsx'
 import type { MobileBridgeSectionInjected, MobileBridgeStatus, MobileBridgeValues } from './MobileBridgeSection.tsx'
 import type { MobileBridgeClientContext } from './context.ts'
+import { installMobileDomDiagnostics } from './dom-diagnostics.ts'
 import { en, zh } from './locales.ts'
 
 const LOCALE_NS = 'settingsMobileBridge' as const
@@ -72,6 +73,7 @@ export function apply(ctx: MobileBridgeClientContext): void {
         sessionDays: row.value.sessionDays,
         autoConnect: row.value.autoConnect,
         autoReconnect: row.value.autoReconnect,
+        domDiagnostics: row.value.domDiagnostics,
       }
     },
     saveValues: async values => {
@@ -111,6 +113,19 @@ export function apply(ctx: MobileBridgeClientContext): void {
       return await response.json() as MobileBridgeStatus
     },
   }
+
+  ctx.effect(() => {
+    let disposed = false
+    let release = (): void => {}
+    void installMobileDomDiagnostics(operations.subscribeStatus).then(next => {
+      if (disposed) next()
+      else release = next
+    }).catch(error => { console.info('[dsh-mobile-bridge] mobile DOM diagnostics unavailable', error) })
+    return () => {
+      disposed = true
+      release()
+    }
+  }, 'dsh-mobile-bridge: paired phone DOM diagnostics')
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
