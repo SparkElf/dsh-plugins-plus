@@ -13,6 +13,7 @@ export interface MobileBridgeValues {
   serverUrl: string
   localPort: number
   userKey: string
+  userKeySet: boolean
   ownerEmail: string
   emailTwoFactor: boolean
   sessionDays: number
@@ -82,6 +83,7 @@ const DEFAULTS: MobileBridgeValues = {
   serverUrl: DEFAULT_SERVER_URL,
   localPort: 3080,
   userKey: '',
+  userKeySet: false,
   ownerEmail: '',
   emailTwoFactor: false,
   sessionDays: 7,
@@ -293,7 +295,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
           </label>
           <label className={css.field} htmlFor="dshmb-user-key">
             <SettingsLabel label={t('userKey')} hint={t('userKeyHint')} />
-            <Input id="dshmb-user-key" className={css.control} type="password" value={values.userKey} disabled={!loaded} onChange={event => set('userKey', event.currentTarget.value)} onBlur={() => { void commit() }} />
+            <Input id="dshmb-user-key" className={css.control} type="password" value={values.userKey} placeholder={values.userKeySet ? t('userKeyConfigured') : undefined} disabled={!loaded} onChange={event => set('userKey', event.currentTarget.value)} onBlur={() => { void commit() }} />
           </label>
           <label className={`${css.field} ${css.fieldWide}`} htmlFor="dshmb-owner-email">
             <SettingsLabel label={t('ownerEmail')} hint={t('ownerEmailHint')} />
