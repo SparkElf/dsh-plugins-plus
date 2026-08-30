@@ -9,7 +9,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import SettingsProvider, { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type SettingsProvider from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { randomBytes } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import WebSocket from 'ws'
@@ -56,7 +57,16 @@ export interface MobileBridgeConfig {
 }
 
 /** Settings namespace owning the mobile bridge section. */
-export const MOBILE_BRIDGE_SETTINGS_NAMESPACE = settingsNamespace('mobile-bridge')
+export const MOBILE_BRIDGE_SETTINGS_NAMESPACE = 'mobile-bridge' as SettingsNamespace
+
+const FIBER_DISPOSED = 4
+const FIBER_UNLOADING = 5
+
+/** Settings provider卸载时恢复组合配置；Mobile Bridge自身卸载时不再触发连接变更。 */
+function isUnloading(ctx: Context): boolean {
+  const state: number = ctx.fiber.state
+  return state === FIBER_UNLOADING || state === FIBER_DISPOSED
+}
 
 /** Schema for the settings section; secrets render masked. */
 export const Config: z<MobileBridgeConfig> = z.object({
@@ -359,18 +369,25 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   let handleSettingsChange = (): void => { restartConnection() }
   let connectNow = (): MobileBridgeStatusView => statusView()
   let disconnectNow = (): MobileBridgeStatusView => statusView()
-  installSettingsSection(ctx, MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => {
-      current = () => normalizeConfig(source())
-      lastConnectionConfig = current()
-    },
-    onChange: () => { handleSettingsChange() },
-  })
   ctx.inject(['settings'], settingsCtx => {
     const settings = (settingsCtx as Context & { settings: SettingsProvider }).settings
-    const resolved = settings.get(MOBILE_BRIDGE_SETTINGS_NAMESPACE) as MobileBridgeConfig
+    const scope = settings.register(MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, { base: config })
+    current = () => normalizeConfig(scope.get())
+    lastConnectionConfig = current()
+    settingsCtx.effect(() => () => {
+      if (isUnloading(ctx)) return
+      current = () => normalizeConfig(config)
+      handleSettingsChange()
+    })
+    handleSettingsChange()
+    scope.watch(() => {
+      if (isUnloading(ctx)) return
+      handleSettingsChange()
+    })
+
+    const resolved = scope.get()
     if (resolved.bridgeId !== '' && resolved.bridgeToken !== '' && resolved.bridgeSecret !== '') return
-    void settings.update(MOBILE_BRIDGE_SETTINGS_NAMESPACE, {
+    void scope.update({
       bridgeId: resolved.bridgeId || randomBytes(16).toString('hex'),
       bridgeToken: resolved.bridgeToken || randomBytes(32).toString('hex'),
       bridgeSecret: resolved.bridgeSecret || randomBytes(16).toString('hex'),
