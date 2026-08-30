@@ -19,7 +19,11 @@ function normalizeServerUrl(value: string): string {
 }
 
 interface SettingsDescription {
-  namespaces: Array<{ ns: string; value: MobileBridgeValues }>
+  namespaces: Array<{
+    ns: string
+    value: Omit<MobileBridgeValues, 'userKey' | 'userKeySet'>
+    secrets: Array<{ path: string[]; set: boolean }>
+  }>
 }
 
 type RpcResult<T> =
@@ -31,11 +35,11 @@ interface RpcResponse<T> {
 }
 
 /** Execute one typed Host RPC over the public browser carrier. */
-async function rpc<T>(method: string, payload: unknown): Promise<T> {
+async function rpc<T>(method: string, args: Record<string, unknown>): Promise<T> {
   const response = await fetch(`/api/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload }),
+    body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload: { args } }),
   })
   if (!response.ok) throw new Error(`RPC ${method} failed with HTTP ${response.status}`)
   const body = await response.json() as RpcResponse<T>
@@ -61,13 +65,15 @@ export function apply(ctx: MobileBridgeClientContext): void {
 
   const operations: MobileBridgeSectionInjected = {
     loadValues: async () => {
-      const value = await rpc<SettingsDescription>('settings.describe', {})
+      const value = await rpc<SettingsDescription>('settings/describe', {})
       const row = value.namespaces.find(candidate => candidate.ns === SETTINGS_NS)
       if (row === undefined) throw new Error('mobile-bridge settings namespace is unavailable')
+      const userKeySet = row.secrets.some(secret => secret.set && secret.path.length === 1 && secret.path[0] === 'userKey')
       return {
         serverUrl: normalizeServerUrl(row.value.serverUrl),
         localPort: row.value.localPort,
-        userKey: row.value.userKey,
+        userKey: '',
+        userKeySet,
         ownerEmail: row.value.ownerEmail,
         emailTwoFactor: row.value.emailTwoFactor,
         sessionDays: row.value.sessionDays,
@@ -77,9 +83,13 @@ export function apply(ctx: MobileBridgeClientContext): void {
       }
     },
     saveValues: async values => {
-      const persisted = { ...values, serverUrl: normalizeServerUrl(values.serverUrl) }
-      await rpc('settings.update', { ns: SETTINGS_NS, patch: persisted })
-      return persisted
+      const { userKey, userKeySet, ...publicValues } = values
+      const persisted = { ...publicValues, serverUrl: normalizeServerUrl(values.serverUrl) }
+      await rpc('settings/update', {
+        ns: SETTINGS_NS,
+        patch: { ...persisted, ...userKey === '' ? {} : { userKey } },
+      })
+      return { ...persisted, userKey: '', userKeySet: userKeySet || userKey !== '' }
     },
     loadStatus: async () => {
       const response = await fetch('/mobile/bridge/status')
