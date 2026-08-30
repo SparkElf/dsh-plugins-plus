@@ -11,10 +11,12 @@ DeepSeek Harness 的独立移动连接插件。默认连接 `https://www.tokensf
 ### 安装
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.8
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.9
 ```
 
 安装会通过包内 `dsh.bundle` 挂载 Host 插件，并通过 `dsh.client` 加载浏览器设置页面。手机端仅注入应用 WebSocket facade；Harness 界面的响应式样式继续由各界面所属包负责。禁用或移除该 bundle 会同时移除路由、连接和设置菜单。
+
+`0.2.9` 直接通过公开 Settings service 注册并观察自己的 namespace，同时兼容仍提供该 service 的 DSH alpha.1 与 alpha.2；运行时不依赖 alpha.2 已删除的 Settings helper export。
 
 ### 配置
 
@@ -41,10 +43,12 @@ Remote DOM diagnostics are disabled by default and changing the setting does not
 ### Install
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.8
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.9
 ```
 
 The package's `dsh.bundle` mounts the Host plugin and `dsh.client` loads the browser settings section. The phone injects only the application WebSocket facade; each Harness surface retains ownership of its responsive styles. Disabling or removing the bundle removes the routes, connection, and settings navigation entry together.
+
+`0.2.9` registers and observes its namespace directly through the public Settings service, remaining compatible with DSH alpha.1 and alpha.2 hosts that provide that service; it has no runtime dependency on the Settings helper exports removed in alpha.2.
 
 ### Configuration
 

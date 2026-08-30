@@ -52,7 +52,7 @@ location /ws/ {
 1. Install the complete Host and Client plugin into the Web profile:
 
 ```sh
-dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.8
+dsh plugin --profile web add @sparkelf/dsh-mobile-bridge@0.2.9
 ```
 
 2. Open Harness Settings > Mobile Bridge. Set the HTTPS server URL and local Harness Web port; set the mobile sign-in duration (seven days by default), and optionally set a passphrase, owner email, and scan-time email second factor. Text and number fields save when editing finishes, while toggles save immediately; wait for the six-character pairing code and QR to appear with Connected status.
