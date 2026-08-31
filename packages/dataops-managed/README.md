@@ -20,7 +20,7 @@
 
 This is the DeepSeek Harness integration plugin for DataOps-managed workspaces. It accepts the current DataOps session JWT and provides DataOps tools through credential-backed HTTP MCP; DSH Settings shows a read-only identity and permission summary.
 
-The package starts no OAuth flow and exposes no connect, reauthorize, or disconnect control. The DataOps parent supplies its existing JWT to one fixed Host route; the plugin stores it as a DSH credential, and the MCP transport resolves the current value before every request. DataOps APIs decide the allowed operations from the JWT's current role and resource authorization.
+The package starts no OAuth flow and exposes no connect, reauthorize, or disconnect control. The DataOps parent supplies its existing JWT to one fixed Host route; the plugin stores it as a DSH credential, and the MCP transport resolves the current value before every request. DataOps APIs decide the allowed operations from the JWT principal's current roles and resource grants.
 
 Install this package only in a DataOps-managed profile. Standalone DSH deployments that need user authorization use @sparkelf/dsh-dataops-integration; the two packages must not be installed together.
 

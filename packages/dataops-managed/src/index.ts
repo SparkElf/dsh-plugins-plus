@@ -24,8 +24,6 @@ export interface Config {
   credentialRef: string
   /** Per-tool-call timeout forwarded to the MCP client. */
   toolCallTimeoutMs: number
-  /** Whether initial MCP connection failure rejects the plugin. */
-  failOnStartupError: boolean
 }
 
 /** Schemastery parser for managed DataOps configuration. */
@@ -34,21 +32,7 @@ export const Config: z<Config> = z.object({
   serverName: z.string().default('dataops'),
   credentialRef: z.string().role('credential-ref').default('DATAOPS_ACCESS_TOKEN'),
   toolCallTimeoutMs: z.number().min(1).default(120_000),
-  failOnStartupError: z.boolean().default(true),
 })
-
-function normalizeOrigin(value: string): string {
-  const url = new URL(value)
-  if (!['http:', 'https:'].includes(url.protocol)
-    || url.username !== ''
-    || url.password !== ''
-    || url.pathname !== '/'
-    || url.search !== ''
-    || url.hash !== '') {
-    throw new Error('dataops-managed: baseUrl must be an HTTP or HTTPS origin')
-  }
-  return url.origin
-}
 
 function bearerToken(request: IncomingMessage): string | null {
   const authorization = request.headers.authorization?.trim() ?? ''
@@ -64,7 +48,7 @@ function bearerToken(request: IncomingMessage): string | null {
  * @returns Startup readiness after an existing JWT is connected when present.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const baseUrl = normalizeOrigin(config.baseUrl)
+  const baseUrl = new URL(config.baseUrl).origin
   const accessRef = credentialRef(config.credentialRef)
   let mcpFiber: Fiber | undefined
 
@@ -77,7 +61,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       headers: {},
       bearerTokenRef: config.credentialRef,
       toolCallTimeoutMs: config.toolCallTimeoutMs,
-      failOnStartupError: config.failOnStartupError,
     })
     mcpFiber = fiber
     try {

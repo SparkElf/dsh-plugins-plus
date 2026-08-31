@@ -42,10 +42,7 @@ export function apply(ctx: ClientContext): void {
   }
   const onMessage = (event: MessageEvent<unknown>): void => {
     if (event.source !== window.parent
-      || !event.data
-      || typeof event.data !== 'object'
-      || Array.isArray(event.data)
-      || (event.data as { type?: unknown }).type !== AUTH_UPDATED_MESSAGE) return
+      || (event.data as { type?: unknown } | null)?.type !== AUTH_UPDATED_MESSAGE) return
     void synchronizeJwt().catch(error => console.error('dataops-managed.jwt_sync_failed', error))
   }
   ctx.effect(() => {
