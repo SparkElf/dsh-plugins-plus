@@ -15,7 +15,7 @@
 - `@sparkelf/dsh-mobile-bridge`：完整的 Host 与 Client 插件，提供出站 E2EE 隧道、配对二维码和一等公民的“移动连接”设置页。手机端只注入连接 facade；Harness 各功能包继续拥有自己的响应式界面。
 - `@sparkelf/dsh-mobile-bridge-server`：多用户盲中继，支持邮箱验证码、可选的微信身份通道、页面内相机扫码和持久手机登录，让手机通过自有服务器访问本地 Harness。
 - `@sparkelf/dsh-dataops-integration`：独立DSH的完整DataOps Host + Web Client连接插件，拥有Authorization Code + PKCE、持久target、session-lifetime access credential、Settings和generic MCP组合；不修改DSH core，也不在DataOps托管容器中挂载。
-- `@sparkelf/dsh-dataops-managed`：DataOps托管workspace的只读Settings呈现插件，说明身份、权限和DataOps工具由工作区管理；不读取账号、不持有credential，也不提供连接或断开操作。
+- `@sparkelf/dsh-dataops-managed`：DataOps托管workspace的JWT与HTTP MCP插件；复用当前DataOps会话权限，不发起OAuth，也不提供连接或断开操作。
 - `@sparkelf/dsh-chart`：完整的 Host + Web Client 交互图表 capability。Host 记录可 durable replay 的完整 ECharts option，Client 在 Harness 消息流中渲染并负责 resize、主题切换和 disposal。当前为 opt-in 发布候选，不默认挂载，也不在正式发布前声明生产 npm pin。
 - `@sparkelf/dsh-query-result-analysis`：有界分页、checkpoint和hierarchical reduction的独立DataOps query-result分析插件；每个模型批次和归并进入持久DSH子会话，由普通AgentLoop记录模型可见内容并拥有重试。
 
@@ -48,7 +48,7 @@ This repository contains independent [DeepSeek Harness](https://github.com/deeps
 - `@sparkelf/dsh-mobile-bridge`: a complete Host and Client plugin providing an outbound E2EE tunnel, pairing QR, and first-class Mobile Bridge settings section. The phone injects only the connection facade; each Harness package retains ownership of its responsive UI.
 - `@sparkelf/dsh-mobile-bridge-server`: a multi-user blind relay with email-code and optional WeChat identity channels, in-page camera scanning, and persistent phone sign-in, allowing phones to reach a local Harness through a self-hosted server.
 - `@sparkelf/dsh-dataops-integration`: the complete Host + Web Client DataOps connection plugin for standalone DSH. It owns Authorization Code + PKCE, a persistent target, a session-lifetime access credential, Settings, and generic MCP composition; it changes no DSH core and is not mounted in DataOps-managed containers.
-- `@sparkelf/dsh-dataops-managed`: the read-only Settings presentation for DataOps-managed workspaces. It explains workspace ownership of identity, permissions, and DataOps tools without reading an account, holding credentials, or exposing connect and disconnect actions.
+- `@sparkelf/dsh-dataops-managed`: the JWT and HTTP MCP plugin for DataOps-managed workspaces. It reuses current DataOps session permissions without OAuth or connect/disconnect controls.
 - `@sparkelf/dsh-chart`: a complete Host + Web Client interactive-chart capability. The Host records a complete ECharts option for durable replay; the Client renders it in the Harness conversation and owns resize, theme changes, and disposal. It is currently an opt-in release candidate, is not mounted by default, and does not claim a production npm pin before an actual release exists.
 - `@sparkelf/dsh-query-result-analysis`: an independent DataOps query-result analysis plugin with bounded paging, checkpoints, and hierarchical reduction. Each model batch and reduction runs in a durable DSH child session whose normal AgentLoop logs model-visible content and owns retry.
 

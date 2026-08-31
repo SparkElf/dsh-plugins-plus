@@ -13,7 +13,7 @@ export interface ManagedDataOpsSectionInjected {
 export type ManagedDataOpsSectionProps = Partial<InjectFace<ManagedDataOpsSectionInjected>>
 
 /**
- * Explain DataOps-managed ownership without exposing standalone authorization controls.
+ * Explain the DataOps-managed JWT and permission owner without standalone controls.
  * @param props - Settings slot injection values.
  * @returns The localized managed DataOps section, or nothing before injection.
  */

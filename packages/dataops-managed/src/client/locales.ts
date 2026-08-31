@@ -3,11 +3,11 @@ export const en = {
   nav: 'DataOps',
   title: 'DataOps',
   managed: 'Managed by this DataOps workspace',
-  description: 'DataOps tools are provided automatically through the workspace-managed channel. No connection or authorization is required here.',
+  description: 'DSH uses your current DataOps session JWT. DataOps applies its role and resource permissions to every tool request.',
   identityLabel: 'Identity and permissions',
-  identityValue: 'Managed by your current DataOps session',
+  identityValue: 'Current DataOps JWT',
   toolsLabel: 'DataOps tools',
-  toolsValue: 'Provided automatically by the workspace',
+  toolsValue: 'Authorized by DataOps on every request',
 } as const
 
 /** Stable key set shared by every managed DataOps locale. */
@@ -18,9 +18,9 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   nav: 'DataOps',
   title: 'DataOps',
   managed: '由当前 DataOps 工作区托管',
-  description: 'DataOps 工具通过工作区托管通道自动提供，无需在这里连接、重新授权或断开。',
+  description: 'DSH 使用当前 DataOps 会话 JWT；DataOps 对每次工具请求应用角色与资源权限。',
   identityLabel: '身份与权限',
-  identityValue: '由当前 DataOps 会话管理',
+  identityValue: '当前 DataOps JWT',
   toolsLabel: 'DataOps 工具',
-  toolsValue: '由工作区自动提供',
+  toolsValue: '每次请求均由 DataOps 授权',
 }
