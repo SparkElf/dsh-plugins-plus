@@ -3,7 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import { CallId, type ContentBlock, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { SessionId, type JsonValue } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -310,7 +310,7 @@ async function readPage(
   cursor?: string | null,
 ): Promise<ResultPage> {
   const result = await ctx.tools.execute({
-    callId: CallId(`${exec.callId}:query-analysis:${randomUUID()}`),
+    callId: `${exec.callId}:query-analysis:${randomUUID()}` as ToolRunContext['callId'],
     rootCallId: exec.rootCallId,
     name: readToolName,
     arguments: {
