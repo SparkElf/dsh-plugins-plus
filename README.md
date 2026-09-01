@@ -18,6 +18,7 @@
 - `@sparkelf/dsh-dataops-managed`：DataOps托管workspace的JWT与HTTP MCP插件；复用当前DataOps会话权限，不发起OAuth，也不提供连接或断开操作。
 - `@sparkelf/dsh-chart`：完整的 Host + Web Client 交互图表 capability。Host 记录可 durable replay 的完整 ECharts option，Client 在 Harness 消息流中渲染并负责 resize、主题切换和 disposal。当前为 opt-in 发布候选，不默认挂载，也不在正式发布前声明生产 npm pin。
 - `@sparkelf/dsh-query-result-analysis`：有界分页、checkpoint和hierarchical reduction的独立DataOps query-result分析插件；每个模型批次和归并进入持久DSH子会话，由普通AgentLoop记录模型可见内容并拥有重试。
+- `@sparkelf/dsh-univer-government-docs`：依赖 `dsh-univer-office` 的政府文档资产与 Skill 插件，注册通用政务和正式红头两份原生 Traditional `.univer` 模板，不新增模型 Tool。
 
 ### CI / CD
 
@@ -51,6 +52,7 @@ This repository contains independent [DeepSeek Harness](https://github.com/deeps
 - `@sparkelf/dsh-dataops-managed`: the JWT and HTTP MCP plugin for DataOps-managed workspaces. It reuses current DataOps session permissions without OAuth or connect/disconnect controls.
 - `@sparkelf/dsh-chart`: a complete Host + Web Client interactive-chart capability. The Host records a complete ECharts option for durable replay; the Client renders it in the Harness conversation and owns resize, theme changes, and disposal. It is currently an opt-in release candidate, is not mounted by default, and does not claim a production npm pin before an actual release exists.
 - `@sparkelf/dsh-query-result-analysis`: an independent DataOps query-result analysis plugin with bounded paging, checkpoints, and hierarchical reduction. Each model batch and reduction runs in a durable DSH child session whose normal AgentLoop logs model-visible content and owns retry.
+- `@sparkelf/dsh-univer-government-docs`: government-document assets and a Skill plugin for `dsh-univer-office`. It registers native Traditional `.univer` templates for general government and official redhead documents without adding a model-facing Tool.
 
 ### CI / CD
 
