@@ -62,7 +62,7 @@ jobs:
       - name: Publish Supervisor if missing
         run: |
           VERSION=$(node -p "require('./packages/supervisor/package.json').version")
-          npm view "@sparkelf/dsh-plugin-supervisor@$VERSION" version >/dev/null 2>&1 || npm publish packages/supervisor --access public
+          npm view "@sparkelf/dsh-plugin-supervisor@$VERSION" version >/dev/null 2>&1 || npm publish ./packages/supervisor --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -70,7 +70,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
         run: |
           VERSION=$(node -p "require('./external/dsh-plus-desktop/package.json').version")
-          npm view "@sparkelf/dsh-plus-desktop@$VERSION" version >/dev/null 2>&1 || npm publish external/dsh-plus-desktop --access public
+          npm view "@sparkelf/dsh-plus-desktop@$VERSION" version >/dev/null 2>&1 || npm publish ./external/dsh-plus-desktop --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
