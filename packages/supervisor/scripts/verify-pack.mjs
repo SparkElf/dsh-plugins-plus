@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
+assert.equal(manifest.bin?.['dsh-plus-supervisor'], 'lib/bin.js')
+assert.match(readFileSync(resolve(root, 'lib/bin.js'), 'utf8'), /^#!\/usr\/bin\/env node/)
 const result = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root, encoding: 'utf8' }))[0]
 const files = new Set(result.files.map(entry => entry.path))
 for (const path of [
