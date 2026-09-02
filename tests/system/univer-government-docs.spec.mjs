@@ -39,8 +39,22 @@ test('用户从政府文档 Skill 创建、编辑、截图并导出 Traditional 
   await expect(page.getByText('GOV-DOC-GUI-PASS:' + MARKER, { exact: false }).last()).toBeVisible()
   await expect(page.getByText('gui-' + MARKER + '.docx', { exact: false }).last()).toBeVisible()
   await expect(page.getByText('gui-' + MARKER + '-screenshots', { exact: false }).last()).toBeVisible()
+  const review = page.getByRole('region', { name: 'gui-' + MARKER + '.univer' })
+  await expect(review).toBeVisible()
+  await expect(review).toContainText(/修改中|Modification in progress/)
+  await expect(review).not.toContainText(/当前版本|Current version/)
+  const viewerSrc = await review.locator('iframe').getAttribute('src')
+  if (viewerSrc === null) throw new Error('Univer review card has no Viewer URL')
+  const viewerOrigin = new URL(viewerSrc).origin
 
   await page.reload({ waitUntil: 'domcontentloaded' })
   await expect(page.getByText('GOV-DOC-GUI-PASS:' + MARKER, { exact: false }).last()).toBeVisible()
-  expect(problems).toEqual([])
+  await expect(review).toBeVisible()
+  await expect(review).toContainText(/修改中|Modification in progress/)
+  const actionableProblems = problems.filter(problem => {
+    const viewerAbort = problem.startsWith('government document requestfailed: ' + viewerOrigin + '/') && problem.endsWith('net::ERR_ABORTED')
+    const rediWarning = problem.includes('console warning: [redi]: Expect 0 custom parameter(s) of xG but get 1.') && problem.includes(viewerOrigin + '/')
+    return !viewerAbort && !rediWarning
+  })
+  expect(actionableProblems).toEqual([])
 })
