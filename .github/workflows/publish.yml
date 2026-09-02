@@ -46,7 +46,7 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Install Supervisor dependencies
-        run: pnpm --dir packages/supervisor install --ignore-workspace --frozen-lockfile
+        run: pnpm --dir packages/supervisor install --frozen-lockfile
 
       - name: Install Desktop dependencies
         if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
