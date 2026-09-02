@@ -11,6 +11,8 @@ declare global {
   }
 }
 
+const FONT_ASSET_VERSION = '0.1.6'
+
 const FONTS = [
   { family: '方正小标宋简体', file: 'FZXiaoBiaoSong.ttf' },
   { family: 'FangSong_GB2312', file: 'FangSongGB2312.ttf' },
@@ -24,10 +26,11 @@ export const name = 'univer-government-document-fonts'
 export function apply(ctx: Context): void {
   ctx.effect(() => {
     const previous = window.__DSH_UNIVER_VIEWER_FONTS__
-    const fonts = FONTS.map(font => ({
-      family: font.family,
-      source: new URL('/univer-government-docs/fonts/' + font.file, window.location.origin).href,
-    }))
+    const fonts = FONTS.map(font => {
+      const source = new URL('/univer-government-docs/fonts/' + font.file, window.location.origin)
+      source.searchParams.set('v', FONT_ASSET_VERSION)
+      return { family: font.family, source: source.href }
+    })
     window.__DSH_UNIVER_VIEWER_FONTS__ = fonts
     return () => {
       if (window.__DSH_UNIVER_VIEWER_FONTS__ !== fonts) return
