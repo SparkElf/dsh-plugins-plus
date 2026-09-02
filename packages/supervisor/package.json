@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-plugin-supervisor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packageManager": "pnpm@11.7.0",
   "description": "Out-of-process Plus runtime Supervisor with controlled Session recovery",
   "type": "module",
@@ -38,7 +38,7 @@
     "LICENSE"
   ],
   "bin": {
-    "dsh-plus-supervisor": "./lib/bin.js"
+    "dsh-plus-supervisor": "lib/bin.js"
   },
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
