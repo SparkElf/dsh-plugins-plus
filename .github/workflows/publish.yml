@@ -3,6 +3,13 @@ name: Publish
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      runtime_packages:
+        description: Publish Supervisor and standalone Desktop
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -15,6 +22,14 @@ jobs:
     steps:
       - name: Check out plugin sources
         uses: actions/checkout@v4
+
+      - name: Check out standalone Desktop
+        if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
+        uses: actions/checkout@v4
+        with:
+          repository: SparkElf/dsh-plus-desktop
+          ref: main
+          path: external/dsh-plus-desktop
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -30,10 +45,37 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
+      - name: Install Supervisor dependencies
+        run: pnpm --dir packages/supervisor install --ignore-workspace --frozen-lockfile
+
+      - name: Install Desktop dependencies
+        if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
+        run: pnpm --dir external/dsh-plus-desktop install --frozen-lockfile
+
       - name: Typecheck, test, and build
         run: pnpm run typecheck && pnpm run test && pnpm run build
 
-      - name: Publish changed packages
+      - name: Test standalone Desktop
+        if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
+        run: pnpm --dir external/dsh-plus-desktop test && pnpm --dir external/dsh-plus-desktop run pack:check
+
+      - name: Publish Supervisor if missing
+        run: |
+          VERSION=$(node -p "require('./packages/supervisor/package.json').version")
+          npm view "@sparkelf/dsh-plugin-supervisor@$VERSION" version >/dev/null 2>&1 || npm publish packages/supervisor --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish standalone Desktop if missing
+        if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
+        run: |
+          VERSION=$(node -p "require('./external/dsh-plus-desktop/package.json').version")
+          npm view "@sparkelf/dsh-plus-desktop@$VERSION" version >/dev/null 2>&1 || npm publish external/dsh-plus-desktop --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish changed workspace packages
+        if: github.event_name == 'push'
         run: pnpm -r publish --no-git-checks --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
