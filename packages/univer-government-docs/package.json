@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-univer-government-docs",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Native Traditional Univer templates and model instructions for Chinese government documents.",
   "type": "module",
   "main": "./lib/index.js",
