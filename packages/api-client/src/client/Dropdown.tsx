@@ -1,8 +1,21 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent, ReactNode } from 'react'
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { VscCheck, VscChevronDown, VscKebabVertical, VscSearch } from 'react-icons/vsc'
 import { useT } from './i18n.tsx'
 import css from './Dropdown.module.css'
+
+function floatingPosition(trigger: HTMLElement, minWidth: number, maxWidth: number): CSSProperties {
+  const rect = trigger.getBoundingClientRect()
+  const margin = 8
+  const width = Math.min(maxWidth, Math.max(minWidth, rect.width), window.innerWidth - margin * 2)
+  const left = Math.min(Math.max(margin, rect.left), window.innerWidth - width - margin)
+  const below = window.innerHeight - rect.bottom - margin
+  const above = rect.top - margin
+  return below >= Math.min(180, above)
+    ? { left, top: rect.bottom + 4, width, maxHeight: Math.max(96, below) }
+    : { left, bottom: window.innerHeight - rect.top + 4, width, maxHeight: Math.max(96, above) }
+}
 
 export interface SelectOption<T extends string = string> {
   value: T
@@ -35,10 +48,12 @@ export function Select<T extends string>({ value, options, onChange, label, clas
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
+  const [position, setPosition] = useState<CSSProperties>({})
   const selected = options.find(option => option.value === value)
   const canSearch = searchable ?? options.length > 8
   const filtered = useMemo(() => filterSelectOptions(options, query), [options, query])
@@ -48,6 +63,7 @@ export function Select<T extends string>({ value, options, onChange, label, clas
     const selectedIndex = options.findIndex(option => option.value === value)
     setQuery('')
     setActive(Math.max(0, selectedIndex))
+    if (triggerRef.current !== null) setPosition(floatingPosition(triggerRef.current, 180, 320))
     setOpen(true)
   }
   const hide = (restoreFocus = false): void => {
@@ -80,7 +96,7 @@ export function Select<T extends string>({ value, options, onChange, label, clas
 
   useEffect(() => {
     if (!open) return
-    const close = (event: MouseEvent): void => { if (!rootRef.current?.contains(event.target as Node)) hide() }
+    const close = (event: MouseEvent): void => { if (!rootRef.current?.contains(event.target as Node) && !popoverRef.current?.contains(event.target as Node)) hide() }
     document.addEventListener('mousedown', close)
     return () => { document.removeEventListener('mousedown', close) }
   }, [open])
@@ -111,7 +127,7 @@ export function Select<T extends string>({ value, options, onChange, label, clas
     >
       <span>{renderValue ? renderValue(selected) : selected?.label ?? placeholder ?? t('select.default')}</span><VscChevronDown aria-hidden="true" />
     </button>
-    {open && <div className={css.popover}>
+    {open && createPortal(<div ref={popoverRef} className={css.popover} style={position}>
       {canSearch && <label className={css.search}><VscSearch aria-hidden="true" /><input ref={searchRef} value={query} onChange={event => { setQuery(event.target.value) }} onKeyDown={onMenuKeyDown} placeholder={t('select.search')} aria-label={t('select.searchLabel', { label })} /></label>}
       <div ref={listRef} id={id} className={css.listbox} role="listbox" tabIndex={canSearch ? -1 : 0} aria-label={label} aria-activedescendant={filtered[active] === undefined ? undefined : id + '-' + active} onKeyDown={onMenuKeyDown}>
         {filtered.length === 0 && <div className={css.noResults}>{t('select.noResults')}</div>}
@@ -131,7 +147,7 @@ export function Select<T extends string>({ value, options, onChange, label, clas
           {option.value === value && <VscCheck aria-hidden="true" />}
         </div>)}
       </div>
-    </div>}
+    </div>, document.body)}
   </div>
 }
 
@@ -149,24 +165,26 @@ export function ActionMenu({ label, items, icon = <VscKebabVertical /> }: { labe
   const id = useId()
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([])
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
+  const [position, setPosition] = useState<CSSProperties>({})
   const enabled = items.map((item, index) => item.disabled ? -1 : index).filter(index => index >= 0)
   const focusIndex = (index: number): void => { setActive(index); requestAnimationFrame(() => itemRefs.current[index]?.focus()) }
-  const show = (): void => { setOpen(true); focusIndex(enabled[0] ?? 0) }
+  const show = (): void => { if (triggerRef.current !== null) setPosition(floatingPosition(triggerRef.current, 160, 240)); setOpen(true); focusIndex(enabled[0] ?? 0) }
   const hide = (restoreFocus = false): void => { setOpen(false); if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus()) }
 
   useEffect(() => {
     if (!open) return
-    const close = (event: MouseEvent): void => { if (!rootRef.current?.contains(event.target as Node)) hide() }
+    const close = (event: MouseEvent): void => { if (!rootRef.current?.contains(event.target as Node) && !popoverRef.current?.contains(event.target as Node)) hide() }
     document.addEventListener('mousedown', close)
     return () => { document.removeEventListener('mousedown', close) }
   }, [open])
 
   return <div className={css.menuRoot} ref={rootRef}>
     <button ref={triggerRef} type="button" className={css.iconTrigger} title={label} aria-label={label} aria-haspopup="menu" aria-expanded={open} aria-controls={id} onClick={() => { open ? hide() : show() }} onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); show() } }}>{icon}</button>
-    {open && <div id={id} className={[css.popover, css.menu].join(' ')} role="menu" aria-label={label} onKeyDown={event => {
+    {open && createPortal(<div ref={popoverRef} id={id} className={[css.popover, css.menu].join(' ')} style={position} role="menu" aria-label={label} onKeyDown={event => {
       const position = enabled.indexOf(active)
       if (event.key === 'ArrowDown') { event.preventDefault(); focusIndex(enabled[(position + 1) % enabled.length] ?? 0) }
       else if (event.key === 'ArrowUp') { event.preventDefault(); focusIndex(enabled[(position - 1 + enabled.length) % enabled.length] ?? 0) }
@@ -184,6 +202,6 @@ export function ActionMenu({ label, items, icon = <VscKebabVertical /> }: { labe
         tabIndex={index === active ? 0 : -1}
         onClick={() => { item.onSelect(); hide(true) }}
       >{item.icon}<span>{item.label}</span></button>)}
-    </div>}
+    </div>, document.body)}
   </div>
 }

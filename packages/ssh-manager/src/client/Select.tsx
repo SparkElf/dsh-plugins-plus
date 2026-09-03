@@ -1,7 +1,20 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
 import { VscCheck, VscChevronDown } from 'react-icons/vsc'
 import { useT } from './i18n.tsx'
 import css from './SshManager.module.css'
+
+function floatingPosition(trigger: HTMLElement): CSSProperties {
+  const rect = trigger.getBoundingClientRect()
+  const margin = 8
+  const width = Math.min(Math.max(170, rect.width), 280, window.innerWidth - margin * 2)
+  const left = Math.min(Math.max(margin, rect.left), window.innerWidth - width - margin)
+  const below = window.innerHeight - rect.bottom - margin
+  const above = rect.top - margin
+  return below >= Math.min(160, above)
+    ? { left, top: rect.bottom + 4, width, maxHeight: Math.max(96, below) }
+    : { left, bottom: window.innerHeight - rect.top + 4, width, maxHeight: Math.max(96, above) }
+}
 
 export interface SelectOption {
   value: string
@@ -33,7 +46,9 @@ export function Select({ value, options, onChange, label, placeholder, disabled 
   const id = useId()
   const root = useRef<HTMLDivElement | null>(null)
   const button = useRef<HTMLButtonElement | null>(null)
+  const menu = useRef<HTMLDivElement | null>(null)
   const [open, setOpen] = useState(false)
+  const [position, setPosition] = useState<CSSProperties>({})
   const selectedIndex = options.findIndex(option => option.value === value)
   const [activeIndex, setActiveIndex] = useState(selectedIndex)
   const selected = options[selectedIndex]
@@ -42,7 +57,7 @@ export function Select({ value, options, onChange, label, placeholder, disabled 
   useEffect(() => {
     if (!open) return
     const close = (event: PointerEvent): void => {
-      if (root.current?.contains(event.target as Node) !== true) setOpen(false)
+      if (root.current?.contains(event.target as Node) !== true && menu.current?.contains(event.target as Node) !== true) setOpen(false)
     }
     document.addEventListener('pointerdown', close)
     return () => { document.removeEventListener('pointerdown', close) }
@@ -63,7 +78,7 @@ export function Select({ value, options, onChange, label, placeholder, disabled 
   const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>): void => {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      if (!open) setOpen(true)
+      if (!open) { if (button.current !== null) setPosition(floatingPosition(button.current)); setOpen(true) }
       else setActiveIndex(current => nextEnabledOption(options, current, event.key === 'ArrowDown' ? 1 : -1))
       return
     }
@@ -78,18 +93,19 @@ export function Select({ value, options, onChange, label, placeholder, disabled 
       ref={button}
       type="button"
       className={css.selectTrigger}
+      role="combobox"
       aria-label={label}
       aria-haspopup="listbox"
       aria-expanded={open}
       aria-controls={id}
       disabled={disabled || !enabled}
-      onClick={() => { setOpen(current => !current) }}
+      onClick={() => { setOpen(current => { if (!current && button.current !== null) setPosition(floatingPosition(button.current)); return !current }) }}
       onKeyDown={onKeyDown}
     >
       <span data-placeholder={selected === undefined}>{selected?.label ?? placeholder ?? t('select.placeholder')}</span>
       <VscChevronDown aria-hidden="true" />
     </button>
-    {open && <div id={id} className={css.selectMenu} role="listbox" aria-label={label} aria-activedescendant={activeIndex >= 0 ? id + '-' + activeIndex.toString() : undefined}>
+    {open && createPortal(<div ref={menu} id={id} className={css.selectMenu} style={position} role="listbox" aria-label={label} aria-activedescendant={activeIndex >= 0 ? id + '-' + activeIndex.toString() : undefined}>
       {options.map((option, index) => <button
         id={id + '-' + index.toString()}
         type="button"
@@ -106,6 +122,6 @@ export function Select({ value, options, onChange, label, placeholder, disabled 
         <span><strong>{option.label}</strong>{option.description !== undefined && <small>{option.description}</small>}</span>
         {option.value === value && <VscCheck aria-hidden="true" />}
       </button>)}
-    </div>}
+    </div>, document.body)}
   </div>
 }
