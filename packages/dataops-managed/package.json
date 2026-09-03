@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-dataops-managed",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DataOps JWT intake and credential-backed MCP tools for managed DeepSeek Harness workspaces.",
   "type": "module",
   "main": "./lib/index.js",

@@ -56,3 +56,75 @@
 .detailRow dd {
   color: var(--dsw-alias-label-primary);
 }
+
+.brandingRow {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 0;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.brandingCopy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.brandingCopy strong {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+.brandingCopy span {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.switch {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--dsw-alias-border-l1);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.switch > span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 20%);
+  transition: transform 120ms ease;
+}
+
+.switch[data-checked='true'] {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.switch[data-checked='true'] > span {
+  transform: translateX(14px);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch > span { transition: none; }
+}

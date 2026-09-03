@@ -100,6 +100,8 @@ function methodOf(request) {
 export async function installWorkbenchRoutes(page) {
   const calls = { ssh: [], api: [], terminal: [] }
 
+  await page.route('**/integrations/dataops/managed-auth', route => route.fulfill({ status: 200, json: {} }))
+
   await page.route('**/dsh-ssh-manager/api/**', async route => {
     const request = route.request()
     const method = methodOf(request)

@@ -8,6 +8,10 @@
 
 本包只应安装到DataOps托管profile。独立DSH需要用户授权时使用@sparkelf/dsh-dataops-integration，两者不应同时安装。
 
+### 万相品牌
+
+DataOps设置中的“应用万相品牌”默认开启，并在本机浏览器中持久化。开启时，侧栏、折叠导航、新会话欢迎页、浏览器标题和favicon使用万相数据平台品牌；关闭后立即恢复DSH官方品牌。欢迎页四单元Logo在支持hover且未启用减少动态效果时播放轻微的等距展开动画。
+
 ### 模型体验
 
 本包增加命名空间化DataOps MCP tool schema，但不把JWT写入system prompt、tool参数、结果或session log。认证本身不增加token或改变KV cache。
@@ -23,6 +27,10 @@ This is the DeepSeek Harness integration plugin for DataOps-managed workspaces. 
 The package starts no OAuth flow and exposes no connect, reauthorize, or disconnect control. The DataOps parent supplies its existing JWT to one fixed Host route; the plugin stores it as a DSH credential, and the MCP transport resolves the current value before every request. DataOps APIs decide the allowed operations from the JWT principal's current roles and resource grants.
 
 Install this package only in a DataOps-managed profile. Standalone DSH deployments that need user authorization use @sparkelf/dsh-dataops-integration; the two packages must not be installed together.
+
+### Wanxiang Branding
+
+The Apply Wanxiang branding setting defaults on and persists in the local browser. When enabled, the sidebar, collapsed rail, New Session welcome view, document title, and favicon use the Wanxiang Data Platform identity; disabling it immediately restores the official DSH identity. The four-unit welcome mark animates a subtle isometric expansion only on hover-capable devices when reduced motion is not requested.
 
 ### Model Experience
 

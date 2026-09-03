@@ -8,6 +8,9 @@ export const en = {
   identityValue: 'Current DataOps JWT',
   toolsLabel: 'DataOps tools',
   toolsValue: 'Authorized by DataOps on every request',
+  brandingTitle: 'Apply Wanxiang branding',
+  brandingDescription: 'Use the Wanxiang Data Platform identity in navigation, the New Session welcome view, browser title, and favicon.',
+  brandingToggle: 'Apply Wanxiang branding',
 } as const
 
 /** Stable key set shared by every managed DataOps locale. */
@@ -23,4 +26,7 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   identityValue: '当前 DataOps JWT',
   toolsLabel: 'DataOps 工具',
   toolsValue: '每次请求均由 DataOps 授权',
+  brandingTitle: '应用万相品牌',
+  brandingDescription: '在导航、新会话欢迎页、浏览器标题和图标中使用万相数据平台品牌。',
+  brandingToggle: '应用万相品牌',
 }

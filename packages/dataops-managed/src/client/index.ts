@@ -2,12 +2,24 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { ManagedDataOpsSection } from './ManagedDataOpsSection.tsx'
+import { installWanxiangBranding } from './install-branding.tsx'
 import type { ManagedDataOpsSectionInjected } from './ManagedDataOpsSection.tsx'
 import { en, zh, type ManagedDataOpsKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     'settings.dataops-managed': ManagedDataOpsKey
+  }
+  interface SlotMap {
+    'sidebar.brand.mark': { kind: 'single'; scope: 'root'; owner: { size: number } }
+    'sidebar.brand.name': { kind: 'single'; scope: 'root' }
+    'conversation.hero.brand.mark': {
+      kind: 'single'
+      scope: 'root'
+      owner: { size: number; className?: string | undefined }
+    }
+    'conversation.hero.brand.name': { kind: 'single'; scope: 'root' }
+    'conversation.hero.brand.badge': { kind: 'single'; scope: 'root' }
   }
 }
 
@@ -24,6 +36,7 @@ export const inject = ['slots', 'locale']
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dataops-managed: settings copy')
+  installWanxiangBranding(ctx)
   const t = ctx.locale.bind(NS) as ManagedDataOpsSectionInjected['t']
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
