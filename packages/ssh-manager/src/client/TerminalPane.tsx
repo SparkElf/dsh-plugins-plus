@@ -9,8 +9,12 @@ export function TerminalPane({ sessionId, terminal, onSnapshot }: { sessionId: s
   useEffect(() => {
     const element = host.current
     if (element === null) return
-    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    const instance = new Terminal({ cursorBlink: true, convertEol: true, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 13, scrollback: 5000, theme: dark ? { background: '#18181b', foreground: '#e4e4e7', cursor: '#60a5fa', selectionBackground: '#334155' } : { background: '#ffffff', foreground: '#18181b', cursor: '#2563eb', selectionBackground: '#bfdbfe' } })
+    const styles = getComputedStyle(element)
+    const background = styles.getPropertyValue('--dsw-alias-bg-base').trim() || '#18181b'
+    const foreground = styles.getPropertyValue('--dsw-alias-label-primary').trim() || '#e4e4e7'
+    const cursor = styles.getPropertyValue('--dsw-alias-state-business-primary').trim() || '#60a5fa'
+    const selectionBackground = styles.getPropertyValue('--dsw-alias-state-business-tertiary').trim() || '#334155'
+    const instance = new Terminal({ cursorBlink: true, convertEol: true, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 13, scrollback: 5000, theme: { background, foreground, cursor, selectionBackground } })
     const fit = new FitAddon()
     instance.loadAddon(fit)
     instance.open(element)
