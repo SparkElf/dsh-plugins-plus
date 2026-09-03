@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@sparkelf/dsh-workbench-vault": ["packages/workbench-vault/lib/index.d.ts"],
+      "@sparkelf/dsh-ssh-manager": ["packages/ssh-manager/lib/index.d.ts"],
+      "@sparkelf/dsh-api-client": ["packages/api-client/lib/index.d.ts"]
+    }
+  },
+  "include": [
+    "./workbench-consumer.ts"
+  ]
+}

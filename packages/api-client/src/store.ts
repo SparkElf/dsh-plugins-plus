@@ -4,9 +4,60 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { WorkbenchVault } from '@sparkelf/dsh-workbench-vault'
-import type { ApiAuthSecretInput, ApiClientState, ApiCollection, ApiEnvironment, ApiEnvironmentVariable, ApiRequest, ApiResponse, ApiWorkspace } from './types.ts'
+import type { ApiAuthSecretInput, ApiClientState, ApiCollection, ApiCookie, ApiEnvironment, ApiEnvironmentVariable, ApiRequest, ApiResponse, ApiWorkspace } from './types.ts'
 
-interface StoredData extends ApiClientState { version: 1 }
+interface StoredData extends ApiClientState { version: 1; cookies: ApiCookie[] }
+
+function defaultCookiePath(pathname: string): string {
+  if (!pathname.startsWith('/') || pathname === '/') return '/'
+  const lastSlash = pathname.lastIndexOf('/')
+  return lastSlash <= 0 ? '/' : pathname.slice(0, lastSlash)
+}
+
+function domainMatches(hostname: string, domain: string): boolean {
+  return hostname === domain || hostname.endsWith('.' + domain)
+}
+
+function pathMatches(pathname: string, cookiePath: string): boolean {
+  return pathname === cookiePath || (pathname.startsWith(cookiePath) && (cookiePath.endsWith('/') || pathname[cookiePath.length] === '/'))
+}
+
+function parseSetCookie(url: URL, header: string, now: number): ApiCookie | null {
+  const segments = header.split(';')
+  const pair = segments.shift()?.trim() ?? ''
+  const separator = pair.indexOf('=')
+  if (separator <= 0) return null
+  const name = pair.slice(0, separator).trim()
+  if (name === '') return null
+  const cookie: ApiCookie = {
+    name,
+    value: pair.slice(separator + 1).trim(),
+    domain: url.hostname.toLowerCase(),
+    path: defaultCookiePath(url.pathname),
+    hostOnly: true,
+    secure: false,
+    expiresAt: null,
+  }
+  let maxAge: number | null = null
+  for (const segment of segments) {
+    const [rawName, ...rawValue] = segment.trim().split('=')
+    const attribute = rawName?.toLowerCase()
+    const value = rawValue.join('=').trim()
+    if (attribute === 'domain') {
+      const domain = value.toLowerCase().replace(/^\./u, '')
+      if (domain === '' || !domainMatches(url.hostname.toLowerCase(), domain)) return null
+      cookie.domain = domain
+      cookie.hostOnly = false
+    } else if (attribute === 'path' && value.startsWith('/')) cookie.path = value
+    else if (attribute === 'secure') cookie.secure = true
+    else if (attribute === 'expires') {
+      const expires = Date.parse(value)
+      if (Number.isFinite(expires)) cookie.expiresAt = expires
+    } else if (attribute === 'max-age' && /^-?\d+$/u.test(value)) maxAge = Number(value)
+  }
+  if (maxAge !== null) cookie.expiresAt = maxAge <= 0 ? 0 : now + maxAge * 1000
+  return cookie
+}
 
 export class ApiClientStore {
   private readonly dataFile: string
@@ -22,11 +73,13 @@ export class ApiClientStore {
   private async load(): Promise<StoredData> {
     if (this.data !== undefined) return this.data
     await mkdir(dirname(this.dataFile), { recursive: true })
-    this.data = existsSync(this.dataFile)
+    const loaded = existsSync(this.dataFile)
       ? JSON.parse(await readFile(this.dataFile, 'utf8')) as StoredData
-      : { version: 1, workspaces: [], collections: [], environments: [], requests: [], history: [] }
-    if (this.data.version !== 1) throw new Error('Unsupported API Client data format')
-    return this.data
+      : { version: 1 as const, workspaces: [], collections: [], environments: [], requests: [], history: [], cookies: [] }
+    if (loaded.version !== 1) throw new Error('Unsupported API Client data format')
+    loaded.cookies ??= []
+    this.data = loaded
+    return loaded
   }
 
   private async persist(): Promise<void> {
@@ -73,10 +126,21 @@ export class ApiClientStore {
       if (input.parentId !== null && !data.collections.some(collection => collection.id === input.parentId && collection.workspaceId === input.workspaceId)) throw new Error('API parent collection not found: ' + input.parentId)
       const collection: ApiCollection = { ...input, id: input.id === '' ? randomUUID() : input.id, name: input.name.trim(), description: input.description.trim(), tags: [...new Set(input.tags.map(tag => tag.trim()).filter(Boolean))], requestIds: [...new Set(input.requestIds)] }
       if (collection.name === '') throw new Error('API collection name is required')
+      if (collection.parentId === collection.id) throw new Error('API collection cannot be its own parent')
+      for (let parentId = collection.parentId; parentId !== null;) {
+        if (parentId === collection.id) throw new Error('API collection hierarchy cannot contain a cycle')
+        parentId = data.collections.find(item => item.id === parentId)?.parentId ?? null
+      }
       const index = data.collections.findIndex(item => item.id === collection.id)
+      const previous = index === -1 ? undefined : data.collections[index]
       if (index === -1) data.collections.push(collection)
       else data.collections[index] = collection
-      data.workspaces = data.workspaces.map(workspace => workspace.id === collection.workspaceId ? { ...workspace, collectionIds: [...new Set([...workspace.collectionIds, collection.id])] } : workspace)
+      data.workspaces = data.workspaces.map(workspace => ({
+        ...workspace,
+        collectionIds: workspace.id === collection.workspaceId
+          ? [...new Set([...workspace.collectionIds, collection.id])]
+          : workspace.id === previous?.workspaceId ? workspace.collectionIds.filter(id => id !== collection.id) : workspace.collectionIds,
+      }))
       await this.persist()
       return collection
     })
@@ -87,6 +151,7 @@ export class ApiClientStore {
       const data = await this.load()
       if (!data.workspaces.some(workspace => workspace.id === input.workspaceId)) throw new Error('API workspace not found: ' + input.workspaceId)
       const id = input.id === '' ? randomUUID() : input.id
+      const previous = data.environments.find(item => item.id === id)
       const variables: ApiEnvironmentVariable[] = []
       for (const variable of input.variables) {
         const key = variable.key.trim()
@@ -96,12 +161,19 @@ export class ApiClientStore {
         if (!variable.secret && variable.credentialId !== null) await this.vault.delete('api-environment', variable.credentialId)
         variables.push({ ...variable, key, value: variable.secret ? null : variable.value, credentialId })
       }
+      const retainedCredentials = new Set(variables.flatMap(variable => variable.credentialId === null ? [] : [variable.credentialId]))
+      for (const variable of previous?.variables ?? []) if (variable.credentialId !== null && !retainedCredentials.has(variable.credentialId)) await this.vault.delete('api-environment', variable.credentialId)
       const environment: ApiEnvironment = { ...input, id, name: input.name.trim(), variables }
       if (environment.name === '') throw new Error('API environment name is required')
       const index = data.environments.findIndex(item => item.id === id)
       if (index === -1) data.environments.push(environment)
       else data.environments[index] = environment
-      data.workspaces = data.workspaces.map(workspace => workspace.id === environment.workspaceId ? { ...workspace, environmentIds: [...new Set([...workspace.environmentIds, environment.id])] } : workspace)
+      data.workspaces = data.workspaces.map(workspace => ({
+        ...workspace,
+        environmentIds: workspace.id === environment.workspaceId
+          ? [...new Set([...workspace.environmentIds, environment.id])]
+          : workspace.id === previous?.workspaceId ? workspace.environmentIds.filter(existingId => existingId !== environment.id) : workspace.environmentIds,
+      }))
       await this.persist()
       return environment
     })
@@ -162,14 +234,21 @@ export class ApiClientStore {
       if (collection === undefined) throw new Error('API collection not found: ' + input.collectionId)
       if (input.environmentId !== null && !data.environments.some(environment => environment.id === input.environmentId && environment.workspaceId === collection.workspaceId)) throw new Error('API environment not found: ' + input.environmentId)
       const id = input.id === '' ? randomUUID() : input.id
+      const previous = data.requests.find(item => item.id === id)
       const credentialId = input.auth.kind === 'none' || input.auth.kind === 'inherit' ? null : input.auth.credentialId ?? id
       if (authSecret !== undefined && Object.values(authSecret).some(value => value !== undefined && value !== '')) await this.vault.set('api-auth', credentialId as string, authSecret as Record<string, unknown>)
+      if (previous?.auth.credentialId !== null && previous?.auth.credentialId !== undefined && previous.auth.credentialId !== credentialId) await this.vault.delete('api-auth', previous.auth.credentialId)
       const request: ApiRequest = { ...input, id, name: input.name.trim(), url: input.url.trim(), query: input.query.map(value => ({ ...value })), headers: input.headers.map(value => ({ ...value })), auth: { ...input.auth, credentialId, options: { ...input.auth.options } }, body: { ...input.body } }
       if (request.name === '' || request.url === '') throw new Error('API request name and URL are required')
       const index = data.requests.findIndex(item => item.id === id)
       if (index === -1) data.requests.push(request)
       else data.requests[index] = request
-      data.collections = data.collections.map(item => item.id === request.collectionId ? { ...item, requestIds: [...new Set([...item.requestIds, request.id])] } : item)
+      data.collections = data.collections.map(item => ({
+        ...item,
+        requestIds: item.id === request.collectionId
+          ? [...new Set([...item.requestIds, request.id])]
+          : item.id === previous?.collectionId ? item.requestIds.filter(existingId => existingId !== request.id) : item.requestIds,
+      }))
       await this.persist()
       return request
     })
@@ -209,6 +288,35 @@ export class ApiClientStore {
 
   async authSecret(request: ApiRequest): Promise<ApiAuthSecretInput | undefined> {
     return request.auth.credentialId === null ? undefined : this.vault.get<ApiAuthSecretInput & Record<string, unknown>>('api-auth', request.auth.credentialId)
+  }
+
+  async cookieHeader(url: URL, now = Date.now()): Promise<string> {
+    await this.mutations
+    const data = await this.load()
+    const hostname = url.hostname.toLowerCase()
+    return data.cookies
+      .filter(cookie => (cookie.expiresAt === null || cookie.expiresAt > now)
+        && (cookie.hostOnly ? cookie.domain === hostname : domainMatches(hostname, cookie.domain))
+        && pathMatches(url.pathname, cookie.path)
+        && (!cookie.secure || url.protocol === 'https:'))
+      .sort((left, right) => right.path.length - left.path.length)
+      .map(cookie => cookie.name + '=' + cookie.value)
+      .join('; ')
+  }
+
+  async storeResponseCookies(url: URL, setCookieHeaders: string[], now = Date.now()): Promise<void> {
+    if (setCookieHeaders.length === 0) return
+    await this.enqueue(async () => {
+      const data = await this.load()
+      for (const header of setCookieHeaders) {
+        const cookie = parseSetCookie(url, header, now)
+        if (cookie === null) continue
+        data.cookies = data.cookies.filter(item => !(item.name === cookie.name && item.domain === cookie.domain && item.path === cookie.path))
+        if (cookie.expiresAt === null || cookie.expiresAt > now) data.cookies.push(cookie)
+      }
+      data.cookies = data.cookies.filter(cookie => cookie.expiresAt === null || cookie.expiresAt > now)
+      await this.persist()
+    })
   }
 
   async addHistory(response: ApiResponse): Promise<void> {

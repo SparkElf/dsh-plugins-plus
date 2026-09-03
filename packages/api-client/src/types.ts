@@ -7,6 +7,8 @@ export interface ApiCollection { id: string; workspaceId: string; parentId: stri
 export interface ApiEnvironmentVariable { key: string; value: string | null; credentialId: string | null; enabled: boolean; secret: boolean }
 export interface ApiEnvironment { id: string; workspaceId: string; name: string; variables: ApiEnvironmentVariable[] }
 export interface ApiKeyValue { key: string; value: string; enabled: boolean; description?: string }
+export interface ApiMultipartPart extends ApiKeyValue { type: 'text' | 'file'; fileName?: string; contentType?: string; encoding?: 'plain' | 'base64' }
+export interface ApiCookie { name: string; value: string; domain: string; path: string; hostOnly: boolean; secure: boolean; expiresAt: number | null }
 export interface ApiRequest {
   id: string
   collectionId: string

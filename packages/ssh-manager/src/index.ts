@@ -5,11 +5,15 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { SshContext } from './context.ts'
 import { SshManagerStore } from './store.ts'
+import { SshPortForwardManager } from './forward.ts'
+import { downloadSftpFile, listSftpFiles, uploadSftpFile } from './sftp.ts'
 import { SshTerminalManager } from './terminal.ts'
 import { executeSshCommand, testSshHost } from './transport.ts'
-import type { SshCluster, SshCommandRequest, SshCredentialInput, SshHost } from './types.ts'
+import type { SshCluster, SshCommandRequest, SshCredentialInput, SshHost, SshPortForwardRequest } from './types.ts'
 
 export * from './types.ts'
+export { SshPortForwardManager } from './forward.ts'
+export { downloadSftpFile, listSftpFiles, uploadSftpFile } from './sftp.ts'
 export { SshManagerStore } from './store.ts'
 export { SshTerminalManager } from './terminal.ts'
 export { executeSshCommand, fingerprintFromHash, sshConnectConfig, testSshHost } from './transport.ts'
@@ -40,6 +44,7 @@ function publicHost(host: SshHost): Record<string, ToolJson> {
 export function apply(ctx: SshContext): void {
   const store = new SshManagerStore()
   const terminals = new SshTerminalManager(store)
+  const forwards = new SshPortForwardManager(store)
   const terminalWss = new WebSocketServer({ noServer: true })
   const logger = ctx.logger as unknown as { error(...args: unknown[]): void }
   const methods: Record<string, (payload: Record<string, unknown>) => Promise<unknown>> = {
@@ -51,9 +56,17 @@ export function apply(ctx: SshContext): void {
     'hosts.get': async payload => publicHost(await store.host(String(payload.hostId))),
     'hosts.test': async payload => testSshHost(store, String(payload.hostId)),
     'hosts.execute': async payload => executeSshCommand(store, String(payload.hostId), String(payload.command), payload.timeoutMs === undefined ? undefined : Number(payload.timeoutMs)),
+    'sftp.list': async payload => listSftpFiles(store, String(payload.hostId), String(payload.path ?? '.')),
+    'sftp.download': async payload => downloadSftpFile(store, String(payload.hostId), String(payload.path)),
+    'sftp.upload': async payload => uploadSftpFile(store, String(payload.hostId), String(payload.path), String(payload.data)),
     'terminals.open': async payload => { const sessionId = String(payload.sessionId); const terminal = await terminals.open(sessionId, String(payload.hostId), Number(payload.cols ?? 80), Number(payload.rows ?? 24)); return { terminal, terminals: terminals.list(sessionId) } },
     'terminals.list': async payload => terminals.list(String(payload.sessionId)),
+    'terminals.reconnect': async payload => { const sessionId = String(payload.sessionId); const terminal = await terminals.reconnect(sessionId, String(payload.terminalId), Number(payload.cols ?? 80), Number(payload.rows ?? 24)); return { terminal, terminals: terminals.list(sessionId) } },
     'terminals.close': async payload => { const sessionId = String(payload.sessionId); terminals.close(sessionId, String(payload.terminalId)); return terminals.list(sessionId) },
+    'forwards.open': async payload => { const sessionId = String(payload.sessionId); const forward = await forwards.open(sessionId, payload.forward as SshPortForwardRequest); return { forward, forwards: forwards.list(sessionId) } },
+    'forwards.list': async payload => forwards.list(String(payload.sessionId)),
+    'forwards.reconnect': async payload => { const sessionId = String(payload.sessionId); const forward = await forwards.reconnect(sessionId, String(payload.forwardId)); return { forward, forwards: forwards.list(sessionId) } },
+    'forwards.close': async payload => { const sessionId = String(payload.sessionId); forwards.close(sessionId, String(payload.forwardId)); return forwards.list(sessionId) },
   }
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/dsh-ssh-manager/api', handler: async (req, res) => {
     const method = new URL(req.url ?? '/', 'http://dsh.internal').pathname.slice('/dsh-ssh-manager/api/'.length)
@@ -88,7 +101,7 @@ export function apply(ctx: SshContext): void {
       client.once('close', () => { detach?.() })
     })
   } }), 'dsh-ssh-manager: terminal WebSocket')
-  ctx.effect(() => () => { terminals.closeAll(); terminalWss.close() }, 'dsh-ssh-manager: terminal cleanup')
+  ctx.effect(() => () => { terminals.closeAll(); forwards.closeAll(); terminalWss.close() }, 'dsh-ssh-manager: connection cleanup')
 
   const open = { type: 'object', additionalProperties: true } as const
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_list_hosts', description: 'List configured SSH hosts and clusters. Returns non-secret metadata only.', parameters: {}, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async () => { const state = await store.state(); return toolJson({ clusters: state.clusters, hosts: state.hosts.map(publicHost) }) } })), 'dsh-ssh-manager: list hosts tool')

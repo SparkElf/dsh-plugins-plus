@@ -2,10 +2,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ApiContext } from './context.ts'
 import { executeApiRequest } from './executor.ts'
+import { exportApiDocument, importApiDocument, type ApiExchangeFormat } from './import-export.ts'
 import { ApiClientStore } from './store.ts'
 import type { ApiAuthSecretInput, ApiCollection, ApiEnvironment, ApiRequest, ApiWorkspace } from './types.ts'
 
 export * from './types.ts'
+export * from './import-export.ts'
 export { ApiClientStore } from './store.ts'
 export { executeApiRequest } from './executor.ts'
 export const name = 'api-client'
@@ -16,12 +18,15 @@ function toolJson<T>(value: T): Record<string, ToolJson> { return value as unkno
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> { const chunks: Uint8Array[] = []; for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk); return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> }
 function writeJson(res: ServerResponse, status: number, value: unknown): void { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(body) }
 function sanitizedRequest(request: ApiRequest): Record<string, ToolJson> { const value = { ...request, auth: { ...request.auth, credentialId: undefined } }; return value as unknown as Record<string, ToolJson> }
+function exchangeFormat(value: unknown): ApiExchangeFormat {
+  if (value !== 'postman' && value !== 'openapi') throw new Error('API exchange format must be postman or openapi')
+  return value
+}
 
-/** Register API collection CRUD, explicit execution, history, and sanitized model tools. */
-export function apply(ctx: ApiContext): void {
-  const store = new ApiClientStore()
-  const logger = ctx.logger as unknown as { error(...args: unknown[]): void }
-  const methods: Record<string, (payload: Record<string, unknown>) => Promise<unknown>> = {
+export type ApiClientHostMethods = Record<string, (payload: Record<string, unknown>) => Promise<unknown>>
+
+export function createApiClientHostMethods(store: ApiClientStore): ApiClientHostMethods {
+  return {
     state: () => store.state(),
     'workspaces.save': async payload => { await store.saveWorkspace(payload.workspace as ApiWorkspace); return store.state() },
     'workspaces.delete': async payload => { await store.deleteWorkspace(String(payload.workspaceId)); return store.state() },
@@ -32,7 +37,23 @@ export function apply(ctx: ApiContext): void {
     'requests.save': async payload => { await store.saveRequest(payload.request as ApiRequest, payload.authSecret as ApiAuthSecretInput | undefined); return store.state() },
     'requests.delete': async payload => { await store.deleteRequest(String(payload.requestId)); return store.state() },
     'requests.execute': async payload => ({ response: await executeApiRequest(store, String(payload.requestId)), state: await store.state() }),
+    'workspaces.import': async payload => {
+      const bundle = importApiDocument(exchangeFormat(payload.format), payload.document)
+      await store.saveWorkspace(bundle.workspace)
+      for (const collection of bundle.collections) await store.saveCollection(collection)
+      for (const environment of bundle.environments) await store.saveEnvironment(environment)
+      for (const request of bundle.requests) await store.saveRequest(request, bundle.authSecrets[request.id])
+      return { workspaceId: bundle.workspace.id, state: await store.state() }
+    },
+    'workspaces.export': async payload => exportApiDocument(exchangeFormat(payload.format), await store.state(), String(payload.workspaceId)),
   }
+}
+
+/** Register API collection CRUD, explicit execution, import/export, history, and sanitized model tools. */
+export function apply(ctx: ApiContext): void {
+  const store = new ApiClientStore()
+  const logger = ctx.logger as unknown as { error(...args: unknown[]): void }
+  const methods = createApiClientHostMethods(store)
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/dsh-api-client/api', handler: async (req, res) => {
     const method = new URL(req.url ?? '/', 'http://dsh.internal').pathname.slice('/dsh-api-client/api/'.length)
     try { const handler = methods[method]; if (handler === undefined) throw new Error('Unknown API Client method: ' + method); writeJson(res, 200, await handler(await readBody(req))) }
