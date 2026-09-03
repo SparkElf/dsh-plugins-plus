@@ -4,17 +4,16 @@ import { API_SECRET, SSH_SECRET, installWorkbenchRoutes, responseBody } from './
 
 const HARNESS_URL = process.env.DSH_WORKBENCH_SYSTEM_URL ?? process.env.DSH_SYSTEM_URL ?? 'http://127.0.0.1:3081'
 const COMPOSER_NAME = /给智能体发消息|Message the agent|描述你想要构建的内容|Describe what you want to build/
+const EMPTY_WORKSPACE_NAME = /^(选择工作区|Choose workspace)$/
+const WORKSPACE_PATH = process.env.DSH_WORKBENCH_WORKSPACE ?? '/workspace'
 
 async function dismissOnboarding(page) {
-  const testingNotice = page.getByRole('dialog', { name: /^(内测声明|Internal Testing Notice)$/ })
-  if (await testingNotice.isVisible()) {
-    await testingNotice.getByRole('button', { name: /^(继续|Continue)$/ }).click()
-    await expect(testingNotice).toBeHidden()
-  }
-  const credentials = page.getByRole('dialog', { name: /^(添加一个 API Key 开始使用|Add an API Key to get started)$/ })
-  if (await credentials.isVisible()) {
-    await credentials.getByRole('button', { name: /^(稍后配置|Configure later|Set up later)$/ }).click()
-    await expect(credentials).toBeHidden()
+  const continueButton = page.getByRole('button', { name: /^(继续|Continue)$/ })
+  const configureLater = page.getByRole('button', { name: /^(稍后配置|Configure later|Set up later)$/ }).first()
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (await continueButton.isVisible()) await continueButton.click({ force: true })
+    if (await configureLater.isVisible()) await configureLater.click({ force: true })
+    await page.waitForTimeout(200)
   }
 }
 
@@ -22,7 +21,27 @@ async function startSession(page) {
   await page.goto(HARNESS_URL, { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(1_000)
   await dismissOnboarding(page)
-  await page.getByRole('button', { name: /^(新建会话|New session)$/i }).first().click()
+  if (await page.getByRole('textbox', { name: COMPOSER_NAME }).isVisible()) return
+  const emptyWorkspace = page.getByRole('button', { name: EMPTY_WORKSPACE_NAME }).first()
+  if (await emptyWorkspace.isVisible()) {
+    await emptyWorkspace.click()
+    const picker = page.getByRole('dialog', { name: /^(选择工作区目录|Choose workspace directory)$/ })
+    await picker.getByRole('button', { name: /^(编辑路径|Edit path)$/ }).click()
+    await picker.locator('input').fill(WORKSPACE_PATH)
+    await picker.locator('input').press('Enter')
+    await picker.getByRole('button', { name: /^(打开|Open)$/ }).click()
+    await expect(picker).toBeHidden()
+    await dismissOnboarding(page)
+  }
+  if (await page.getByRole('textbox', { name: COMPOSER_NAME }).isVisible()) return
+  const newSession = page.getByRole('button', { name: /^(新建会话|New session)$/i }).first()
+  try {
+    await newSession.click({ timeout: 2_500 })
+  } catch {
+    await dismissOnboarding(page)
+    await newSession.click()
+  }
+  await dismissOnboarding(page)
   const configureLater = page.getByRole('button', { name: /稍后配置|Configure later|Set up later/i }).first()
   try { await configureLater.click({ timeout: 5_000 }) } catch {}
   await expect(page.getByRole('textbox', { name: COMPOSER_NAME })).toBeVisible()
