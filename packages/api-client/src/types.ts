@@ -20,4 +20,6 @@ export interface ApiRequest {
   body: { kind: ApiBodyKind; content: string }
   environmentId: string | null
 }
+export interface ApiAuthSecretInput { username?: string; password?: string; token?: string; key?: string; secret?: string }
 export interface ApiResponse { id: string; requestId: string; status: number; statusText: string; durationMs: number; sizeBytes: number; headers: ApiKeyValue[]; body: string; bodyTruncated: boolean; receivedAt: number }
+export interface ApiClientState { workspaces: ApiWorkspace[]; collections: ApiCollection[]; environments: ApiEnvironment[]; requests: ApiRequest[]; history: ApiResponse[] }
