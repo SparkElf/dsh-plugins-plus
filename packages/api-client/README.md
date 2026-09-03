@@ -1,6 +1,6 @@
 # @sparkelf/dsh-api-client
 
-A Postman-style Better Sidebar API workbench for DeepSeek Harness.
+An Apifox-inspired Better Sidebar API workbench for DeepSeek Harness with custom searchable selects, request tabs, focused request editing, and a request/response split that adapts to the containing panel width.
 
 ## Current capabilities
 

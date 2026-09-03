@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-api-client",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Better Sidebar API collection, request, environment, history, and response workbench.",
   "type": "module",
   "main": "./lib/index.js",

@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-ssh-manager",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Better Sidebar SSH host, cluster, terminal, transfer, and tunnel workbench.",
   "type": "module",
   "main": "./lib/index.js",
@@ -37,6 +37,8 @@
   "scripts": {
     "build": "tsdown",
     "bundle": "tsdown",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --root ../.. packages/ssh-manager/tests",
     "prepack": "pnpm run build"
   },
   "engines": {
