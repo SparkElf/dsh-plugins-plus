@@ -1,3 +1,7 @@
 packages:
   - 'packages/*'
   - '!packages/supervisor'
+allowBuilds:
+  cpu-features: false
+  node-pty: true
+  ssh2: true

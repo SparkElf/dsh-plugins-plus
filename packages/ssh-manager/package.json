@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-ssh-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Better Sidebar SSH host, cluster, terminal, transfer, and tunnel workbench.",
   "type": "module",
   "main": "./lib/index.js",
@@ -10,16 +10,27 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": {
+      "default": "./lib/client.js"
+    }
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "dsh-better-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
     }
   },
   "files": [
     "lib/index.js",
     "lib/index.d.ts",
+    "lib/client.js",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -41,10 +52,35 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.1-rc.2",
+    "dsh-better-sidebar": ">=0.17.1 <0.19.0",
+    "react": "^18.2.0 || ^19.0.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "tsdown": "^0.22.2"
+    "tsdown": "^0.22.2",
+    "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@types/ssh2": "^1.15.0",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.1-rc.2",
+    "dsh-better-sidebar": "0.17.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lightningcss": "^1.29.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@sparkelf/dsh-workbench-vault": "workspace:*",
+    "ssh2": "1.17.0",
+    "react-icons": "^5.5.0"
   }
 }

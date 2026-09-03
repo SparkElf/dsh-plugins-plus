@@ -1,5 +1,15 @@
 # @sparkelf/dsh-ssh-manager
 
-Better Sidebar SSH host, cluster, terminal, transfer, and tunnel workbench.
+A Better Sidebar SSH inventory and guarded-operation workbench for DeepSeek Harness.
 
-This package currently defines the stable host domain contract. It deliberately does not register an empty Better Sidebar tab. Host persistence, sanitized AI handoff, and the usable client pane are added together in the next implementation stage. Secret values will resolve through the shared Workbench vault and are never represented by these public resource types.
+## Current capabilities
+
+- Clustered host inventory with search, names, descriptions, tags, environments, jump-host references, and known-host fingerprints.
+- Password, private-key, passphrase, and SSH-agent metadata flows backed by the shared encrypted Workbench vault.
+- Host detail view and sanitized Send to conversation action.
+- Host and cluster CRUD Host APIs.
+- Non-secret ssh_list_hosts and ssh_get_host model tools.
+- ssh_prepare_command creates an explicit-review command request but never executes it.
+- ssh2 1.17 transport dependency is pinned for the upcoming verified terminal and SFTP execution boundary.
+
+The plugin never returns decrypted credentials to browser state or model tools. Actual remote command execution remains disabled until the explicit approval and known-host verification path is implemented.
