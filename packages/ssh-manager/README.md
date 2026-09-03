@@ -10,6 +10,7 @@ A Better Sidebar SSH inventory and guarded-operation workbench for DeepSeek Harn
 - Host and cluster CRUD Host APIs.
 - Non-secret ssh_list_hosts and ssh_get_host model tools.
 - ssh_prepare_command creates an explicit-review command request but never executes it.
-- ssh2 1.17 transport dependency is pinned for the upcoming verified terminal and SFTP execution boundary.
+- Strict SSH connection testing with an explicit OpenSSH SHA256 known-host fingerprint; unknown or changed host keys are rejected and the observed fingerprint is reported.
+- Password, private-key/passphrase, and SSH-agent connection configuration through ssh2 1.17.
 
-The plugin never returns decrypted credentials to browser state or model tools. Actual remote command execution remains disabled until the explicit approval and known-host verification path is implemented.
+The plugin never returns decrypted credentials to browser state or model tools. Actual remote command execution remains disabled until the explicit approval and terminal-stream lifecycle are implemented.

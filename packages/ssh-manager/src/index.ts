@@ -2,10 +2,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { SshContext } from './context.ts'
 import { SshManagerStore } from './store.ts'
+import { testSshHost } from './transport.ts'
 import type { SshCluster, SshCommandRequest, SshCredentialInput, SshHost } from './types.ts'
 
 export * from './types.ts'
 export { SshManagerStore } from './store.ts'
+export { fingerprintFromHash, sshConnectConfig, testSshHost } from './transport.ts'
 export const name = 'ssh-manager'
 export const inject = ['webServer', 'tools']
 
@@ -40,6 +42,7 @@ export function apply(ctx: SshContext): void {
     'hosts.save': async payload => { await store.saveHost(payload.host as SshHost, payload.credential as SshCredentialInput | undefined); return store.state() },
     'hosts.delete': async payload => { await store.deleteHost(String(payload.hostId)); return store.state() },
     'hosts.get': async payload => publicHost(await store.host(String(payload.hostId))),
+    'hosts.test': async payload => testSshHost(store, String(payload.hostId)),
   }
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/dsh-ssh-manager/api', handler: async (req, res) => {
     const method = new URL(req.url ?? '/', 'http://dsh.internal').pathname.slice('/dsh-ssh-manager/api/'.length)
