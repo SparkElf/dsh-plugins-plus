@@ -2,6 +2,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-credentials'
+import { WorkbenchVault } from '@sparkelf/dsh-workbench-vault'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { SshContext } from './context.ts'
 import { SshManagerStore } from './store.ts'
@@ -9,16 +11,16 @@ import { SshPortForwardManager } from './forward.ts'
 import { downloadSftpFile, listSftpFiles, uploadSftpFile } from './sftp.ts'
 import { SshTerminalManager } from './terminal.ts'
 import { executeSshCommand, testSshHost } from './transport.ts'
-import type { SshCluster, SshCommandRequest, SshCredentialInput, SshHost, SshPortForwardRequest } from './types.ts'
+import type { SshAuthKind, SshCluster, SshCommandRequest, SshCredentialInput, SshEnvironment, SshHost, SshPortForwardRequest } from './types.ts'
 
 export * from './types.ts'
 export { SshPortForwardManager } from './forward.ts'
 export { downloadSftpFile, listSftpFiles, uploadSftpFile } from './sftp.ts'
-export { SshManagerStore } from './store.ts'
+export { SshManagerStore, sshCredentialKey, type SshCredentialRecords } from './store.ts'
 export { SshTerminalManager } from './terminal.ts'
 export { executeSshCommand, fingerprintFromHash, sshConnectConfig, testSshHost } from './transport.ts'
 export const name = 'ssh-manager'
-export const inject = ['webServer', 'tools', 'approval']
+export const inject = ['webServer', 'tools', 'approval', 'credentials']
 
 type ToolJson = null | boolean | number | string | ToolJson[] | { [key: string]: ToolJson }
 function toolJson<T>(value: T): Record<string, ToolJson> { return value as unknown as Record<string, ToolJson> }
@@ -42,7 +44,7 @@ function publicHost(host: SshHost): Record<string, ToolJson> {
 
 /** Register persistent host inventory APIs and sanitized model tools. */
 export function apply(ctx: SshContext): void {
-  const store = new SshManagerStore()
+  const store = new SshManagerStore({ credentials: ctx.credentials, legacyVault: new WorkbenchVault() })
   const terminals = new SshTerminalManager(store)
   const forwards = new SshPortForwardManager(store)
   const terminalWss = new WebSocketServer({ noServer: true })
@@ -104,6 +106,9 @@ export function apply(ctx: SshContext): void {
   ctx.effect(() => () => { terminals.closeAll(); forwards.closeAll(); terminalWss.close() }, 'dsh-ssh-manager: connection cleanup')
 
   const open = { type: 'object', additionalProperties: true } as const
+  ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_save_cluster', description: 'Create or update an SSH cluster using non-secret inventory metadata.', parameters: { cluster_id: { type: 'string' }, name: { type: 'string', required: true }, description: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { cluster_id?: string; name: string; description?: string; tags?: string[] }) => { const state = await store.state(); const existing = state.clusters.find(cluster => cluster.id === args.cluster_id); return toolJson(await store.saveCluster({ id: existing?.id ?? '', name: args.name, description: args.description ?? existing?.description ?? '', tags: args.tags ?? existing?.tags ?? [], hostIds: existing?.hostIds ?? [] })) } })), 'dsh-ssh-manager: save cluster tool')
+  ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_save_host', description: 'Create or update SSH host metadata without accepting credentials. Configure its credential through the SSH or DSH Credentials UI.', parameters: { host_id: { type: 'string' }, name: { type: 'string', required: true }, hostname: { type: 'string', required: true }, port: { type: 'number' }, username: { type: 'string', required: true }, environment: { type: 'string' }, auth_kind: { type: 'string' }, description: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } }, cluster_id: { type: 'string' }, jump_host_id: { type: 'string' }, known_host_fingerprint: { type: 'string' }, keep_alive_seconds: { type: 'number' } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id?: string; name: string; hostname: string; port?: number; username: string; environment?: string; auth_kind?: string; description?: string; tags?: string[]; cluster_id?: string; jump_host_id?: string; known_host_fingerprint?: string; keep_alive_seconds?: number }) => { const existing = args.host_id === undefined ? undefined : await store.host(args.host_id); const environment = (args.environment ?? existing?.environment ?? 'other') as SshEnvironment; if (!['development','testing','staging','production','other'].includes(environment)) throw new Error('Invalid SSH environment'); const authKind = (args.auth_kind ?? existing?.authKind ?? 'private-key') as SshAuthKind; if (!['password','private-key','agent'].includes(authKind)) throw new Error('Invalid SSH auth kind'); const host = await store.saveHost({ id: existing?.id ?? '', name: args.name, description: args.description ?? existing?.description ?? '', tags: args.tags ?? existing?.tags ?? [], clusterId: args.cluster_id ?? existing?.clusterId ?? null, environment, hostname: args.hostname, port: args.port ?? existing?.port ?? 22, username: args.username, authKind, credentialId: existing?.credentialId ?? null, credentialConfigured: existing?.credentialConfigured ?? false, jumpHostId: args.jump_host_id ?? existing?.jumpHostId ?? null, knownHostFingerprint: args.known_host_fingerprint ?? existing?.knownHostFingerprint ?? null, keepAliveSeconds: args.keep_alive_seconds ?? existing?.keepAliveSeconds ?? 30 }); return publicHost(host) } })), 'dsh-ssh-manager: save host tool')
+  ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_delete_host', description: 'Delete one SSH host inventory entry and its referenced central credential record.', parameters: { host_id: { type: 'string', required: true } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id: string }) => { await store.deleteHost(args.host_id); return toolJson({ deleted: args.host_id }) } })), 'dsh-ssh-manager: delete host tool')
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_list_hosts', description: 'List configured SSH hosts and clusters. Returns non-secret metadata only.', parameters: {}, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async () => { const state = await store.state(); return toolJson({ clusters: state.clusters, hosts: state.hosts.map(publicHost) }) } })), 'dsh-ssh-manager: list hosts tool')
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_get_host', description: 'Read one SSH host by id. Credentials are never returned.', parameters: { host_id: { type: 'string', required: true } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id: string }) => publicHost(await store.host(args.host_id)) })), 'dsh-ssh-manager: get host tool')
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_execute_command', description: 'Execute one command on one configured SSH host after explicit user approval. Credentials remain Host-only.', parameters: { host_id: { type: 'string', required: true }, command: { type: 'string', required: true }, timeout_ms: { type: 'number' } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id: string; command: string; timeout_ms?: number }, exec: ToolRunContext) => { if (exec.agent === undefined) throw new Error('ssh_execute_command requires an initiating agent'); const host = await store.host(args.host_id); const outcome = await ctx.approval.request({ agent: exec.agent, toolName: 'ssh_execute_command', callId: exec.callId, signal: exec.signal, reason: 'Run a remote command on ' + host.name + ' (' + host.username + '@' + host.hostname + ':' + host.port.toString() + ')' }); if (outcome !== 'allowed-once') throw new Error('SSH command approval was ' + outcome); return toolJson(await executeSshCommand(store, host.id, args.command, args.timeout_ms, exec.signal)) } })), 'dsh-ssh-manager: approved execute tool')

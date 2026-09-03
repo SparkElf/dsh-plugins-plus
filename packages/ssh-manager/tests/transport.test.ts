@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Server } from 'ssh2'
 import { afterEach, describe, expect, it } from 'vitest'
-import { WorkbenchVault } from '@sparkelf/dsh-workbench-vault'
+import { MemoryCredentialRecords } from './credential-records.ts'
 import { SshManagerStore } from '../src/store.ts'
 import { executeSshCommand, fingerprintFromHash, sshConnectConfig, testSshHost } from '../src/transport.ts'
 import type { SshHost } from '../src/types.ts'
@@ -47,7 +47,7 @@ describe('SSH transport policy', () => {
   it('rejects an unknown host key and connects after the observed fingerprint is saved', async () => {
     const endpoint = await createServer()
     const directory = await mkdtemp(join(tmpdir(), 'dsh-ssh-transport-'))
-    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), vault: new WorkbenchVault({ directory }) })
+    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), credentials: new MemoryCredentialRecords() })
     const saved = await store.saveHost({ ...host, id: '', hostname: '127.0.0.1', port: endpoint.port, credentialId: null, credentialConfigured: false, knownHostFingerprint: 'SHA256:wrong' }, { password: 'secret' })
     const observed = await captureFingerprint(store, saved.id)
     expect(observed).toMatch(/^SHA256:/u)
@@ -59,7 +59,7 @@ describe('SSH transport policy', () => {
     const targetEndpoint = await createServer()
     const jumpEndpoint = await createServer(true)
     const directory = await mkdtemp(join(tmpdir(), 'dsh-ssh-jump-'))
-    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), vault: new WorkbenchVault({ directory }) })
+    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), credentials: new MemoryCredentialRecords() })
     let jump = await store.saveHost({ ...host, id: '', name: 'Jump', hostname: '127.0.0.1', port: jumpEndpoint.port, credentialId: null, credentialConfigured: false, knownHostFingerprint: 'SHA256:wrong' }, { password: 'secret' })
     const jumpFingerprint = await captureFingerprint(store, jump.id)
     jump = await store.saveHost({ ...jump, knownHostFingerprint: jumpFingerprint })
