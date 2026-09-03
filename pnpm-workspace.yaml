@@ -5,3 +5,6 @@ allowBuilds:
   cpu-features: false
   node-pty: true
   ssh2: true
+minimumReleaseAgeExclude:
+  - '@codemirror/legacy-modes@6.5.4'
+  - '@types/ssh2@1.15.6'
