@@ -6,7 +6,7 @@ import { Server } from 'ssh2'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WorkbenchVault } from '@sparkelf/dsh-workbench-vault'
 import { SshManagerStore } from '../src/store.ts'
-import { fingerprintFromHash, sshConnectConfig, testSshHost } from '../src/transport.ts'
+import { executeSshCommand, fingerprintFromHash, sshConnectConfig, testSshHost } from '../src/transport.ts'
 import type { SshHost } from '../src/types.ts'
 
 const host: SshHost = { id: 'host', name: 'Host', description: '', tags: [], clusterId: null, environment: 'testing', hostname: 'localhost', port: 22, username: 'user', authKind: 'password', credentialId: 'host', credentialConfigured: true, jumpHostId: null, knownHostFingerprint: 'SHA256:AQID', keepAliveSeconds: 30 }
@@ -23,7 +23,7 @@ describe('SSH transport policy', () => {
   })
   it('rejects an unknown host key and connects after the observed fingerprint is saved', async () => {
     const pair = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' }, publicKeyEncoding: { type: 'pkcs1', format: 'pem' } })
-    const server = new Server({ hostKeys: [pair.privateKey] }, client => { client.on('error', () => {}); client.on('authentication', context => { if (context.method === 'password' && context.username === 'user' && context.password === 'secret') context.accept(); else context.reject() }); client.on('ready', () => {}) })
+    const server = new Server({ hostKeys: [pair.privateKey] }, client => { client.on('error', () => {}); client.on('authentication', context => { if (context.method === 'password' && context.username === 'user' && context.password === 'secret') context.accept(); else context.reject() }); client.on('ready', () => { client.on('session', accept => { const session = accept(); session.on('exec', (acceptExec, _reject, info) => { const stream = acceptExec(); stream.write('stdout: ' + info.command); stream.stderr.write('stderr'); stream.exit(0); stream.end() }) }) }) })
     server.on('error', () => {})
     servers.push(server)
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -36,5 +36,6 @@ describe('SSH transport policy', () => {
     expect(observed).toMatch(/^SHA256:/u)
     await store.saveHost({ ...saved, knownHostFingerprint: observed })
     await expect(testSshHost(store, saved.id)).resolves.toMatchObject({ hostId: saved.id, fingerprint: observed })
+    await expect(executeSshCommand(store, saved.id, 'printf ok')).resolves.toMatchObject({ hostId: saved.id, exitCode: 0, stdout: 'stdout: printf ok', stderr: 'stderr', truncated: false })
   })
 })
