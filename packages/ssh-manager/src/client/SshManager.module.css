@@ -168,13 +168,6 @@ i[data-state=connecting] { background: var(--dsw-alias-state-warning); }
 .description p { margin: 6px 0; color: var(--dsw-alias-label-secondary); }
 .tags { display: flex; flex-wrap: wrap; gap: 5px; }
 .tags span { padding: 2px 6px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 4px; color: var(--dsw-alias-label-secondary); font-size: 11px; }
-.commandPane { padding-top: 12px; }
-.commandPane > header { display: flex; align-items: center; gap: 7px; min-height: 30px; }
-.commandPane > header span { margin-left: auto; color: var(--dsw-alias-label-tertiary); font-size: 11px; }
-.commandPane > div { display: flex; gap: 6px; }
-.commandPane input { flex: 1; min-width: 0; height: 32px; padding: 0 9px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 4px; outline: 0; background: var(--dsw-alias-bg-base); color: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.commandPane pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 4px; background: var(--dsw-alias-bg-layer-1); white-space: pre-wrap; }
-
 .primary, .pathEditor button, .dialog footer button {
   display: inline-flex;
   align-items: center;
@@ -304,6 +297,11 @@ i[data-state=connecting] { background: var(--dsw-alias-state-warning); }
   .pathEditor { min-height: 34px; padding-top: 2px; padding-bottom: 2px; }
   .dialog > header { min-height: 42px; }
   .form { gap: 8px; padding: 9px 12px; }
+}
+
+@container (min-width: 471px) {
+  .workspace[data-inventory=true] { grid-template-columns: clamp(190px, 26%, 280px) minmax(0, 1fr); }
+  .inventory[data-overlay=true] { position: static; inset: auto; width: auto; box-shadow: none; }
 }
 
 @container (max-width: 760px) {

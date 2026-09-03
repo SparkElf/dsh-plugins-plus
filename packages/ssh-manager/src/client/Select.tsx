@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { VscCheck, VscChevronDown } from 'react-icons/vsc'
+import { useT } from './i18n.tsx'
 import css from './SshManager.module.css'
 
 export interface SelectOption {
@@ -27,7 +28,8 @@ interface SelectProps {
   disabled?: boolean
 }
 
-export function Select({ value, options, onChange, label, placeholder = 'Select', disabled = false }: SelectProps) {
+export function Select({ value, options, onChange, label, placeholder, disabled = false }: SelectProps) {
+  const t = useT()
   const id = useId()
   const root = useRef<HTMLDivElement | null>(null)
   const button = useRef<HTMLButtonElement | null>(null)
@@ -84,7 +86,7 @@ export function Select({ value, options, onChange, label, placeholder = 'Select'
       onClick={() => { setOpen(current => !current) }}
       onKeyDown={onKeyDown}
     >
-      <span data-placeholder={selected === undefined}>{selected?.label ?? placeholder}</span>
+      <span data-placeholder={selected === undefined}>{selected?.label ?? placeholder ?? t('select.placeholder')}</span>
       <VscChevronDown aria-hidden="true" />
     </button>
     {open && <div id={id} className={css.selectMenu} role="listbox" aria-label={label} aria-activedescendant={activeIndex >= 0 ? id + '-' + activeIndex.toString() : undefined}>

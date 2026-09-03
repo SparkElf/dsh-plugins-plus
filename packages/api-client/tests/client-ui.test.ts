@@ -1,8 +1,10 @@
 import { createElement } from 'react'
+import type { Context } from '@deepseek-ai/cordis'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ApiRequest, ApiResponse } from '../src/types.ts'
 import { filterSelectOptions, Select } from '../src/client/Dropdown.tsx'
+import { I18nProvider, translate } from '../src/client/i18n.tsx'
 import { cloneRequest, formatResponseBody, requestFingerprint, responseCookies } from '../src/client/model.ts'
 
 const request: ApiRequest = {
@@ -56,10 +58,13 @@ describe('Select', () => {
   })
 
   it('renders an accessible combobox trigger with the selected label', () => {
-    const markup = renderToStaticMarkup(createElement(Select, { label: 'Environment', value: 'prod', options, onChange: () => undefined }))
+    const ctx = { locale: { getSnapshot: () => ({ active: 'en-US' }), subscribe: () => () => undefined } } as unknown as Context
+    const markup = renderToStaticMarkup(createElement(I18nProvider, { ctx, children: createElement(Select, { label: 'Environment', value: 'prod', options, onChange: () => undefined }) }))
     expect(markup).toContain('role="combobox"')
     expect(markup).toContain('aria-label="Environment"')
     expect(markup).toContain('aria-expanded="false"')
     expect(markup).toContain('Production')
+    const zh = { locale: { getSnapshot: () => ({ active: 'zh-CN' }), subscribe: () => () => undefined } } as unknown as Context
+    expect(translate(zh, 'select.search')).toBe('搜索')
   })
 })
