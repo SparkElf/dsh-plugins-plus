@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 import { VscCheck, VscChevronDown, VscKebabVertical, VscSearch } from 'react-icons/vsc'
+import { useT } from './i18n.tsx'
 import css from './Dropdown.module.css'
 
 export interface SelectOption<T extends string = string> {
@@ -28,7 +29,8 @@ interface SelectProps<T extends string> {
   renderValue?: (option: SelectOption<T> | undefined) => ReactNode
 }
 
-export function Select<T extends string>({ value, options, onChange, label, className, disabled, searchable, placeholder = 'Select', renderValue }: SelectProps<T>) {
+export function Select<T extends string>({ value, options, onChange, label, className, disabled, searchable, placeholder, renderValue }: SelectProps<T>) {
+  const t = useT()
   const id = useId()
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -107,12 +109,12 @@ export function Select<T extends string>({ value, options, onChange, label, clas
         }
       }}
     >
-      <span>{renderValue ? renderValue(selected) : selected?.label ?? placeholder}</span><VscChevronDown aria-hidden="true" />
+      <span>{renderValue ? renderValue(selected) : selected?.label ?? placeholder ?? t('select.default')}</span><VscChevronDown aria-hidden="true" />
     </button>
     {open && <div className={css.popover}>
-      {canSearch && <label className={css.search}><VscSearch aria-hidden="true" /><input ref={searchRef} value={query} onChange={event => { setQuery(event.target.value) }} onKeyDown={onMenuKeyDown} placeholder="Search" aria-label={'Search ' + label} /></label>}
+      {canSearch && <label className={css.search}><VscSearch aria-hidden="true" /><input ref={searchRef} value={query} onChange={event => { setQuery(event.target.value) }} onKeyDown={onMenuKeyDown} placeholder={t('select.search')} aria-label={t('select.searchLabel', { label })} /></label>}
       <div ref={listRef} id={id} className={css.listbox} role="listbox" tabIndex={canSearch ? -1 : 0} aria-label={label} aria-activedescendant={filtered[active] === undefined ? undefined : id + '-' + active} onKeyDown={onMenuKeyDown}>
-        {filtered.length === 0 && <div className={css.noResults}>No results</div>}
+        {filtered.length === 0 && <div className={css.noResults}>{t('select.noResults')}</div>}
         {filtered.map((option, index) => <div
           id={id + '-' + index}
           key={option.value}

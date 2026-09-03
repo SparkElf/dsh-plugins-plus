@@ -42,6 +42,7 @@ import type {
 import { loadSshState, sshApi } from './api.ts'
 import { formatBytes, joinedPath, parentPath, pathBreadcrumbs } from './model.ts'
 import { Select, type SelectOption } from './Select.tsx'
+import { useT, type TranslationKey } from './i18n.tsx'
 import { TerminalPane } from './TerminalPane.tsx'
 import css from './SshManager.module.css'
 
@@ -51,22 +52,39 @@ type WorkspaceView = 'hosts' | 'terminal' | 'files' | 'tunnels'
 
 const EMPTY: SshManagerState = { clusters: [], hosts: [] }
 const ENVIRONMENTS: SshEnvironment[] = ['development', 'testing', 'staging', 'production', 'other']
-const ENVIRONMENT_OPTIONS: SelectOption[] = ENVIRONMENTS.map(value => ({ value, label: value[0]?.toUpperCase() + value.slice(1) }))
-const AUTH_OPTIONS: SelectOption[] = [
-  { value: 'password', label: 'Password', description: 'Stored in central credentials' },
-  { value: 'private-key', label: 'Private key', description: 'OpenSSH key and optional passphrase' },
-  { value: 'agent', label: 'SSH agent', description: 'Use the host SSH agent' },
+const ENVIRONMENT_LABELS: Record<SshEnvironment, TranslationKey> = {
+  development: 'environment.development',
+  testing: 'environment.testing',
+  staging: 'environment.staging',
+  production: 'environment.production',
+  other: 'environment.other',
+}
+const AUTH_OPTION_KEYS: Array<{ value: SshHost['authKind']; label: TranslationKey; description: TranslationKey }> = [
+  { value: 'password', label: 'auth.password', description: 'auth.passwordDescription' },
+  { value: 'private-key', label: 'auth.privateKey', description: 'auth.privateKeyDescription' },
+  { value: 'agent', label: 'auth.agent', description: 'auth.agentDescription' },
 ]
-const DIRECTION_OPTIONS: SelectOption[] = [
-  { value: 'local', label: 'Local', description: 'Listen locally and forward to remote' },
-  { value: 'remote', label: 'Remote', description: 'Listen remotely and forward to local' },
+const DIRECTION_OPTION_KEYS: Array<{ value: SshPortForwardRequest['direction']; label: TranslationKey; description: TranslationKey }> = [
+  { value: 'local', label: 'tunnels.local', description: 'tunnels.localDescription' },
+  { value: 'remote', label: 'tunnels.remote', description: 'tunnels.remoteDescription' },
 ]
-const VIEW_ITEMS: Array<{ id: WorkspaceView; label: string; icon: typeof VscTerminal }> = [
-  { id: 'hosts', label: 'Hosts', icon: VscServerEnvironment },
-  { id: 'terminal', label: 'Terminal', icon: VscTerminal },
-  { id: 'files', label: 'Files', icon: VscFiles },
-  { id: 'tunnels', label: 'Tunnels', icon: VscPlug },
+const VIEW_ITEMS: Array<{ id: WorkspaceView; label: TranslationKey; icon: typeof VscTerminal }> = [
+  { id: 'hosts', label: 'view.hosts', icon: VscServerEnvironment },
+  { id: 'terminal', label: 'view.terminal', icon: VscTerminal },
+  { id: 'files', label: 'view.files', icon: VscFiles },
+  { id: 'tunnels', label: 'view.tunnels', icon: VscPlug },
 ]
+const TERMINAL_STATE_LABELS: Record<SshTerminalSession['state'], TranslationKey> = {
+  connecting: 'terminal.state.connecting',
+  connected: 'terminal.state.connected',
+  disconnected: 'terminal.state.disconnected',
+  failed: 'terminal.state.failed',
+}
+const FORWARD_STATE_LABELS: Record<SshPortForward['state'], TranslationKey> = {
+  active: 'tunnels.state.active',
+  disconnected: 'tunnels.state.disconnected',
+  failed: 'tunnels.state.failed',
+}
 
 function emptyHost(): SshHost {
   return { id: '', name: '', description: '', tags: [], clusterId: null, environment: 'development', hostname: '', port: 22, username: '', authKind: 'password', credentialId: null, credentialConfigured: false, jumpHostId: null, knownHostFingerprint: null, keepAliveSeconds: 30 }
@@ -88,6 +106,7 @@ function IconButton({ label, children, ...props }: React.ButtonHTMLAttributes<HT
 }
 
 export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionId: string; visible: boolean }) {
+  const t = useT()
   const [state, setState] = useState(EMPTY)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -96,9 +115,6 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   const [clusterForm, setClusterForm] = useState<SshCluster | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null)
-  const [command, setCommand] = useState('')
-  const [commandOutput, setCommandOutput] = useState<string | null>(null)
-  const [runningCommand, setRunningCommand] = useState(false)
   const [terminals, setTerminals] = useState<SshTerminalSession[]>([])
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null)
   const [view, setView] = useState<WorkspaceView>('hosts')
@@ -119,8 +135,11 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   }, [search, state.hosts])
   const groups = useMemo(() => [...state.clusters.map(cluster => ({ cluster, hosts: filtered.filter(host => host.clusterId === cluster.id) })), { cluster: null, hosts: filtered.filter(host => host.clusterId === null) }], [filtered, state.clusters])
   const hostForwards = selected === null ? [] : forwards.filter(forward => forward.hostId === selected.id)
-  const clusterOptions = useMemo<SelectOption[]>(() => [{ value: '', label: 'Unclustered' }, ...state.clusters.map(cluster => ({ value: cluster.id, label: cluster.name }))], [state.clusters])
-  const jumpHostOptions = useMemo<SelectOption[]>(() => [{ value: '', label: 'None' }, ...state.hosts.filter(host => host.id !== hostForm?.id).map(host => ({ value: host.id, label: host.name, description: host.username + '@' + host.hostname }))], [hostForm?.id, state.hosts])
+  const environmentOptions = useMemo<SelectOption[]>(() => ENVIRONMENTS.map(value => ({ value, label: t(ENVIRONMENT_LABELS[value]) })), [t])
+  const authOptions = useMemo<SelectOption[]>(() => AUTH_OPTION_KEYS.map(option => ({ value: option.value, label: t(option.label), description: t(option.description) })), [t])
+  const directionOptions = useMemo<SelectOption[]>(() => DIRECTION_OPTION_KEYS.map(option => ({ value: option.value, label: t(option.label), description: t(option.description) })), [t])
+  const clusterOptions = useMemo<SelectOption[]>(() => [{ value: '', label: t('inventory.unclustered') }, ...state.clusters.map(cluster => ({ value: cluster.id, label: cluster.name }))], [state.clusters, t])
+  const jumpHostOptions = useMemo<SelectOption[]>(() => [{ value: '', label: t('host.none') }, ...state.hosts.filter(host => host.id !== hostForm?.id).map(host => ({ value: host.id, label: host.name, description: host.username + '@' + host.hostname }))], [hostForm?.id, state.hosts, t])
 
   const report = (failure: unknown): void => { setError(failure instanceof Error ? failure.message : String(failure)) }
   const refresh = async (): Promise<void> => {
@@ -176,28 +195,18 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     if (scope === undefined) return
     const input = (ctx as unknown as ClientServices).conversation.input.for(scope)
     const cluster = state.clusters.find(item => item.id === host.clusterId)
-    const reference = ['SSH host reference:', JSON.stringify({ id: host.id, name: host.name, description: host.description, tags: host.tags, cluster: cluster?.name ?? null, environment: host.environment, hostname: host.hostname, port: host.port, username: host.username, authKind: host.authKind, credentialConfigured: host.credentialConfigured, jumpHost: state.hosts.find(item => item.id === host.jumpHostId)?.name ?? null, knownHostFingerprint: host.knownHostFingerprint }, null, 2)].join('\n')
+    const reference = [t('conversation.hostReference'), JSON.stringify({ id: host.id, name: host.name, description: host.description, tags: host.tags, cluster: cluster?.name ?? null, environment: host.environment, hostname: host.hostname, port: host.port, username: host.username, authKind: host.authKind, credentialConfigured: host.credentialConfigured, jumpHost: state.hosts.find(item => item.id === host.jumpHostId)?.name ?? null, knownHostFingerprint: host.knownHostFingerprint }, null, 2)].join('\n')
     const current = input.state.getSnapshot().draft
     input.setDraft(current === '' ? reference : current + '\n\n' + reference)
   }
 
   const testConnection = async (host: SshHost): Promise<void> => {
     try {
-      setConnectionStatus('Testing connection')
+      setConnectionStatus(t('host.connectionTesting'))
       const result = await sshApi<{ latencyMs: number; fingerprint: string }>('hosts.test', { hostId: host.id })
-      setConnectionStatus('Connected in ' + result.latencyMs.toString() + ' ms · ' + result.fingerprint)
+      setConnectionStatus(t('host.connectionConnected', { latency: result.latencyMs, fingerprint: result.fingerprint }))
       setError(null)
     } catch (failure) { setConnectionStatus(null); report(failure) }
-  }
-
-  const runCommand = async (host: SshHost): Promise<void> => {
-    if (command.trim() === '') return
-    try {
-      setRunningCommand(true)
-      const result = await sshApi<{ exitCode: number | null; signal: string | null; stdout: string; stderr: string; durationMs: number; truncated: boolean }>('hosts.execute', { hostId: host.id, command, timeoutMs: 60_000 })
-      setCommandOutput([result.stdout, result.stderr].filter(Boolean).join(String.fromCharCode(10)) + String.fromCharCode(10) + '[exit ' + String(result.exitCode) + ' · ' + result.durationMs.toString() + ' ms' + (result.truncated ? ' · truncated' : '') + ']')
-      setError(null)
-    } catch (failure) { report(failure) } finally { setRunningCommand(false) }
   }
 
   const openTerminal = async (host: SshHost): Promise<void> => {
@@ -206,7 +215,6 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
       setTerminals(result.terminals)
       setActiveTerminalId(result.terminal.id)
       setView('terminal')
-      setInventoryOpen(false)
       setError(null)
     } catch (failure) { report(failure) }
   }
@@ -301,15 +309,15 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     })
   }
 
-  const renderInventory = () => <aside className={css.inventory} aria-label="SSH hosts" data-overlay={view !== 'hosts'}>
+  const renderInventory = () => <aside className={css.inventory} aria-label={t('inventory.label')} data-overlay={view !== 'hosts'}>
     <header className={css.inventoryHeader}>
-      <strong>Host explorer</strong>
+      <strong>{t('inventory.title')}</strong>
       <span>{filtered.length}</span>
-      <IconButton label="Add cluster" onClick={() => { setClusterForm({ id: '', name: '', description: '', tags: [], hostIds: [] }) }}><VscFolder /></IconButton>
-      <IconButton label="Add host" onClick={() => { setHostForm(emptyHost()); setCredential({}) }}><VscAdd /></IconButton>
-      {view !== 'hosts' && <IconButton label="Close host explorer" onClick={() => { setInventoryOpen(false) }}><VscClose /></IconButton>}
+      <IconButton label={t('inventory.addCluster')} onClick={() => { setClusterForm({ id: '', name: '', description: '', tags: [], hostIds: [] }) }}><VscFolder /></IconButton>
+      <IconButton label={t('inventory.addHost')} onClick={() => { setHostForm(emptyHost()); setCredential({}) }}><VscAdd /></IconButton>
+      {view !== 'hosts' && <IconButton label={t('inventory.close')} onClick={() => { setInventoryOpen(false) }}><VscClose /></IconButton>}
     </header>
-    <label className={css.search}><VscSearch aria-hidden="true" /><input value={search} onChange={event => { setSearch(event.target.value) }} placeholder="Search hosts" aria-label="Search hosts" /></label>
+    <label className={css.search}><VscSearch aria-hidden="true" /><input value={search} onChange={event => { setSearch(event.target.value) }} placeholder={t('inventory.search')} aria-label={t('inventory.search')} /></label>
     <div className={css.tree}>
       {groups.map(group => {
         const key = group.cluster?.id ?? 'unclustered'
@@ -320,10 +328,10 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
             <button type="button" className={css.groupToggle} aria-expanded={!collapsed} onClick={() => { toggleGroup(key) }}>
               {collapsed ? <VscChevronRight /> : <VscChevronDown />}
               {collapsed ? <VscFolder /> : <VscFolderOpened />}
-              <span>{group.cluster?.name ?? 'Unclustered'}</span>
+              <span>{group.cluster?.name ?? t('inventory.unclustered')}</span>
               <small>{group.hosts.length}</small>
             </button>
-            {group.cluster !== null && <IconButton label={'Delete cluster ' + group.cluster.name} onClick={() => { void sshApi<SshManagerState>('clusters.delete', { clusterId: group.cluster?.id }).then(setState).catch(report) }}><VscTrash /></IconButton>}
+            {group.cluster !== null && <IconButton label={t('inventory.deleteCluster', { name: group.cluster.name })} onClick={() => { void sshApi<SshManagerState>('clusters.delete', { clusterId: group.cluster?.id }).then(setState).catch(report) }}><VscTrash /></IconButton>}
           </div>
           {!collapsed && group.hosts.map(host => <button
             type="button"
@@ -335,65 +343,60 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
           >
             <VscServerEnvironment aria-hidden="true" />
             <span><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span>
-            <i data-ready={host.credentialConfigured} title={host.credentialConfigured ? 'Credential configured' : 'Credential missing'} />
+            <i data-ready={host.credentialConfigured} title={t(host.credentialConfigured ? 'inventory.credentialConfigured' : 'inventory.credentialMissing')} />
           </button>)}
         </section>
       })}
-      {filtered.length === 0 && <div className={css.emptySmall}>No matching hosts</div>}
+      {filtered.length === 0 && <div className={css.emptySmall}>{t('inventory.empty')}</div>}
     </div>
   </aside>
 
   const renderHostHeader = (title: string) => <header className={css.workHeader}>
-    <div className={css.workTitle}><VscServerEnvironment /><span><strong>{title}</strong><small>{selected === null ? 'Choose a host from the explorer' : selected.username + '@' + selected.hostname + ':' + selected.port.toString()}</small></span></div>
+    <div className={css.workTitle}><VscServerEnvironment /><span><strong>{title}</strong><small>{selected === null ? t('host.chooseFromExplorer') : selected.username + '@' + selected.hostname + ':' + selected.port.toString()}</small></span></div>
     {selected !== null && <div className={css.workActions}>
-      <IconButton label="Open new terminal" onClick={() => { void openTerminal(selected) }}><VscTerminal /></IconButton>
-      <IconButton label="Test connection" onClick={() => { void testConnection(selected) }}><VscPulse /></IconButton>
-      <IconButton label="Send host to conversation" onClick={() => { sendToConversation(selected) }}><VscComment /></IconButton>
-      <IconButton label="Edit host" onClick={() => { setHostForm({ ...selected }); setCredential({}) }}><VscEdit /></IconButton>
-      <IconButton label="Delete host" onClick={() => { void sshApi<SshManagerState>('hosts.delete', { hostId: selected.id }).then(next => { setState(next); setSelectedId(next.hosts[0]?.id ?? null) }).catch(report) }}><VscTrash /></IconButton>
+      <IconButton label={t('host.openTerminal')} onClick={() => { void openTerminal(selected) }}><VscTerminal /></IconButton>
+      <IconButton label={t('host.testConnection')} onClick={() => { void testConnection(selected) }}><VscPulse /></IconButton>
+      <IconButton label={t('host.sendToConversation')} onClick={() => { sendToConversation(selected) }}><VscComment /></IconButton>
+      <IconButton label={t('host.edit')} onClick={() => { setHostForm({ ...selected }); setCredential({}) }}><VscEdit /></IconButton>
+      <IconButton label={t('host.delete')} onClick={() => { void sshApi<SshManagerState>('hosts.delete', { hostId: selected.id }).then(next => { setState(next); setSelectedId(next.hosts[0]?.id ?? null) }).catch(report) }}><VscTrash /></IconButton>
     </div>}
   </header>
 
-  const renderOverview = () => <section className={css.workView} aria-label="Host overview">
-    {renderHostHeader(selected?.name ?? 'Host overview')}
-    {selected === null ? <div className={css.empty}><VscServerEnvironment /><strong>Select a host</strong><span>Use the host explorer to inspect connection details.</span></div> : <div className={css.scrollBody}>
+  const renderOverview = () => <section className={css.workView} aria-label={t('host.overviewLabel')}>
+    {renderHostHeader(selected?.name ?? t('host.overviewTitle'))}
+    {selected === null ? <div className={css.empty}><VscServerEnvironment /><strong>{t('host.select')}</strong><span>{t('host.selectDescription')}</span></div> : <div className={css.scrollBody}>
       {connectionStatus !== null && <div className={css.connectionStatus}><VscPulse />{connectionStatus}</div>}
       <dl className={css.hostFacts}>
-        <div><dt>Address</dt><dd>{selected.hostname}:{selected.port}</dd></div>
-        <div><dt>User</dt><dd>{selected.username}</dd></div>
-        <div><dt>Environment</dt><dd><span className={css.environment} data-environment={selected.environment}>{selected.environment}</span></dd></div>
-        <div><dt>Cluster</dt><dd>{state.clusters.find(cluster => cluster.id === selected.clusterId)?.name ?? 'Unclustered'}</dd></div>
-        <div><dt>Authentication</dt><dd><VscKey />{selected.authKind} · {selected.credentialConfigured ? 'configured' : 'not configured'}</dd></div>
-        <div><dt>Jump host</dt><dd>{state.hosts.find(host => host.id === selected.jumpHostId)?.name ?? 'None'}</dd></div>
-        <div><dt>Keepalive</dt><dd>{selected.keepAliveSeconds === 0 ? 'Disabled' : selected.keepAliveSeconds.toString() + ' seconds'}</dd></div>
-        <div><dt>Fingerprint</dt><dd>{selected.knownHostFingerprint ?? 'Not pinned'}</dd></div>
+        <div><dt>{t('host.address')}</dt><dd>{selected.hostname}:{selected.port}</dd></div>
+        <div><dt>{t('host.user')}</dt><dd>{selected.username}</dd></div>
+        <div><dt>{t('host.environment')}</dt><dd><span className={css.environment} data-environment={selected.environment}>{t(ENVIRONMENT_LABELS[selected.environment])}</span></dd></div>
+        <div><dt>{t('host.cluster')}</dt><dd>{state.clusters.find(cluster => cluster.id === selected.clusterId)?.name ?? t('inventory.unclustered')}</dd></div>
+        <div><dt>{t('host.authentication')}</dt><dd><VscKey />{t(selected.authKind === 'password' ? 'auth.password' : selected.authKind === 'private-key' ? 'auth.privateKey' : 'auth.agent')} · {t(selected.credentialConfigured ? 'host.configured' : 'host.notConfigured')}</dd></div>
+        <div><dt>{t('host.jumpHost')}</dt><dd>{state.hosts.find(host => host.id === selected.jumpHostId)?.name ?? t('host.none')}</dd></div>
+        <div><dt>{t('host.keepalive')}</dt><dd>{selected.keepAliveSeconds === 0 ? t('host.disabled') : t('host.seconds', { count: selected.keepAliveSeconds })}</dd></div>
+        <div><dt>{t('host.fingerprint')}</dt><dd>{selected.knownHostFingerprint ?? t('host.notPinned')}</dd></div>
       </dl>
-      <div className={css.description}><strong>Description</strong><p>{selected.description || 'No description'}</p>{selected.tags.length > 0 && <div className={css.tags}>{selected.tags.map(tag => <span key={tag}>{tag}</span>)}</div>}</div>
-      <section className={css.commandPane}>
-        <header><VscTerminal /><strong>Run one command</strong><span>60 second timeout</span></header>
-        <div><input aria-label="SSH command" value={command} onChange={event => { setCommand(event.target.value) }} onKeyDown={event => { if (event.key === 'Enter') void runCommand(selected) }} placeholder="Enter a command" /><button type="button" className={css.primary} disabled={runningCommand || command.trim() === ''} onClick={() => { void runCommand(selected) }}>{runningCommand ? 'Running' : 'Run'}</button></div>
-        {commandOutput !== null && <pre>{commandOutput}</pre>}
-      </section>
+      <div className={css.description}><strong>{t('host.description')}</strong><p>{selected.description || t('host.noDescription')}</p>{selected.tags.length > 0 && <div className={css.tags}>{selected.tags.map(tag => <span key={tag}>{tag}</span>)}</div>}</div>
     </div>}
   </section>
 
-  const renderTerminal = () => <section className={css.terminalWorkspace} aria-label="Terminal workspace">
+  const renderTerminal = () => <section className={css.terminalWorkspace} aria-label={t('terminal.workspace')}>
     <header className={css.terminalBar}>
-      <div className={css.terminalTabs} role="tablist" aria-label="Terminal sessions">
+      <div className={css.terminalTabs} role="tablist" aria-label={t('terminal.sessions')}>
         {terminals.map(terminal => <div className={css.terminalTab} data-active={terminal.id === activeTerminalId} key={terminal.id}>
           <button type="button" role="tab" aria-selected={terminal.id === activeTerminalId} onClick={() => { setActiveTerminalId(terminal.id) }}><VscTerminal /><span>{terminal.title}</span><i data-state={terminal.state} /></button>
-          <IconButton label={'Close ' + terminal.title} onClick={() => { void closeTerminal(terminal.id) }}><VscClose /></IconButton>
+          <IconButton label={t('terminal.closeNamed', { name: terminal.title })} onClick={() => { void closeTerminal(terminal.id) }}><VscClose /></IconButton>
         </div>)}
       </div>
       <div className={css.terminalActions}>
-        <IconButton label="New terminal" disabled={selected === null} onClick={() => { if (selected !== null) void openTerminal(selected) }}><VscAdd /></IconButton>
-        <IconButton label="Reconnect terminal" disabled={activeTerminal === null} onClick={() => { if (activeTerminal !== null) void reconnectTerminal(activeTerminal.id) }}><VscRefresh /></IconButton>
-        <IconButton label="Close active terminal" disabled={activeTerminal === null} onClick={() => { if (activeTerminal !== null) void closeTerminal(activeTerminal.id) }}><VscDebugDisconnect /></IconButton>
+        <IconButton label={t('terminal.new')} disabled={selected === null} onClick={() => { if (selected !== null) void openTerminal(selected) }}><VscAdd /></IconButton>
+        <IconButton label={t('terminal.reconnect')} disabled={activeTerminal === null} onClick={() => { if (activeTerminal !== null) void reconnectTerminal(activeTerminal.id) }}><VscRefresh /></IconButton>
+        <IconButton label={t('terminal.closeActive')} disabled={activeTerminal === null} onClick={() => { if (activeTerminal !== null) void closeTerminal(activeTerminal.id) }}><VscDebugDisconnect /></IconButton>
       </div>
     </header>
     <div className={css.terminalStage}>
       {terminals.map(terminal => <TerminalPane key={terminal.id} sessionId={sessionId} terminal={terminal} active={terminal.id === activeTerminalId} onSnapshot={updateTerminal} />)}
-      {activeTerminal === null && <div className={css.empty}><VscTerminal /><strong>No terminal session</strong><span>{selected === null ? 'Select a host, then create a terminal.' : 'Open a shell on ' + selected.name + '.'}</span>{selected !== null && <button type="button" className={css.primary} onClick={() => { void openTerminal(selected) }}><VscAdd />New terminal</button>}</div>}
+      {activeTerminal === null && <div className={css.empty}><VscTerminal /><strong>{t('terminal.empty')}</strong><span>{selected === null ? t('terminal.selectHost') : t('terminal.openOn', { name: selected.name })}</span>{selected !== null && <button type="button" className={css.primary} onClick={() => { void openTerminal(selected) }}><VscAdd />{t('terminal.new')}</button>}</div>}
     </div>
     <footer className={css.statusBar}>
       <span><i data-state={activeTerminal?.state ?? 'disconnected'} />{activeTerminal?.state ?? 'No session'}</span>
@@ -404,111 +407,111 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     </footer>
   </section>
 
-  const renderFiles = () => <section className={css.workView} aria-label="SFTP files">
-    {renderHostHeader('Files')}
-    {selected === null ? <div className={css.empty}><VscFiles /><strong>Select a host</strong><span>Remote files are scoped to the selected connection.</span></div> : <div className={css.fileWorkbench}>
+  const renderFiles = () => <section className={css.workView} aria-label={t('files.label')}>
+    {renderHostHeader(t('view.files'))}
+    {selected === null ? <div className={css.empty}><VscFiles /><strong>{t('host.select')}</strong><span>{t('files.selectDescription')}</span></div> : <div className={css.fileWorkbench}>
       <div className={css.fileToolbar}>
-        <IconButton label="Parent directory" disabled={filePath === '.' || filePath === '/'} onClick={() => { void browse(selected, parentPath(filePath)) }}><VscArrowUp /></IconButton>
-        <nav className={css.breadcrumbs} aria-label="Remote path">{pathBreadcrumbs(filePath).map((crumb, index, crumbs) => <span key={crumb.path}><button type="button" disabled={index === crumbs.length - 1} onClick={() => { void browse(selected, crumb.path) }}>{crumb.label}</button>{index < crumbs.length - 1 && <VscChevronRight />}</span>)}</nav>
-        <IconButton label="Refresh files" disabled={fileBusy} onClick={() => { void browse(selected) }}><VscRefresh /></IconButton>
-        <IconButton label="Upload file" disabled={fileBusy} onClick={() => { uploadInput.current?.click() }}><VscCloudUpload /></IconButton>
+        <IconButton label={t('files.parentDirectory')} disabled={filePath === '.' || filePath === '/'} onClick={() => { void browse(selected, parentPath(filePath)) }}><VscArrowUp /></IconButton>
+        <nav className={css.breadcrumbs} aria-label={t('files.remotePath')}>{pathBreadcrumbs(filePath).map((crumb, index, crumbs) => <span key={crumb.path}><button type="button" disabled={index === crumbs.length - 1} onClick={() => { void browse(selected, crumb.path) }}>{crumb.label}</button>{index < crumbs.length - 1 && <VscChevronRight />}</span>)}</nav>
+        <IconButton label={t('files.refresh')} disabled={fileBusy} onClick={() => { void browse(selected) }}><VscRefresh /></IconButton>
+        <IconButton label={t('files.upload')} disabled={fileBusy} onClick={() => { uploadInput.current?.click() }}><VscCloudUpload /></IconButton>
         <input ref={uploadInput} className={css.hiddenInput} type="file" onChange={event => { const file = event.target.files?.[0]; if (file !== undefined) void upload(selected, file) }} />
       </div>
-      <div className={css.pathEditor}><span>Path</span><input aria-label="Remote path" value={filePath} onChange={event => { setFilePath(event.target.value) }} onKeyDown={event => { if (event.key === 'Enter') void browse(selected) }} /><button type="button" disabled={fileBusy} onClick={() => { void browse(selected) }}>Go</button></div>
+      <div className={css.pathEditor}><span>{t('files.path')}</span><input aria-label={t('files.remotePath')} value={filePath} onChange={event => { setFilePath(event.target.value) }} onKeyDown={event => { if (event.key === 'Enter') void browse(selected) }} /><button type="button" disabled={fileBusy} onClick={() => { void browse(selected) }}>{t('files.go')}</button></div>
       <div className={css.tableScroll}>
         <table className={css.fileTable}>
-          <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th><span className={css.srOnly}>Actions</span></th></tr></thead>
+          <thead><tr><th>{t('files.name')}</th><th>{t('files.size')}</th><th>{t('files.modified')}</th><th><span className={css.srOnly}>{t('common.actions')}</span></th></tr></thead>
           <tbody>{files?.entries.map(entry => <tr key={entry.path}>
             <td><button type="button" className={css.fileName} disabled={entry.type !== 'directory'} onClick={() => { if (entry.type === 'directory') void browse(selected, entry.path) }}>{entry.type === 'directory' ? <VscFolder /> : <VscFile />}<span>{entry.name}</span></button></td>
-            <td>{entry.type === 'directory' ? 'Folder' : formatBytes(entry.size)}</td>
+            <td>{entry.type === 'directory' ? t('files.folder') : formatBytes(entry.size)}</td>
             <td><time>{new Date(entry.modifiedAt).toLocaleString()}</time></td>
-            <td>{entry.type === 'file' && <IconButton label={'Download ' + entry.name} disabled={fileBusy} onClick={() => { void download(selected, entry.path) }}><VscCloudDownload /></IconButton>}</td>
+            <td>{entry.type === 'file' && <IconButton label={t('files.download') + ' ' + entry.name} disabled={fileBusy} onClick={() => { void download(selected, entry.path) }}><VscCloudDownload /></IconButton>}</td>
           </tr>)}</tbody>
         </table>
-        {files === null && <div className={css.emptySmall}>{fileBusy ? 'Loading files' : 'Open a remote path'}</div>}
-        {files !== null && files.entries.length === 0 && <div className={css.emptySmall}>Directory is empty</div>}
+        {files === null && <div className={css.emptySmall}>{fileBusy ? t('files.loading') : t('files.openPath')}</div>}
+        {files !== null && files.entries.length === 0 && <div className={css.emptySmall}>{t('files.empty')}</div>}
       </div>
     </div>}
   </section>
 
-  const renderTunnels = () => <section className={css.workView} aria-label="SSH tunnels">
-    {renderHostHeader('Tunnels')}
-    {selected === null || forwardForm === null ? <div className={css.empty}><VscPlug /><strong>Select a host</strong><span>Port forwards are scoped to the selected connection.</span></div> : <div className={css.tunnelWorkbench}>
-      <section className={css.forwardComposer} aria-label="New tunnel">
-        <header><strong>New tunnel</strong><span>Forward TCP traffic through {selected.name}</span></header>
+  const renderTunnels = () => <section className={css.workView} aria-label={t('tunnels.label')}>
+    {renderHostHeader(t('view.tunnels'))}
+    {selected === null || forwardForm === null ? <div className={css.empty}><VscPlug /><strong>{t('host.select')}</strong><span>{t('tunnels.selectDescription')}</span></div> : <div className={css.tunnelWorkbench}>
+      <section className={css.forwardComposer} aria-label={t('tunnels.new')}>
+        <header><strong>{t('tunnels.new')}</strong><span>{t('tunnels.forwardThrough', { name: selected.name })}</span></header>
         <div className={css.forwardForm}>
-          <label>Direction<Select label="Tunnel direction" value={forwardForm.direction} options={DIRECTION_OPTIONS} onChange={value => { setForwardForm({ ...forwardForm, direction: value as SshPortForwardRequest['direction'] }) }} /></label>
-          <label>Bind host<input value={forwardForm.bindHost} onChange={event => { setForwardForm({ ...forwardForm, bindHost: event.target.value }) }} /></label>
-          <label>Bind port<input type="number" min={0} max={65535} value={forwardForm.bindPort} onChange={event => { setForwardForm({ ...forwardForm, bindPort: Number(event.target.value) }) }} /></label>
-          <span className={css.forwardArrow}>to</span>
-          <label>Target host<input value={forwardForm.targetHost} onChange={event => { setForwardForm({ ...forwardForm, targetHost: event.target.value }) }} /></label>
-          <label>Target port<input type="number" min={1} max={65535} value={forwardForm.targetPort} onChange={event => { setForwardForm({ ...forwardForm, targetPort: Number(event.target.value) }) }} /></label>
-          <button type="button" className={css.primary} title="Open port forward" onClick={() => { void openForward() }}><VscAdd />Open</button>
+          <label>{t('tunnels.direction')}<Select label={t('tunnels.direction')} value={forwardForm.direction} options={directionOptions} onChange={value => { setForwardForm({ ...forwardForm, direction: value as SshPortForwardRequest['direction'] }) }} /></label>
+          <label>{t('tunnels.bindHost')}<input value={forwardForm.bindHost} onChange={event => { setForwardForm({ ...forwardForm, bindHost: event.target.value }) }} /></label>
+          <label>{t('tunnels.bindPort')}<input type="number" min={0} max={65535} value={forwardForm.bindPort} onChange={event => { setForwardForm({ ...forwardForm, bindPort: Number(event.target.value) }) }} /></label>
+          <span className={css.forwardArrow}>{t('tunnels.to')}</span>
+          <label>{t('tunnels.targetHost')}<input value={forwardForm.targetHost} onChange={event => { setForwardForm({ ...forwardForm, targetHost: event.target.value }) }} /></label>
+          <label>{t('tunnels.targetPort')}<input type="number" min={1} max={65535} value={forwardForm.targetPort} onChange={event => { setForwardForm({ ...forwardForm, targetPort: Number(event.target.value) }) }} /></label>
+          <button type="button" className={css.primary} title={t('tunnels.openTitle')} onClick={() => { void openForward() }}><VscAdd />{t('tunnels.open')}</button>
         </div>
       </section>
       <div className={css.tableScroll}>
         <table className={css.tunnelTable}>
-          <thead><tr><th>Direction</th><th>Listen address</th><th>Target</th><th>Status</th><th><span className={css.srOnly}>Actions</span></th></tr></thead>
+          <thead><tr><th>{t('tunnels.direction')}</th><th>{t('tunnels.listenAddress')}</th><th>{t('tunnels.target')}</th><th>{t('tunnels.status')}</th><th><span className={css.srOnly}>{t('common.actions')}</span></th></tr></thead>
           <tbody>{hostForwards.map(forward => <tr key={forward.id}>
-            <td><span className={css.direction}><VscPlug />{forward.direction === 'local' ? 'Local' : 'Remote'}</span></td>
+            <td><span className={css.direction}><VscPlug />{forward.direction === 'local' ? t('tunnels.local') : t('tunnels.remote')}</span></td>
             <td>{forward.bindHost}:{forward.bindPort}</td>
             <td>{forward.targetHost}:{forward.targetPort}</td>
-            <td><span className={css.forwardState} data-state={forward.state}><i />{forward.state}</span>{forward.error !== undefined && <small className={css.danger}>{forward.error}</small>}</td>
-            <td><div className={css.rowActions}>{forward.state !== 'active' && <IconButton label="Reconnect tunnel" onClick={() => { void reconnectForward(forward.id) }}><VscRefresh /></IconButton>}<IconButton label="Close tunnel" onClick={() => { void closeForward(forward.id) }}><VscDebugDisconnect /></IconButton></div></td>
+            <td><span className={css.forwardState} data-state={forward.state}><i />{t(('tunnels.state.' + forward.state) as TranslationKey)}</span>{forward.error !== undefined && <small className={css.danger}>{forward.error}</small>}</td>
+            <td><div className={css.rowActions}>{forward.state !== 'active' && <IconButton label={t('tunnels.reconnect')} onClick={() => { void reconnectForward(forward.id) }}><VscRefresh /></IconButton>}<IconButton label={t('tunnels.close')} onClick={() => { void closeForward(forward.id) }}><VscDebugDisconnect /></IconButton></div></td>
           </tr>)}</tbody>
         </table>
-        {hostForwards.length === 0 && <div className={css.emptySmall}>No active tunnels for this host</div>}
+        {hostForwards.length === 0 && <div className={css.emptySmall}>{t('tunnels.empty')}</div>}
       </div>
     </div>}
   </section>
 
   return <div className={css.root} data-dsh-ssh-manager>
     <header className={css.toolbar}>
-      <div className={css.brand}><VscRemoteExplorer size={18} /><strong>SSH Manager</strong></div>
-      <nav className={css.viewSwitch} aria-label="SSH workspace view">{VIEW_ITEMS.map(item => {
+      <div className={css.brand}><VscRemoteExplorer size={18} /><strong>{t('app.title')}</strong></div>
+      <nav className={css.viewSwitch} aria-label={t('app.workspaceView')}>{VIEW_ITEMS.map(item => {
         const Icon = item.icon
-        return <button type="button" key={item.id} data-active={view === item.id} aria-pressed={view === item.id} onClick={() => { chooseView(item.id) }}><Icon /><span>{item.label}</span>{item.id === 'terminal' && terminals.length > 0 && <small>{terminals.length}</small>}</button>
+        return <button type="button" key={item.id} data-active={view === item.id} aria-pressed={view === item.id} onClick={() => { chooseView(item.id) }}><Icon /><span>{t(item.label)}</span>{item.id === 'terminal' && terminals.length > 0 && <small>{terminals.length}</small>}</button>
       })}</nav>
       <div className={css.globalActions}>
-        <IconButton label={inventoryOpen ? 'Hide host explorer' : 'Show host explorer'} aria-pressed={inventoryOpen} onClick={() => { setInventoryOpen(current => !current) }}><VscLayoutSidebarLeft /></IconButton>
-        <IconButton label="Add cluster" onClick={() => { setClusterForm({ id: '', name: '', description: '', tags: [], hostIds: [] }) }}><VscFolder /></IconButton>
-        <IconButton label="Add host" onClick={() => { setHostForm(emptyHost()); setCredential({}) }}><VscAdd /></IconButton>
+        <IconButton label={t(inventoryOpen ? 'app.hideExplorer' : 'app.showExplorer')} aria-pressed={inventoryOpen} onClick={() => { setInventoryOpen(current => !current) }}><VscLayoutSidebarLeft /></IconButton>
+        <IconButton label={t('inventory.addCluster')} onClick={() => { setClusterForm({ id: '', name: '', description: '', tags: [], hostIds: [] }) }}><VscFolder /></IconButton>
+        <IconButton label={t('inventory.addHost')} onClick={() => { setHostForm(emptyHost()); setCredential({}) }}><VscAdd /></IconButton>
       </div>
     </header>
-    {error !== null && <div className={css.error} role="alert"><VscInfo />{error}<IconButton label="Dismiss error" onClick={() => { setError(null) }}><VscClose /></IconButton></div>}
+    {error !== null && <div className={css.error} role="alert"><VscInfo />{error}<IconButton label={t('action.dismissError')} onClick={() => { setError(null) }}><VscClose /></IconButton></div>}
     <div className={css.workspace} data-inventory={inventoryOpen} data-overlay={view !== 'hosts'}>
       {inventoryOpen && renderInventory()}
       <main className={css.mainWorkspace}>{view === 'hosts' ? renderOverview() : view === 'terminal' ? renderTerminal() : view === 'files' ? renderFiles() : renderTunnels()}</main>
     </div>
 
     {hostForm !== null && <div className={css.backdrop}>
-      <div className={css.dialog} role="dialog" aria-modal="true" aria-label="SSH host">
-        <header><div><strong>{hostForm.id === '' ? 'Add host' : 'Edit host'}</strong><span>Connection secrets are stored in central credentials.</span></div><IconButton label="Close" onClick={() => { setHostForm(null); setCredential({}) }}><VscClose /></IconButton></header>
+      <div className={css.dialog} role="dialog" aria-modal="true" aria-label={t('dialog.host')}>
+        <header><div><strong>{t(hostForm.id === '' ? 'dialog.addHost' : 'dialog.editHost')}</strong><span>{t('dialog.hostSecrets')}</span></div><IconButton label={t('action.close')} onClick={() => { setHostForm(null); setCredential({}) }}><VscClose /></IconButton></header>
         <div className={css.form}>
-          <label>Name<input autoFocus value={hostForm.name} onChange={event => { setHostForm({ ...hostForm, name: event.target.value }) }} /></label>
-          <label>Hostname<input value={hostForm.hostname} onChange={event => { setHostForm({ ...hostForm, hostname: event.target.value }) }} /></label>
-          <label>Port<input type="number" min={1} max={65535} value={hostForm.port} onChange={event => { setHostForm({ ...hostForm, port: Number(event.target.value) }) }} /></label>
-          <label>User<input value={hostForm.username} onChange={event => { setHostForm({ ...hostForm, username: event.target.value }) }} /></label>
-          <label>Environment<Select label="Environment" value={hostForm.environment} options={ENVIRONMENT_OPTIONS} onChange={value => { setHostForm({ ...hostForm, environment: value as SshEnvironment }) }} /></label>
-          <label>Cluster<Select label="Cluster" value={hostForm.clusterId ?? ''} options={clusterOptions} onChange={value => { setHostForm({ ...hostForm, clusterId: value || null }) }} /></label>
-          <label>Authentication<Select label="Authentication" value={hostForm.authKind} options={AUTH_OPTIONS} onChange={value => { setHostForm({ ...hostForm, authKind: value as SshHost['authKind'] }); setCredential({}) }} /></label>
-          {hostForm.authKind === 'password' && <label>Password<input type="password" value={credential.password ?? ''} onChange={event => { setCredential({ password: event.target.value }) }} placeholder={hostForm.credentialConfigured ? 'Leave blank to keep current' : ''} /></label>}
-          {hostForm.authKind === 'private-key' && <><label className={css.full}>Private key<textarea value={credential.privateKey ?? ''} onChange={event => { setCredential({ ...credential, privateKey: event.target.value }) }} placeholder={hostForm.credentialConfigured ? 'Leave blank to keep current' : 'OpenSSH private key'} /></label><label>Passphrase<input type="password" value={credential.passphrase ?? ''} onChange={event => { setCredential({ ...credential, passphrase: event.target.value }) }} /></label></>}
-          <label>Jump host<Select label="Jump host" value={hostForm.jumpHostId ?? ''} options={jumpHostOptions} onChange={value => { setHostForm({ ...hostForm, jumpHostId: value || null }) }} /></label>
-          <label>Keepalive seconds<input type="number" min={0} value={hostForm.keepAliveSeconds} onChange={event => { setHostForm({ ...hostForm, keepAliveSeconds: Number(event.target.value) }) }} /></label>
-          <label className={css.full}>Known-host fingerprint<input value={hostForm.knownHostFingerprint ?? ''} onChange={event => { setHostForm({ ...hostForm, knownHostFingerprint: event.target.value || null }) }} placeholder="SHA256:..." /></label>
-          <label className={css.full}>Tags<input value={hostForm.tags.join(', ')} onChange={event => { setHostForm({ ...hostForm, tags: event.target.value.split(',').map(tag => tag.trim()).filter(Boolean) }) }} placeholder="web, production" /></label>
-          <label className={css.full}>Description<textarea value={hostForm.description} onChange={event => { setHostForm({ ...hostForm, description: event.target.value }) }} /></label>
+          <label>{t('field.name')}<input autoFocus value={hostForm.name} onChange={event => { setHostForm({ ...hostForm, name: event.target.value }) }} /></label>
+          <label>{t('field.hostname')}<input value={hostForm.hostname} onChange={event => { setHostForm({ ...hostForm, hostname: event.target.value }) }} /></label>
+          <label>{t('field.port')}<input type="number" min={1} max={65535} value={hostForm.port} onChange={event => { setHostForm({ ...hostForm, port: Number(event.target.value) }) }} /></label>
+          <label>{t('field.user')}<input value={hostForm.username} onChange={event => { setHostForm({ ...hostForm, username: event.target.value }) }} /></label>
+          <label>{t('field.environment')}<Select label={t('field.environment')} value={hostForm.environment} options={environmentOptions} onChange={value => { setHostForm({ ...hostForm, environment: value as SshEnvironment }) }} /></label>
+          <label>{t('field.cluster')}<Select label={t('field.cluster')} value={hostForm.clusterId ?? ''} options={clusterOptions} onChange={value => { setHostForm({ ...hostForm, clusterId: value || null }) }} /></label>
+          <label>{t('field.authentication')}<Select label={t('field.authentication')} value={hostForm.authKind} options={authOptions} onChange={value => { setHostForm({ ...hostForm, authKind: value as SshHost['authKind'] }); setCredential({}) }} /></label>
+          {hostForm.authKind === 'password' && <label>{t('field.password')}<input type="password" value={credential.password ?? ''} onChange={event => { setCredential({ password: event.target.value }) }} placeholder={hostForm.credentialConfigured ? t('field.keepCredential') : ''} /></label>}
+          {hostForm.authKind === 'private-key' && <><label className={css.full}>{t('field.privateKey')}<textarea value={credential.privateKey ?? ''} onChange={event => { setCredential({ ...credential, privateKey: event.target.value }) }} placeholder={hostForm.credentialConfigured ? t('field.keepCredential') : t('field.privateKeyPlaceholder')} /></label><label>{t('field.passphrase')}<input type="password" value={credential.passphrase ?? ''} onChange={event => { setCredential({ ...credential, passphrase: event.target.value }) }} /></label></>}
+          <label>{t('field.jumpHost')}<Select label={t('field.jumpHost')} value={hostForm.jumpHostId ?? ''} options={jumpHostOptions} onChange={value => { setHostForm({ ...hostForm, jumpHostId: value || null }) }} /></label>
+          <label>{t('field.keepaliveSeconds')}<input type="number" min={0} value={hostForm.keepAliveSeconds} onChange={event => { setHostForm({ ...hostForm, keepAliveSeconds: Number(event.target.value) }) }} /></label>
+          <label className={css.full}>{t('field.knownHostFingerprint')}<input value={hostForm.knownHostFingerprint ?? ''} onChange={event => { setHostForm({ ...hostForm, knownHostFingerprint: event.target.value || null }) }} placeholder={t('field.fingerprintPlaceholder')} /></label>
+          <label className={css.full}>{t('field.tags')}<input value={hostForm.tags.join(', ')} onChange={event => { setHostForm({ ...hostForm, tags: event.target.value.split(',').map(tag => tag.trim()).filter(Boolean) }) }} placeholder={t('field.tagsPlaceholder')} /></label>
+          <label className={css.full}>{t('field.description')}<textarea value={hostForm.description} onChange={event => { setHostForm({ ...hostForm, description: event.target.value }) }} /></label>
         </div>
-        <footer><button type="button" onClick={() => { setHostForm(null); setCredential({}) }}>Cancel</button><button type="button" className={css.primary} disabled={hostForm.name.trim() === '' || hostForm.hostname.trim() === '' || hostForm.username.trim() === ''} onClick={() => { void saveHost() }}>Save host</button></footer>
+        <footer><button type="button" onClick={() => { setHostForm(null); setCredential({}) }}>{t('action.cancel')}</button><button type="button" className={css.primary} disabled={hostForm.name.trim() === '' || hostForm.hostname.trim() === '' || hostForm.username.trim() === ''} onClick={() => { void saveHost() }}>{t('action.saveHost')}</button></footer>
       </div>
     </div>}
 
     {clusterForm !== null && <div className={css.backdrop}>
-      <div className={css.dialog} role="dialog" aria-modal="true" aria-label="SSH cluster">
-        <header><div><strong>Add cluster</strong><span>Group related hosts in the explorer.</span></div><IconButton label="Close" onClick={() => { setClusterForm(null) }}><VscClose /></IconButton></header>
-        <div className={css.form}><label className={css.full}>Name<input autoFocus value={clusterForm.name} onChange={event => { setClusterForm({ ...clusterForm, name: event.target.value }) }} /></label><label className={css.full}>Description<textarea value={clusterForm.description} onChange={event => { setClusterForm({ ...clusterForm, description: event.target.value }) }} /></label></div>
-        <footer><button type="button" onClick={() => { setClusterForm(null) }}>Cancel</button><button type="button" className={css.primary} disabled={clusterForm.name.trim() === ''} onClick={() => { void saveCluster() }}>Save cluster</button></footer>
+      <div className={css.dialog} role="dialog" aria-modal="true" aria-label={t('dialog.cluster')}>
+        <header><div><strong>{t('dialog.addCluster')}</strong><span>{t('dialog.clusterDescription')}</span></div><IconButton label={t('action.close')} onClick={() => { setClusterForm(null) }}><VscClose /></IconButton></header>
+        <div className={css.form}><label className={css.full}>{t('field.name')}<input autoFocus value={clusterForm.name} onChange={event => { setClusterForm({ ...clusterForm, name: event.target.value }) }} /></label><label className={css.full}>{t('field.description')}<textarea value={clusterForm.description} onChange={event => { setClusterForm({ ...clusterForm, description: event.target.value }) }} /></label></div>
+        <footer><button type="button" onClick={() => { setClusterForm(null) }}>{t('action.cancel')}</button><button type="button" className={css.primary} disabled={clusterForm.name.trim() === ''} onClick={() => { void saveCluster() }}>{t('action.saveCluster')}</button></footer>
       </div>
     </div>}
   </div>
