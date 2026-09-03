@@ -1,4 +1,4 @@
-import type { ApiMultipartPart, ApiResponse } from '../types.ts'
+import type { ApiMultipartPart, ApiRequest, ApiResponse } from '../types.ts'
 
 export function responseForRequest(history: ApiResponse[], requestId: string | undefined, selectedResponseId: string | null): ApiResponse | null {
   if (requestId === undefined || requestId === '') return null
@@ -22,4 +22,40 @@ export function readMultipartParts(content: string): ApiMultipartPart[] {
 
 export function writeMultipartParts(parts: ApiMultipartPart[]): string {
   return JSON.stringify(parts, null, 2)
+}
+
+export function cloneRequest(request: ApiRequest): ApiRequest {
+  return {
+    ...request,
+    query: request.query.map(item => ({ ...item })),
+    headers: request.headers.map(item => ({ ...item })),
+    auth: { ...request.auth, options: { ...request.auth.options } },
+    body: { ...request.body },
+  }
+}
+
+export function requestFingerprint(request: ApiRequest): string {
+  return JSON.stringify(request)
+}
+
+export function formatResponseBody(body: string): string {
+  const trimmed = body.trim()
+  if (trimmed === '') return ''
+  try { return JSON.stringify(JSON.parse(trimmed), null, 2) } catch { return body }
+}
+
+export function responseCookies(response: ApiResponse): { name: string; value: string; attributes: string }[] {
+  return response.headers
+    .filter(header => header.enabled && header.key.toLowerCase() === 'set-cookie')
+    .flatMap(header => header.value.split(/,(?=[^;,]+=)/))
+    .map(value => {
+      const [pair = '', ...attributes] = value.split(';')
+      const separator = pair.indexOf('=')
+      return {
+        name: separator < 0 ? pair.trim() : pair.slice(0, separator).trim(),
+        value: separator < 0 ? '' : pair.slice(separator + 1).trim(),
+        attributes: attributes.map(item => item.trim()).join('; '),
+      }
+    })
+    .filter(cookie => cookie.name !== '')
 }
