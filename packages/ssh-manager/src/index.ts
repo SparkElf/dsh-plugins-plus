@@ -16,7 +16,7 @@ import type { SshAuthKind, SshCluster, SshCommandRequest, SshCredentialInput, Ss
 export * from './types.ts'
 export { SshPortForwardManager } from './forward.ts'
 export { downloadSftpFile, listSftpFiles, uploadSftpFile } from './sftp.ts'
-export { SshManagerStore } from './store.ts'
+export { SshManagerStore, sshCredentialKey, type SshCredentialRecords } from './store.ts'
 export { SshTerminalManager } from './terminal.ts'
 export { executeSshCommand, fingerprintFromHash, sshConnectConfig, testSshHost } from './transport.ts'
 export const name = 'ssh-manager'

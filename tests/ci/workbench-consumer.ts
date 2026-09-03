@@ -1,10 +1,11 @@
 import { WorkbenchVault, type WorkbenchVaultOptions } from '@sparkelf/dsh-workbench-vault'
-import { SshManagerStore, type SshCommandRequest, type SshHost } from '@sparkelf/dsh-ssh-manager'
+import { SshManagerStore, type SshCommandRequest, type SshCredentialRecords, type SshHost } from '@sparkelf/dsh-ssh-manager'
 import { ApiClientStore, type ApiRequest, type ApiResponse } from '@sparkelf/dsh-api-client'
 
 const vaultOptions = {} satisfies WorkbenchVaultOptions
 const vault = new WorkbenchVault(vaultOptions)
-const ssh = new SshManagerStore({ vault })
+const credentials = {} as SshCredentialRecords
+const ssh = new SshManagerStore({ credentials, legacyVault: vault })
 const api = new ApiClientStore({ vault })
 
 const host = {
