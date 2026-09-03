@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Server } from 'ssh2'
 import { afterEach, describe, expect, it } from 'vitest'
-import { WorkbenchVault } from '@sparkelf/dsh-workbench-vault'
+import { MemoryCredentialRecords } from './credential-records.ts'
 import { SshPortForwardManager } from '../src/forward.ts'
 import { SshManagerStore } from '../src/store.ts'
 import { testSshHost } from '../src/transport.ts'
@@ -31,7 +31,7 @@ describe('SshPortForwardManager', () => {
     closers.push(() => new Promise(resolve => ssh.close(() => resolve())))
     const sshAddress = ssh.address(); if (sshAddress === null || typeof sshAddress === 'string') throw new Error('SSH server did not bind')
     const directory = await mkdtemp(join(tmpdir(), 'dsh-ssh-forward-'))
-    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), vault: new WorkbenchVault({ directory }) })
+    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), credentials: new MemoryCredentialRecords() })
     const base: SshHost = { id: '', name: 'Forward', description: '', tags: [], clusterId: null, environment: 'testing', hostname: '127.0.0.1', port: sshAddress.port, username: 'user', authKind: 'password', credentialId: null, credentialConfigured: false, jumpHostId: null, knownHostFingerprint: 'SHA256:wrong', keepAliveSeconds: 0 }
     let host = await store.saveHost(base, { password: 'secret' })
     let fingerprint = ''

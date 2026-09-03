@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Server } from 'ssh2'
 import { afterEach, describe, expect, it } from 'vitest'
-import { WorkbenchVault } from '@sparkelf/dsh-workbench-vault'
+import { MemoryCredentialRecords } from './credential-records.ts'
 import { SshManagerStore } from '../src/store.ts'
 import { SshTerminalManager, type SshTerminalEvent } from '../src/terminal.ts'
 import { testSshHost } from '../src/transport.ts'
@@ -32,7 +32,7 @@ describe('SshTerminalManager', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const address = server.address(); if (address === null || typeof address === 'string') throw new Error('SSH server did not bind')
     const directory = await mkdtemp(join(tmpdir(), 'dsh-ssh-terminal-'))
-    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), vault: new WorkbenchVault({ directory }) })
+    const store = new SshManagerStore({ dataFile: join(directory, 'ssh.json'), credentials: new MemoryCredentialRecords() })
     const base: SshHost = { id: '', name: 'Terminal', description: '', tags: [], clusterId: null, environment: 'testing', hostname: '127.0.0.1', port: address.port, username: 'user', authKind: 'password', credentialId: null, credentialConfigured: false, jumpHostId: null, knownHostFingerprint: 'SHA256:wrong', keepAliveSeconds: 0 }
     let host = await store.saveHost(base, { password: 'secret' })
     let fingerprint = ''
