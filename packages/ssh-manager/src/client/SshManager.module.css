@@ -110,9 +110,8 @@
   width: min(292px, calc(100% - 36px));
   box-shadow: 8px 0 24px rgb(0 0 0 / .2);
 }
-.inventoryHeader { display: flex; align-items: center; gap: 3px; min-height: 38px; padding: 0 6px 0 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-.inventoryHeader strong { margin-right: auto; }
-.inventoryHeader > span { min-width: 20px; color: var(--dsw-alias-label-tertiary); font-size: 11px; text-align: center; }
+.inventoryHeader { display: flex; align-items: center; gap: 3px; min-height: 32px; padding: 0 6px 0 8px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.inventoryHeader > span { min-width: 20px; margin-right: auto; color: var(--dsw-alias-label-tertiary); font-size: 11px; text-align: left; }
 .search {
   display: flex;
   align-items: center;
@@ -140,6 +139,13 @@
 .hostRow > span { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 2px; }
 .hostRow strong, .hostRow small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hostRow small { color: var(--dsw-alias-label-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.contextMenu { position: fixed; z-index: 10000; width: 190px; padding: 3px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); box-shadow: 0 8px 24px rgb(0 0 0 / .22); font: var(--dsw-font-xxs-12, 12px/1.4 system-ui, sans-serif); }
+.contextMenu button { display: flex; align-items: center; width: 100%; height: 28px; gap: 8px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.contextMenu button:hover, .contextMenu button:focus-visible { outline: 0; background: var(--dsw-alias-interactive-bg-hover); }
+.contextMenu button > svg { flex: none; }
+.contextMenu button[data-separator=true] { height: 32px; margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--dsw-alias-border-l1); border-radius: 0 0 4px 4px; }
+.contextMenu button[data-danger=true] { color: var(--dsw-alias-state-danger); }
+
 .hostRow > i, .terminalTab i, .statusBar i, .forwardState i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--dsw-alias-label-tertiary); }
 .hostRow > i[data-ready=true], i[data-state=connected], .forwardState[data-state=active] i { background: var(--dsw-alias-state-success); }
 i[data-state=failed], .forwardState[data-state=failed] i { background: var(--dsw-alias-state-danger); }

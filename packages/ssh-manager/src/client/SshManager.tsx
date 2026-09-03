@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   VscAdd,
@@ -17,6 +19,7 @@ import {
   VscFolderOpened,
   VscInfo,
   VscKey,
+  VscKebabVertical,
   VscLayoutSidebarLeft,
   VscPlug,
   VscPulse,
@@ -49,6 +52,9 @@ import css from './SshManager.module.css'
 interface ConversationInput { state: { getSnapshot(): { draft: string } }; setDraft(text: string): void }
 interface ClientServices { sessions: { scope(sessionId: string): Context | undefined }; conversation: { input: { for(scope: Context): ConversationInput } } }
 type WorkspaceView = 'hosts' | 'terminal' | 'files' | 'tunnels'
+type InventoryContextMenu =
+  | { kind: 'host'; id: string; x: number; y: number }
+  | { kind: 'cluster'; id: string; x: number; y: number }
 
 const EMPTY: SshManagerState = { clusters: [], hosts: [] }
 const ENVIRONMENTS: SshEnvironment[] = ['development', 'testing', 'staging', 'production', 'other']
@@ -125,6 +131,8 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   const [fileBusy, setFileBusy] = useState(false)
   const [forwards, setForwards] = useState<SshPortForward[]>([])
   const [forwardForm, setForwardForm] = useState<SshPortForwardRequest | null>(null)
+  const [contextMenu, setContextMenu] = useState<InventoryContextMenu | null>(null)
+  const contextMenuRef = useRef<HTMLDivElement | null>(null)
   const uploadInput = useRef<HTMLInputElement | null>(null)
 
   const selected = state.hosts.find(host => host.id === selectedId) ?? null
@@ -142,6 +150,54 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   const jumpHostOptions = useMemo<SelectOption[]>(() => [{ value: '', label: t('host.none') }, ...state.hosts.filter(host => host.id !== hostForm?.id).map(host => ({ value: host.id, label: host.name, description: host.username + '@' + host.hostname }))], [hostForm?.id, state.hosts, t])
 
   const report = (failure: unknown): void => { setError(failure instanceof Error ? failure.message : String(failure)) }
+  const beginHost = (clusterId: string | null = null): void => {
+    setHostForm({ ...emptyHost(), clusterId })
+    setCredential({})
+    setContextMenu(null)
+  }
+  const beginCluster = (cluster: SshCluster = { id: '', name: '', description: '', tags: [], hostIds: [] }): void => {
+    setClusterForm({ ...cluster, tags: [...cluster.tags], hostIds: [...cluster.hostIds] })
+    setContextMenu(null)
+  }
+  const deleteHost = async (hostId: string): Promise<void> => {
+    try {
+      const next = await sshApi<SshManagerState>('hosts.delete', { hostId })
+      setState(next)
+      setSelectedId(current => current === hostId ? next.hosts[0]?.id ?? null : current)
+      setContextMenu(null)
+      setError(null)
+    } catch (failure) { report(failure) }
+  }
+  const deleteCluster = async (clusterId: string): Promise<void> => {
+    try {
+      setState(await sshApi<SshManagerState>('clusters.delete', { clusterId }))
+      setContextMenu(null)
+      setError(null)
+    } catch (failure) { report(failure) }
+  }
+  const openContextMenu = (kind: InventoryContextMenu['kind'], id: string, x: number, y: number): void => {
+    const width = 190
+    const height = kind === 'host' ? 164 : 100
+    setContextMenu({
+      kind,
+      id,
+      x: Math.max(6, Math.min(x, window.innerWidth - width - 6)),
+      y: Math.max(6, Math.min(y, window.innerHeight - height - 6)),
+    } as InventoryContextMenu)
+  }
+  const showPointerContextMenu = (event: ReactMouseEvent<HTMLElement>, kind: InventoryContextMenu['kind'], id: string): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (kind === 'host') setSelectedId(id)
+    openContextMenu(kind, id, event.clientX, event.clientY)
+  }
+  const showKeyboardContextMenu = (event: ReactKeyboardEvent<HTMLElement>, kind: InventoryContextMenu['kind'], id: string): void => {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    if (kind === 'host') setSelectedId(id)
+    openContextMenu(kind, id, rect.left + Math.min(rect.width - 12, 150), rect.top + 24)
+  }
   const refresh = async (): Promise<void> => {
     try {
       const [nextState, nextTerminals, nextForwards] = await Promise.all([
@@ -165,6 +221,23 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     setConnectionStatus(null)
     setForwardForm(selectedId === null ? null : emptyForward(selectedId))
   }, [selectedId])
+  useEffect(() => {
+    if (contextMenu === null) return
+    requestAnimationFrame(() => { contextMenuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus() })
+    const close = (event: MouseEvent): void => {
+      if (contextMenuRef.current?.contains(event.target as Node) !== true) setContextMenu(null)
+    }
+    const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape') setContextMenu(null) }
+    const blur = (): void => { setContextMenu(null) }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', escape)
+    window.addEventListener('blur', blur)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', escape)
+      window.removeEventListener('blur', blur)
+    }
+  }, [contextMenu])
 
   const chooseView = (next: WorkspaceView): void => {
     setView(next)
@@ -309,12 +382,50 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     })
   }
 
+  const renderContextMenu = () => {
+    if (contextMenu === null) return null
+    const host = contextMenu.kind === 'host' ? state.hosts.find(item => item.id === contextMenu.id) : undefined
+    const cluster = contextMenu.kind === 'cluster' ? state.clusters.find(item => item.id === contextMenu.id) : undefined
+    if (host === undefined && cluster === undefined) return null
+    const label = host === undefined
+      ? t('inventory.clusterActions', { name: cluster?.name ?? '' })
+      : t('inventory.hostActions', { name: host.name })
+    return createPortal(<div
+      ref={contextMenuRef}
+      className={css.contextMenu}
+      role="menu"
+      aria-label={label}
+      style={{ left: contextMenu.x, top: contextMenu.y }}
+      onContextMenu={event => { event.preventDefault() }}
+      onKeyDown={event => {
+        const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role=menuitem]:not(:disabled)')]
+        const current = items.indexOf(document.activeElement as HTMLButtonElement)
+        if (event.key === 'ArrowDown') { event.preventDefault(); items[(current + 1) % items.length]?.focus() }
+        else if (event.key === 'ArrowUp') { event.preventDefault(); items[(current - 1 + items.length) % items.length]?.focus() }
+        else if (event.key === 'Home') { event.preventDefault(); items[0]?.focus() }
+        else if (event.key === 'End') { event.preventDefault(); items.at(-1)?.focus() }
+        else if (event.key === 'Escape') { event.preventDefault(); setContextMenu(null) }
+      }}
+    >
+      {host !== undefined ? <>
+        <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void openTerminal(host) }}><VscTerminal /><span>{t('host.openTerminal')}</span></button>
+        <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void testConnection(host) }}><VscPulse /><span>{t('host.testConnection')}</span></button>
+        <button type="button" role="menuitem" onClick={() => { setContextMenu(null); sendToConversation(host) }}><VscComment /><span>{t('host.sendToConversation')}</span></button>
+        <button type="button" role="menuitem" onClick={() => { setContextMenu(null); setHostForm({ ...host }); setCredential({}) }}><VscEdit /><span>{t('host.edit')}</span></button>
+        <button type="button" role="menuitem" data-separator="true" data-danger="true" onClick={() => { void deleteHost(host.id) }}><VscTrash /><span>{t('host.delete')}</span></button>
+      </> : <>
+        <button type="button" role="menuitem" onClick={() => { beginHost(cluster?.id ?? null) }}><VscAdd /><span>{t('inventory.addHostToCluster')}</span></button>
+        <button type="button" role="menuitem" onClick={() => { if (cluster !== undefined) beginCluster(cluster) }}><VscEdit /><span>{t('inventory.editCluster')}</span></button>
+        <button type="button" role="menuitem" data-separator="true" data-danger="true" onClick={() => { if (cluster !== undefined) void deleteCluster(cluster.id) }}><VscTrash /><span>{t('inventory.deleteClusterAction')}</span></button>
+      </>}
+    </div>, document.body)
+  }
+
   const renderInventory = () => <aside className={css.inventory} aria-label={t('inventory.label')} data-overlay={view !== 'hosts'}>
     <header className={css.inventoryHeader}>
-      <strong>{t('inventory.title')}</strong>
-      <span>{filtered.length}</span>
-      <IconButton label={t('inventory.addCluster')} onClick={() => { setClusterForm({ id: '', name: '', description: '', tags: [], hostIds: [] }) }}><VscFolder /></IconButton>
-      <IconButton label={t('inventory.addHost')} onClick={() => { setHostForm(emptyHost()); setCredential({}) }}><VscAdd /></IconButton>
+      <span title={t('inventory.label')}>{filtered.length}</span>
+      <IconButton label={t('inventory.addCluster')} onClick={() => { beginCluster() }}><VscFolder /></IconButton>
+      <IconButton label={t('inventory.addHost')} onClick={() => { beginHost() }}><VscAdd /></IconButton>
       {view !== 'hosts' && <IconButton label={t('inventory.close')} onClick={() => { setInventoryOpen(false) }}><VscClose /></IconButton>}
     </header>
     <label className={css.search}><VscSearch aria-hidden="true" /><input value={search} onChange={event => { setSearch(event.target.value) }} placeholder={t('inventory.search')} aria-label={t('inventory.search')} /></label>
@@ -325,13 +436,27 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
         const collapsed = collapsedGroups.has(key)
         return <section key={key}>
           <div className={css.group}>
-            <button type="button" className={css.groupToggle} aria-expanded={!collapsed} onClick={() => { toggleGroup(key) }}>
+            <button
+              type="button"
+              className={css.groupToggle}
+              aria-expanded={!collapsed}
+              onClick={() => { toggleGroup(key) }}
+              onContextMenu={group.cluster === null ? undefined : event => { showPointerContextMenu(event, 'cluster', group.cluster?.id ?? '') }}
+              onKeyDown={group.cluster === null ? undefined : event => { showKeyboardContextMenu(event, 'cluster', group.cluster?.id ?? '') }}
+            >
               {collapsed ? <VscChevronRight /> : <VscChevronDown />}
               {collapsed ? <VscFolder /> : <VscFolderOpened />}
               <span>{group.cluster?.name ?? t('inventory.unclustered')}</span>
               <small>{group.hosts.length}</small>
             </button>
-            {group.cluster !== null && <IconButton label={t('inventory.deleteCluster', { name: group.cluster.name })} onClick={() => { void sshApi<SshManagerState>('clusters.delete', { clusterId: group.cluster?.id }).then(setState).catch(report) }}><VscTrash /></IconButton>}
+            {group.cluster !== null && <IconButton
+              label={t('inventory.clusterActions', { name: group.cluster.name })}
+              aria-haspopup="menu"
+              onClick={event => {
+                const rect = event.currentTarget.getBoundingClientRect()
+                openContextMenu('cluster', group.cluster?.id ?? '', rect.right, rect.bottom)
+              }}
+            ><VscKebabVertical /></IconButton>}
           </div>
           {!collapsed && group.hosts.map(host => <button
             type="button"
@@ -340,6 +465,8 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
             key={host.id}
             onClick={() => { setSelectedId(host.id) }}
             onDoubleClick={() => { void openTerminal(host) }}
+            onContextMenu={event => { showPointerContextMenu(event, 'host', host.id) }}
+            onKeyDown={event => { showKeyboardContextMenu(event, 'host', host.id) }}
           >
             <VscServerEnvironment aria-hidden="true" />
             <span><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span>
@@ -358,7 +485,7 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
       <IconButton label={t('host.testConnection')} onClick={() => { void testConnection(selected) }}><VscPulse /></IconButton>
       <IconButton label={t('host.sendToConversation')} onClick={() => { sendToConversation(selected) }}><VscComment /></IconButton>
       <IconButton label={t('host.edit')} onClick={() => { setHostForm({ ...selected }); setCredential({}) }}><VscEdit /></IconButton>
-      <IconButton label={t('host.delete')} onClick={() => { void sshApi<SshManagerState>('hosts.delete', { hostId: selected.id }).then(next => { setState(next); setSelectedId(next.hosts[0]?.id ?? null) }).catch(report) }}><VscTrash /></IconButton>
+      <IconButton label={t('host.delete')} onClick={() => { void deleteHost(selected.id) }}><VscTrash /></IconButton>
     </div>}
   </header>
 
@@ -474,8 +601,8 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
       })}</nav>
       <div className={css.globalActions}>
         <IconButton label={t(inventoryOpen ? 'app.hideExplorer' : 'app.showExplorer')} aria-pressed={inventoryOpen} onClick={() => { setInventoryOpen(current => !current) }}><VscLayoutSidebarLeft /></IconButton>
-        <IconButton label={t('inventory.addCluster')} onClick={() => { setClusterForm({ id: '', name: '', description: '', tags: [], hostIds: [] }) }}><VscFolder /></IconButton>
-        <IconButton label={t('inventory.addHost')} onClick={() => { setHostForm(emptyHost()); setCredential({}) }}><VscAdd /></IconButton>
+        <IconButton label={t('inventory.addCluster')} onClick={() => { beginCluster() }}><VscFolder /></IconButton>
+        <IconButton label={t('inventory.addHost')} onClick={() => { beginHost() }}><VscAdd /></IconButton>
       </div>
     </header>
     {error !== null && <div className={css.error} role="alert"><VscInfo />{error}<IconButton label={t('action.dismissError')} onClick={() => { setError(null) }}><VscClose /></IconButton></div>}
@@ -483,6 +610,7 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
       {inventoryOpen && renderInventory()}
       <main className={css.mainWorkspace}>{view === 'hosts' ? renderOverview() : view === 'terminal' ? renderTerminal() : view === 'files' ? renderFiles() : renderTunnels()}</main>
     </div>
+    {renderContextMenu()}
 
     {hostForm !== null && <div className={css.backdrop}>
       <div className={css.dialog} role="dialog" aria-modal="true" aria-label={t('dialog.host')}>
@@ -509,7 +637,7 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
 
     {clusterForm !== null && <div className={css.backdrop}>
       <div className={css.dialog} role="dialog" aria-modal="true" aria-label={t('dialog.cluster')}>
-        <header><div><strong>{t('dialog.addCluster')}</strong><span>{t('dialog.clusterDescription')}</span></div><IconButton label={t('action.close')} onClick={() => { setClusterForm(null) }}><VscClose /></IconButton></header>
+        <header><div><strong>{t(clusterForm.id === '' ? 'dialog.addCluster' : 'dialog.editCluster')}</strong><span>{t('dialog.clusterDescription')}</span></div><IconButton label={t('action.close')} onClick={() => { setClusterForm(null) }}><VscClose /></IconButton></header>
         <div className={css.form}><label className={css.full}>{t('field.name')}<input autoFocus value={clusterForm.name} onChange={event => { setClusterForm({ ...clusterForm, name: event.target.value }) }} /></label><label className={css.full}>{t('field.description')}<textarea value={clusterForm.description} onChange={event => { setClusterForm({ ...clusterForm, description: event.target.value }) }} /></label></div>
         <footer><button type="button" onClick={() => { setClusterForm(null) }}>{t('action.cancel')}</button><button type="button" className={css.primary} disabled={clusterForm.name.trim() === ''} onClick={() => { void saveCluster() }}>{t('action.saveCluster')}</button></footer>
       </div>
