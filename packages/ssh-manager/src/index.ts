@@ -1,13 +1,17 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
+import { WebSocket, WebSocketServer } from 'ws'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { SshContext } from './context.ts'
 import { SshManagerStore } from './store.ts'
+import { SshTerminalManager } from './terminal.ts'
 import { executeSshCommand, testSshHost } from './transport.ts'
 import type { SshCluster, SshCommandRequest, SshCredentialInput, SshHost } from './types.ts'
 
 export * from './types.ts'
 export { SshManagerStore } from './store.ts'
+export { SshTerminalManager } from './terminal.ts'
 export { executeSshCommand, fingerprintFromHash, sshConnectConfig, testSshHost } from './transport.ts'
 export const name = 'ssh-manager'
 export const inject = ['webServer', 'tools', 'approval']
@@ -35,6 +39,8 @@ function publicHost(host: SshHost): Record<string, ToolJson> {
 /** Register persistent host inventory APIs and sanitized model tools. */
 export function apply(ctx: SshContext): void {
   const store = new SshManagerStore()
+  const terminals = new SshTerminalManager(store)
+  const terminalWss = new WebSocketServer({ noServer: true })
   const logger = ctx.logger as unknown as { error(...args: unknown[]): void }
   const methods: Record<string, (payload: Record<string, unknown>) => Promise<unknown>> = {
     state: () => store.state(),
@@ -45,6 +51,9 @@ export function apply(ctx: SshContext): void {
     'hosts.get': async payload => publicHost(await store.host(String(payload.hostId))),
     'hosts.test': async payload => testSshHost(store, String(payload.hostId)),
     'hosts.execute': async payload => executeSshCommand(store, String(payload.hostId), String(payload.command), payload.timeoutMs === undefined ? undefined : Number(payload.timeoutMs)),
+    'terminals.open': async payload => { const sessionId = String(payload.sessionId); const terminal = await terminals.open(sessionId, String(payload.hostId), Number(payload.cols ?? 80), Number(payload.rows ?? 24)); return { terminal, terminals: terminals.list(sessionId) } },
+    'terminals.list': async payload => terminals.list(String(payload.sessionId)),
+    'terminals.close': async payload => { const sessionId = String(payload.sessionId); terminals.close(sessionId, String(payload.terminalId)); return terminals.list(sessionId) },
   }
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/dsh-ssh-manager/api', handler: async (req, res) => {
     const method = new URL(req.url ?? '/', 'http://dsh.internal').pathname.slice('/dsh-ssh-manager/api/'.length)
@@ -57,6 +66,29 @@ export function apply(ctx: SshContext): void {
       writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
     }
   } }), 'dsh-ssh-manager: HTTP API')
+
+  ctx.effect(() => ctx.webServer.registerUpgrade({ path: '/dsh-ssh-manager/terminal', handler: (req: IncomingMessage, socket: Duplex, head: Uint8Array) => {
+    terminalWss.handleUpgrade(req, socket, Buffer.from(head), client => {
+      const url = new URL(req.url ?? '/', 'http://dsh.internal')
+      const sessionId = url.searchParams.get('sessionId')
+      const terminalId = url.searchParams.get('terminalId')
+      if (sessionId === null || terminalId === null) { client.close(1008, 'sessionId and terminalId are required'); return }
+      let detach: (() => void) | undefined
+      try { detach = terminals.attach(sessionId, terminalId, event => { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(event)) }) }
+      catch (error) { client.close(1008, error instanceof Error ? error.message : String(error)); return }
+      client.on('message', raw => {
+        try {
+          const message = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number }
+          if (message.type === 'input') terminals.write(sessionId, terminalId, String(message.data ?? ''))
+          else if (message.type === 'resize') terminals.resize(sessionId, terminalId, Number(message.cols), Number(message.rows))
+          else if (message.type === 'close') terminals.close(sessionId, terminalId)
+          else throw new Error('Unknown SSH terminal message type')
+        } catch (error) { client.send(JSON.stringify({ type: 'error', message: error instanceof Error ? error.message : String(error) })) }
+      })
+      client.once('close', () => { detach?.() })
+    })
+  } }), 'dsh-ssh-manager: terminal WebSocket')
+  ctx.effect(() => () => { terminals.closeAll(); terminalWss.close() }, 'dsh-ssh-manager: terminal cleanup')
 
   const open = { type: 'object', additionalProperties: true } as const
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_list_hosts', description: 'List configured SSH hosts and clusters. Returns non-secret metadata only.', parameters: {}, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async () => { const state = await store.state(); return toolJson({ clusters: state.clusters, hosts: state.hosts.map(publicHost) }) } })), 'dsh-ssh-manager: list hosts tool')
