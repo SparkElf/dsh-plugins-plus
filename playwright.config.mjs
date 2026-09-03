@@ -2,7 +2,7 @@ import { defineConfig } from 'playwright/test'
 
 export default defineConfig({
   testDir: './tests/system',
-  testMatch: ['mobile-bridge.spec.mjs', 'dataops-query.spec.mjs', 'univer-government-docs.spec.mjs'],
+  testMatch: ['mobile-bridge.spec.mjs', 'dataops-query.spec.mjs', 'univer-government-docs.spec.mjs', 'workbench-sidebar.spec.mjs'],
   timeout: 90_000,
   workers: 1,
   reporter: 'list',

@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-ssh-manager",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Better Sidebar SSH host, cluster, terminal, transfer, and tunnel workbench.",
   "type": "module",
   "main": "./lib/index.js",
