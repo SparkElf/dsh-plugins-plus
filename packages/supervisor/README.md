@@ -81,3 +81,15 @@ Each captured Session receives one ordinary user message stating that Supervisor
 - The Supervisor manages one runtime manifest and one Web port per process.
 
 The implementation was extracted from `SparkElf/deepseek-harness-plus` master at `d57a57795f25753a3ccf7d69fc25a34fa2e77d9e`.
+
+## Accepted profile guard
+
+Install `runtime/profile-guard.mjs` at a stable path outside the mutable profile, then add it as the service `ExecStartPre`. A closure-verified promotion explicitly records the accepted profile:
+
+`dsh-plus-profile-guard accept --profile /path/to/profile --profile-link ~/.dsh/profiles/plus --manifest ~/.dsh/supervisor/runtime.json --state ~/.dsh/supervisor/accepted-profile.json`
+
+Every Supervisor start must run:
+
+`node ~/.dsh/supervisor/profile-guard.mjs guard --state ~/.dsh/supervisor/accepted-profile.json`
+
+The guard verifies the accepted profile complete runtime fingerprint. If an updater changed the profile symlink without a new explicit acceptance, it atomically restores both the accepted symlink and its status-free runtime manifest before any code is imported from the mutable profile.
