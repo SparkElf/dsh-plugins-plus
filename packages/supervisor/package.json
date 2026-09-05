@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-plugin-supervisor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "packageManager": "pnpm@11.7.0",
   "description": "Out-of-process Plus runtime Supervisor with controlled Session recovery",
   "type": "module",
@@ -19,7 +19,8 @@
     "./manifest": "./runtime/manifest.mjs",
     "./run": "./runtime/supervisor.mjs",
     "./bin": "./runtime/bin.mjs",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./profile-guard": "./runtime/profile-guard.mjs"
   },
   "dsh": {
     "bundle": {
@@ -38,7 +39,8 @@
     "LICENSE"
   ],
   "bin": {
-    "dsh-plus-supervisor": "lib/bin.js"
+    "dsh-plus-supervisor": "lib/bin.js",
+    "dsh-plus-profile-guard": "runtime/profile-guard.mjs"
   },
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
