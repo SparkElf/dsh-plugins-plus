@@ -2,6 +2,7 @@ packages:
   - 'packages/*'
   - '!packages/supervisor'
 allowBuilds:
+  '@officecli/officecli': true
   cpu-features: false
   node-pty: true
   ssh2: true

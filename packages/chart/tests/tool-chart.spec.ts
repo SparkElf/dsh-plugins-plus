@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as Chart from '../src/index.ts'
@@ -29,7 +28,7 @@ describe('render_chart', () => {
     }
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('chart-1'),
+      callId: 'chart-1' as never,
       name: 'render_chart',
       arguments: {
         sourceResultRef: '  qr1_example  ',
@@ -56,7 +55,7 @@ describe('render_chart', () => {
     const ctx = await setup()
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('chart-blank-ref'),
+      callId: 'chart-blank-ref' as never,
       name: 'render_chart',
       arguments: { sourceResultRef: '   ', option: { series: [] } },
     })

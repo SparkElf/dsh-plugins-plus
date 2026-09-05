@@ -2,7 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ChartContentBlock, ChartPresentationMeta, RenderChartArgs, RenderChartResult } from './types.ts'
 
 export type { ChartPresentationMeta, RenderChartArgs, RenderChartResult } from './types.ts'
