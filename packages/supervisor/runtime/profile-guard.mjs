@@ -9,7 +9,7 @@ import {
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const RUNTIME_FILE = /\.(?:cjs|js|json|mjs|wasm|ya?ml)$/u
+const RUNTIME_FILE = /\.(?:cjs|diff|js|json|mjs|patch|wasm|ya?ml)$/u
 const LF = String.fromCharCode(10)
 const NUL = String.fromCharCode(0)
 
@@ -22,7 +22,7 @@ function atomicJson(path, value) {
 
 function runtimeFiles(directory) {
   const files = []
-  for (const root of ['lib', 'runtime']) {
+  for (const root of ['lib', 'patches', 'runtime']) {
     const absolute = join(directory, root)
     if (!existsSync(absolute)) continue
     const visit = (current, relative) => {

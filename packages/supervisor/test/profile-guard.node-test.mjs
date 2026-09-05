@@ -13,12 +13,14 @@ function profile(root, name, source) {
   const directory = join(root, name)
   const packageDirectory = join(directory, 'node_modules/@fixture/client')
   mkdirSync(join(packageDirectory, 'lib'), { recursive: true })
+  mkdirSync(join(packageDirectory, 'patches'), { recursive: true })
   writeFileSync(join(directory, 'package.json'), JSON.stringify({
     name: 'fixture-profile',
     dsh: { profile: { bundles: ['@fixture/client'] } },
   }) + LF)
   writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({ name: '@fixture/client', version: '1.0.0' }) + LF)
   writeFileSync(join(packageDirectory, 'lib/client.js'), source + LF)
+  writeFileSync(join(packageDirectory, 'patches/ui.patch'), 'patch payload' + LF)
   return directory
 }
 
@@ -72,6 +74,6 @@ test('refuses rollback when the accepted closure was modified', async t => {
   symlinkSync(accepted, profileLink, 'dir')
   writeFileSync(manifestPath, JSON.stringify({ runtime: { command: 'node', args: [], cwd: accepted } }) + LF)
   acceptProfile({ profilePath: accepted, profileLink, manifestPath, statePath })
-  writeFileSync(join(accepted, 'node_modules/@fixture/client/lib/client.js'), 'tampered' + LF)
+  writeFileSync(join(accepted, 'node_modules/@fixture/client/patches/ui.patch'), 'tampered' + LF)
   assert.throws(() => guardAcceptedProfile({ statePath }), /runtime closure was modified/u)
 })
