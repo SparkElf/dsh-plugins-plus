@@ -1,6 +1,6 @@
 # @sparkelf/dsh-ssh-manager
 
-A Better Sidebar SSH inventory and guarded-operation workbench for DeepSeek Harness.
+An official right-Sidebar SSH inventory and guarded-operation workbench for DeepSeek Harness 0.1.5.
 
 ## Current capabilities
 

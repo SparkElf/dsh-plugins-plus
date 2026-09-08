@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   HarnessBadge,
-  WanxiangHeroName,
   WanxiangMark,
   WanxiangSidebarName,
   WanxiangWordmark,
@@ -27,14 +26,12 @@ describe('Wanxiang managed branding', () => {
     const badge = HarnessBadge({})
     const badgePaths = badge.props.children[1]
     const sidebar = WanxiangSidebarName()
-    const hero = WanxiangHeroName()
     expect(wordmark.props.viewBox).toBe('1.64 115.64 5927.36 933.38')
     expect(wordmarkGroup.props.children).toHaveLength(6)
     expect(badge.props.viewBox).toBe('129 5 53 15.5')
     expect(badgePaths).toHaveLength(7)
     expect(badgePaths[0].props.d).toContain('M132.848 8.93205')
     expect(sidebar.props.children).toHaveLength(2)
-    expect(hero.props.accessible).toBe(true)
   })
 
   it('defaults on and notifies every preference transition', () => {

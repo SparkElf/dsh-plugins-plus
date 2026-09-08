@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-Each workbench is an independent dsh-better-sidebar plugin with its own host API, client bundle, persistence schema, and model tools. Shared behavior belongs in small host-only libraries, not in Better Sidebar or the DSH core.
+Each workbench is an independent official right-Sidebar plugin with its own host API, client bundle, persistence schema, and model tools. Shared behavior belongs in small host-only libraries, not in Sidebar chrome or the DSH core.
 
 The suite uses one authoritative credential service. Browser clients may create, replace, test, and delete credentials, but cannot read secret values back. Model tools receive resource identifiers and non-secret metadata only. Managed DataOps authorization continues to use the DataOps JWT and is not duplicated by these plugins.
 
@@ -10,7 +10,7 @@ The suite uses one authoritative credential service. Browser clients may create,
 
 - Resource metadata: stable id, display name, description, tags, folders or clusters, timestamps, and connection status.
 - Encrypted vault: namespaced AES-256-GCM records, owner-only files, migration, rotation, delete, and host-only resolve.
-- Better Sidebar UX: resource tree, search, pinned items, detail mode, double-click working tabs, recent history, and free-window support.
+- Official right Sidebar UX: Guide discovery, push/fullscreen presentation, split panes, floating tabs, and session-scoped visibility.
 - Conversation handoff: add a sanitized resource or operation reference to the current composer; never include passwords, private keys, tokens, cookies, or decrypted environment variables.
 - Audit events: connection tests, executions, destructive actions, exports, and AI-triggered operations.
 
