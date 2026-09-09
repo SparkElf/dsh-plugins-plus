@@ -158,4 +158,3 @@ export function WanxiangSidebarName() {
 export function WanxiangHeroMark({ size, className }: MarkProps) {
   return <WanxiangMark size={size} className={className} animated />
 }
-
