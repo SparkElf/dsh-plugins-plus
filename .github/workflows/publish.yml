@@ -74,8 +74,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish changed workspace packages
+      - name: Publish missing workspace package versions
         if: github.event_name == 'push'
-        run: pnpm -r publish --no-git-checks --access public
+        shell: bash
+        run: |
+          for manifest in packages/*/package.json; do
+            directory=$(dirname "$manifest")
+            name=$(node -p "require('./$manifest').name")
+            version=$(node -p "require('./$manifest').version")
+            npm view "$name@$version" version >/dev/null 2>&1 || pnpm --dir "$directory" publish --no-git-checks --access public
+          done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

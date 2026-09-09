@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import { CallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as Chart from '../src/index.ts'
@@ -61,7 +60,7 @@ describe('chart real Loader composition through cordis.yml', () => {
     const option = { tooltip: {}, series: [{ type: 'pie', data: [{ name: 'A', value: 1 }] }] }
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('loader-chart'),
+      callId: 'loader-chart' as never,
       name: 'render_chart',
       arguments: { sourceResultRef: 'qr1_loader', option },
     })

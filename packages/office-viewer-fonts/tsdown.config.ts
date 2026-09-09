@@ -9,7 +9,7 @@ const host: UserConfig = {
   fixedExtension: false,
   dts: false,
   clean: false,
-  deps: { neverBundle: ['@deepseek-ai/cordis', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-host-webserver', 'dsh-univer-office'] },
+  deps: { neverBundle: ['@deepseek-ai/cordis', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-host-webserver'] },
 }
 
 const client: UserConfig = {
@@ -23,7 +23,7 @@ const client: UserConfig = {
   clean: false,
   outputOptions: {
     entryFileNames: 'client.js',
-    banner: 'window.__ModuleLoader__.load({ id: "@sparkelf/dsh-univer-government-docs", factory: (require) => {',
+    banner: 'window.__ModuleLoader__.load({ id: "@sparkelf/dsh-office-viewer-fonts", factory: (require) => {',
     footer: 'return module.exports; } });',
     intro: 'var module = { exports: {} }; var exports = module.exports;',
     codeSplitting: false,

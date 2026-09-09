@@ -390,6 +390,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
         open={disconnectTarget !== null}
         onClose={() => { if (!disconnecting) setDisconnectTarget(null) }}
         title={t('disconnectTitle')}
+        closeLabel={t('cancel')}
         footer={(
           <>
             <Button variant="outline" disabled={disconnecting} onClick={() => { setDisconnectTarget(null) }}>{t('cancel')}</Button>

@@ -10,32 +10,20 @@ import {
 } from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
-// Remove this narrow compile bridge when registerTemplateRoot ships in the Office public types.
-interface UniverTemplateRootService {
-  registerTemplateRoot(registration: { readonly root: string }): () => void
-}
-
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    univer: UniverTemplateRootService
-  }
-}
-
-const PROVIDER_NAME = 'univer-government-docs'
+const PROVIDER_NAME = 'office-government-docs'
 const PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url))
-const TEMPLATE_ROOT = fileURLToPath(new URL('../assets/templates/', import.meta.url))
-const SKILL_FILE = new URL('../skills/univer-government-docs/SKILL.md', import.meta.url)
+const SKILL_FILE = new URL('../skills/office-government-docs/SKILL.md', import.meta.url)
 const INVOCATION = { modelInvocable: true, userInvocable: true } as const
 const FONT_ROUTES = [
-  { file: 'FZXiaoBiaoSong.ttf', path: '/univer-government-docs/fonts/FZXiaoBiaoSong.ttf' },
-  { file: 'FangSongGB2312.ttf', path: '/univer-government-docs/fonts/FangSongGB2312.ttf' },
-  { file: 'KaiTiGB2312.ttf', path: '/univer-government-docs/fonts/KaiTiGB2312.ttf' },
-  { file: 'SimHei.ttf', path: '/univer-government-docs/fonts/SimHei.ttf' },
+  { file: 'FZXiaoBiaoSong.ttf', path: '/office-viewer-fonts/FZXiaoBiaoSong.ttf' },
+  { file: 'FangSongGB2312.ttf', path: '/office-viewer-fonts/FangSongGB2312.ttf' },
+  { file: 'KaiTiGB2312.ttf', path: '/office-viewer-fonts/KaiTiGB2312.ttf' },
+  { file: 'SimHei.ttf', path: '/office-viewer-fonts/SimHei.ttf' },
 ] as const
 
 const candidate: SkillCandidate = {
-  name: 'univer-government-docs',
-  description: 'Create and edit native Traditional Chinese government documents from bundled general-government and official redhead Univer templates. Load univer and univer-doc first; use this Skill for government document structure, style roles, redhead anchors, fonts, pagination, screenshots, and DOCX export.',
+  name: 'office-government-docs',
+  description: 'Create and revise Chinese government DOCX, XLSX, and PPTX originals with OfficeCLI. Use for government-document hierarchy, page layout, redhead composition, official fonts, validation, and clickable original-file delivery.',
   invocation: INVOCATION,
   provider: PROVIDER_NAME,
   source: 'bundled',
@@ -60,15 +48,11 @@ const provider: SkillProvider = {
   },
 }
 
-export const name = 'univer-government-documents'
-export const inject = ['univer', 'skills', 'webServer']
+export const name = 'office-viewer-fonts'
+export const inject = ['skills', 'webServer']
 
-/** Register templates, exact font assets, and their model instructions for this plugin fiber. */
+/** 注册 Office Viewer 字体资源与政务 OfficeCLI 工作流 Skill。 */
 export function apply(ctx: Context): void {
-  ctx.effect(
-    () => ctx.univer.registerTemplateRoot({ root: TEMPLATE_ROOT }),
-    'univer-government-documents: template root',
-  )
   ctx.skills.registerProvider(() => provider)
   for (const font of FONT_ROUTES) {
     const file = fileURLToPath(new URL('../assets/fonts/' + font.file, import.meta.url))
@@ -90,6 +74,6 @@ export function apply(ctx: Context): void {
         })
         response.end(bytes)
       },
-    }), 'univer-government-documents: ' + font.file)
+    }), 'office-viewer-fonts: ' + font.file)
   }
 }

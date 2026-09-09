@@ -1,6 +1,6 @@
 /** JSON contracts owned by the SparkElf interactive chart plugin. */
 
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
 /** Model-facing arguments accepted by `render_chart`. */
 export interface RenderChartArgs {

@@ -158,8 +158,3 @@ export function WanxiangSidebarName() {
 export function WanxiangHeroMark({ size, className }: MarkProps) {
   return <WanxiangMark size={size} className={className} animated />
 }
-
-/** Welcome-page brand-name artwork replacing the default slogan. */
-export function WanxiangHeroName() {
-  return <WanxiangWordmark height={26} accessible className={css.heroName} />
-}

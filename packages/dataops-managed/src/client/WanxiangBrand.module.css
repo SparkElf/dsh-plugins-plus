@@ -33,12 +33,6 @@
   overflow: visible;
 }
 
-.heroName {
-  display: block;
-  overflow: visible;
-  color: inherit;
-}
-
 @keyframes unit-top {
   0%, 100% { transform: translate(0, 0); }
   50% { transform: translate(0, -2px); }

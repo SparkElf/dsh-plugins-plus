@@ -1,7 +1,7 @@
 {
   "name": "@sparkelf/dsh-workbench-vault",
-  "version": "0.1.0",
-  "description": "Host-only encrypted credential vault shared by DSH Better Sidebar workbench plugins.",
+  "version": "0.1.1",
+  "description": "Host-only encrypted credential vault shared by DSH workbench plugins.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
