@@ -23,6 +23,13 @@ jobs:
       - name: Check out plugin sources
         uses: actions/checkout@v4
 
+      - name: Check out SQL Workbench
+        uses: actions/checkout@v4
+        with:
+          repository: SparkElf/dsh-sql-workbench
+          ref: main
+          path: external/dsh-sql-workbench
+
       - name: Check out standalone Desktop
         if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
         uses: actions/checkout@v4
@@ -48,12 +55,15 @@ jobs:
       - name: Install Supervisor dependencies
         run: pnpm --dir packages/supervisor install --frozen-lockfile
 
+      - name: Install SQL Workbench dependencies
+        run: pnpm --dir external/dsh-sql-workbench install --frozen-lockfile
+
       - name: Install Desktop dependencies
         if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
         run: pnpm --dir external/dsh-plus-desktop install --frozen-lockfile
 
       - name: Typecheck, test, and build
-        run: pnpm run typecheck && pnpm run test && pnpm run build
+        run: pnpm run typecheck && pnpm run test && pnpm run build && pnpm --dir external/dsh-sql-workbench run typecheck && pnpm --dir external/dsh-sql-workbench test && pnpm --dir external/dsh-sql-workbench run build
 
       - name: Test standalone Desktop
         if: github.event_name == 'workflow_dispatch' && inputs.runtime_packages
@@ -71,6 +81,13 @@ jobs:
         run: |
           VERSION=$(node -p "require('./external/dsh-plus-desktop/package.json').version")
           npm view "@sparkelf/dsh-plus-desktop@$VERSION" version >/dev/null 2>&1 || npm publish ./external/dsh-plus-desktop --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish SQL Workbench if missing
+        run: |
+          VERSION=$(node -p "require('./external/dsh-sql-workbench/package.json').version")
+          npm view "dsh-sql-workbench@$VERSION" version >/dev/null 2>&1 || npm publish ./external/dsh-sql-workbench --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
