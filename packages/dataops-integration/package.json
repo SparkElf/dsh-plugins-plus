@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-dataops-integration",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Standalone DataOps browser authorization and MCP composition for DeepSeek Harness.",
   "type": "module",
   "main": "./lib/index.js",
