@@ -8,7 +8,8 @@
     "build": "pnpm --filter @sparkelf/dsh-mobile-bridge build && pnpm --filter @sparkelf/dsh-dataops-integration build && pnpm --filter @sparkelf/dsh-dataops-managed build && pnpm --filter @sparkelf/dsh-chart build && pnpm --filter @sparkelf/dsh-query-result-analysis build && pnpm --filter @sparkelf/dsh-workbench-vault build && pnpm --filter @sparkelf/dsh-ssh-manager build && pnpm --filter @sparkelf/dsh-api-client build && pnpm --filter @sparkelf/dsh-mineru build && pnpm --filter @sparkelf/dsh-officecli build && pnpm --filter @sparkelf/dsh-office-viewer-fonts build && pnpm --dir packages/supervisor run build",
     "test": "vitest run packages && pnpm --dir packages/supervisor run test",
     "test:system": "playwright test --config=playwright.config.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "verify:published-peers": "node scripts/verify-published-peers.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
