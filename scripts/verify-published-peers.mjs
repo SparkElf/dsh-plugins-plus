@@ -65,15 +65,44 @@ function readBaseline(path) {
   return new Set(readFileSync(path, 'utf8').split('\n').map(line => line.trim()).filter(line => line !== '' && !line.startsWith('#')))
 }
 
+
+/**
+ * DSH versions a manifest's peer ranges must be able to match, and the range forms
+ * that cannot match a prerelease.
+ *
+ * A comparator range such as `>=0.1.3-alpha.2 <0.2.0` excludes every prerelease by
+ * semver's rules, so it can never match the rc the runtime actually is. Naming one
+ * exact prerelease is the form every other peer in these manifests already uses.
+ */
+function unsatisfiablePeers(manifest, runtimeVersion) {
+  const peers = manifest.peerDependencies
+  if (peers === null || typeof peers !== 'object' || Array.isArray(peers)) return []
+  const offenders = []
+  for (const [name, spec] of Object.entries(peers)) {
+    if (!name.startsWith('@deepseek-ai/dsh-')) continue
+    const text = String(spec)
+    // 比较范围（含 >= 或 < 或空格）对预发布版本一律不匹配
+    const isComparatorRange = /[<>]/u.test(text) || text.includes(' ')
+    if (isComparatorRange && runtimeVersion.includes('-')) offenders.push(name + ' → ' + text)
+  }
+  return offenders
+}
+
 function main() {
   const { values } = parseArgs({ options: { registry: { type: 'string' }, baseline: { type: 'string' }, 'write-baseline': { type: 'boolean' } } })
   const registry = values.registry ?? 'https://registry.npmjs.org'
   const baselinePath = values.baseline ?? resolve(process.cwd(), 'scripts/published-peer-drift.baseline')
   const baseline = readBaseline(baselinePath)
   const drift = []
+  const unsatisfiableDrift = []
   const unpublished = []
+  // 与插件 pin 的运行时版本一致；预发布版本是范围陷阱的关键输入。
+  const requiredRuntime = '0.1.5-rc.2'
   for (const entry of publishablePackages(process.cwd())) {
     const published = publishedManifest(entry.name, entry.version, registry)
+    // 范围可满足性只看源码，因此先于「是否已发布」判断。
+    const unsatisfiable = unsatisfiablePeers(entry.manifest, requiredRuntime)
+    if (unsatisfiable.length > 0) unsatisfiableDrift.push({ name: entry.name, version: entry.version, names: unsatisfiable })
     if (published === undefined) { unpublished.push(entry.name + '@' + entry.version); continue }
     const source = dshPeers(entry.manifest)
     const shipped = dshPeers({ peerDependencies: published })
@@ -81,6 +110,13 @@ function main() {
       .filter(name => source[name] !== shipped[name])
       .sort()
     if (names.length > 0) drift.push({ name: entry.name, version: entry.version, names })
+  }
+  if (unsatisfiableDrift.length > 0) {
+    console.error('verify-published-peers: ' + String(unsatisfiableDrift.length) + ' package(s) declare a peer range that cannot match ' + requiredRuntime + ':')
+    for (const entry of unsatisfiableDrift) console.error('  ' + entry.name + ' → ' + entry.names.join(', '))
+    console.error('A comparator range excludes every prerelease; name the exact runtime version instead.')
+    process.exitCode = 1
+    return
   }
   if (values['write-baseline'] === true) {
     const lines = drift.map(entry => entry.name + '@' + entry.version).sort()
