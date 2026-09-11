@@ -38,6 +38,11 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # An exact DSH peer cannot be corrected in place, so a runtime bump that is not
+      # republished leaves npm serving a plugin no consumer can install.
+      - name: Published peer drift
+        run: pnpm run verify:published-peers
+
       - name: Unit tests
         run: pnpm run test
 

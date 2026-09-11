@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-query-result-analysis",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Bounded, checkpointed batch model analysis for DSH query result references.",
   "type": "module",
   "main": "./lib/index.js",

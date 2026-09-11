@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-plugin-ping",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Connectivity smoke plugin for DeepSeek Harness: registers /ping, replies pong without a model call.",
   "main": "src/index.ts",

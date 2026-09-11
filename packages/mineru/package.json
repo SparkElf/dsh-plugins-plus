@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-mineru",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MinerU PDF parsing tool for DeepSeek Harness.",
   "type": "module",
   "main": "./lib/index.js",
