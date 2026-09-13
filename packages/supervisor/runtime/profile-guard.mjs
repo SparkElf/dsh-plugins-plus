@@ -140,13 +140,26 @@ function required(value, name) {
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = parse(process.argv.slice(2))
   const statePath = required(args.state, 'state')
-  const result = args.action === 'accept'
-    ? acceptProfile({
-        profilePath: required(args.profile, 'profile'),
-        profileLink: required(args['profile-link'], 'profile-link'),
-        manifestPath: required(args.manifest, 'manifest'),
-        statePath,
-      })
-    : args.action === 'guard' ? guardAcceptedProfile({ statePath }) : (() => { throw new Error('unknown profile guard action') })()
-  process.stdout.write(JSON.stringify(result) + LF)
+  try {
+    const result = args.action === 'accept'
+      ? acceptProfile({
+          profilePath: required(args.profile, 'profile'),
+          profileLink: required(args['profile-link'], 'profile-link'),
+          manifestPath: required(args.manifest, 'manifest'),
+          statePath,
+        })
+      : args.action === 'guard' ? guardAcceptedProfile({ statePath }) : (() => { throw new Error('unknown profile guard action') })()
+    process.stdout.write(JSON.stringify(result) + LF)
+  } catch (error) {
+    // The systemd unit sends stderr to the runtime log, so an unhandled rejection leaves
+    // the journal with only `status=1/FAILURE` while the reason accumulates in another
+    // file. Naming the cause, the state file, and the fix on one stderr line puts it where
+    // an operator looks first.
+    process.stderr.write('profile-guard: ' + (error instanceof Error ? error.message : String(error))
+      + LF + 'profile-guard: accepted state is ' + statePath
+      + LF + 'profile-guard: after changing the profile, record it with '
+      + "'profile-guard.mjs accept --profile <dir> --profile-link <link> --manifest <file> --state " + statePath + "'"
+      + LF)
+    process.exitCode = 1
+  }
 }

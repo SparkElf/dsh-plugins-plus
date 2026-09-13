@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -76,4 +78,28 @@ test('refuses rollback when the accepted closure was modified', async t => {
   acceptProfile({ profilePath: accepted, profileLink, manifestPath, statePath })
   writeFileSync(join(accepted, 'node_modules/@fixture/client/patches/ui.patch'), 'tampered' + LF)
   assert.throws(() => guardAcceptedProfile({ statePath }), /runtime closure was modified/u)
+})
+
+test('names the cause and the fix on stderr when the guard rejects a modified profile', async t => {
+  // The unit sends stderr to the runtime log, so a bare exit code leaves the journal
+  // with nothing to act on. The message must carry the cause and the recovery command.
+  const root = await mkdtemp(join(tmpdir(), 'dsh-profile-guard-cli-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const accepted = profile(root, 'accepted', 'export const ui = "current"')
+  const profileLink = join(root, 'profiles/plus')
+  const manifestPath = join(root, 'supervisor/runtime.json')
+  const statePath = join(root, 'supervisor/accepted-profile.json')
+  mkdirSync(join(root, 'profiles'), { recursive: true })
+  mkdirSync(join(root, 'supervisor'), { recursive: true })
+  symlinkSync(accepted, profileLink, 'dir')
+  writeFileSync(manifestPath, JSON.stringify({ runtime: { command: 'node', args: [], cwd: accepted } }) + LF)
+  acceptProfile({ profilePath: accepted, profileLink, manifestPath, statePath })
+  writeFileSync(join(accepted, 'node_modules/@fixture/client/patches/ui.patch'), 'tampered' + LF)
+
+  const guard = fileURLToPath(new URL('../runtime/profile-guard.mjs', import.meta.url))
+  const ran = spawnSync(process.execPath, [guard, 'guard', '--state', statePath], { encoding: 'utf8' })
+  assert.equal(ran.status, 1)
+  assert.match(ran.stderr, /runtime closure was modified/u)
+  assert.match(ran.stderr, /accept --profile/u)
+  assert.ok(ran.stderr.includes(statePath))
 })
