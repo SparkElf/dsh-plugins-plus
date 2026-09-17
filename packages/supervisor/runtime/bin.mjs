@@ -1,5 +1,15 @@
 #!/usr/bin/env node
-/** Command-line entry for serving or controlling one Plus Supervisor. */
+/**
+ * Command-line entry for serving or controlling one Plus Supervisor.
+ *
+ * Actions, in the order a deployment uses them:
+ *   serve                 run the Supervisor in this process (the systemd unit)
+ *   status                report state, port, and web pid without changing anything
+ *   start | stop          bring Web up or down under this Supervisor
+ *   restart               capture Sessions, stop, start, recover
+ *   reload                adopt the manifest on disk, then restart Web onto it
+ *   rebuild-and-restart   restart with a build first
+ */
 
 import { readSupervisorManifest } from './manifest.mjs'
 import { sendSupervisorCommand } from './client.mjs'

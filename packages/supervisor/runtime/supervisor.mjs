@@ -11,6 +11,11 @@ import { startProgressServer } from './progress-server.mjs'
 
 const RECOVERY_PATH = '/api/plus-supervisor/recovery'
 
+/** How many times a Web child that keeps exiting is restarted before the Supervisor stops trying. */
+const MAX_RESPAWN_ATTEMPTS = 5
+/** Base delay between respawns, multiplied by the attempt number. */
+const RESPAWN_BASE_DELAY_MS = 2000
+
 function pipePath(socketPath) {
   return process.platform === 'win32'
     ? String.fromCharCode(92, 92, 46, 92, 112, 105, 112, 101, 92) + socketPath
@@ -83,6 +88,9 @@ class RuntimeSupervisor {
     this.sockets = new Set()
     this.progressListeners = new Set()
     this.closing = undefined
+    this.respawnAttempts = 0
+    this.respawnTimer = undefined
+    this.stoppingWeb = false
   }
 
   async load() {
@@ -218,17 +226,62 @@ class RuntimeSupervisor {
     })
     this.web = child
     this.recordedWebPid = child.pid
-    child.once('exit', () => {
+    child.once('exit', (code, signal) => {
       if (this.web !== child) return
       this.web = undefined
       this.recordedWebPid = undefined
       this.running = false
-      this.writeStatus()
+      // A stop the Supervisor asked for is not a failure, so it neither respawns nor
+      // counts an attempt: only an exit the Supervisor did not request means the port
+      // went dark while the service is meant to be serving.
+      if (this.stoppingWeb || this.closing !== undefined) {
+        this.writeStatus()
+        return
+      }
+      const outcome = signal === null ? 'exit code ' + String(code) : 'signal ' + signal
+      console.error('[plus-supervisor] Harness Web exited with ' + outcome)
+      this.announce('web.exited', { outcome })
+      this.scheduleRespawn()
     })
     await this.waitForPort(child)
     await this.waitForRecoveryEntry(child)
     this.running = true
+    this.respawnAttempts = 0
     this.announce('ready.listening', { port: this.manifest.port })
+  }
+
+  /**
+   * Restart the Web child after it exited on its own.
+   *
+   * The Supervisor owns the port, so nothing else can bring the service back: the
+   * systemd unit watches this process, and this process previously only recorded that
+   * Web had died. A crash therefore left the service dark until an operator started it.
+   */
+  async scheduleRespawn() {
+    if (this.respawnTimer !== undefined || this.closing !== undefined) return
+    this.respawnAttempts += 1
+    if (this.respawnAttempts > MAX_RESPAWN_ATTEMPTS) {
+      this.announce('web.respawnExhausted', { attempts: this.respawnAttempts - 1 })
+      return
+    }
+    const delay = RESPAWN_BASE_DELAY_MS * this.respawnAttempts
+    this.announce('web.respawnScheduled', { attempt: this.respawnAttempts, delayMs: delay })
+    this.respawnTimer = setTimeout(() => {
+      this.respawnTimer = undefined
+      void this.startWeb().catch(error => {
+        console.error('[plus-supervisor] respawn failed', error)
+        this.announce('web.respawnFailed', { message: errorMessage(error) })
+        void this.scheduleRespawn()
+      })
+    }, delay)
+    this.respawnTimer.unref?.()
+  }
+
+  /** Cancel a pending respawn so a commanded stop is not undone by one. */
+  cancelRespawn() {
+    if (this.respawnTimer === undefined) return
+    clearTimeout(this.respawnTimer)
+    this.respawnTimer = undefined
   }
 
   async stopProcess(child) {
@@ -242,14 +295,23 @@ class RuntimeSupervisor {
   }
 
   async stop() {
-    const web = this.web
-    if (web !== undefined) await this.stopProcess(web)
-    else if (await this.portOpen()) await this.releaseExternalPort()
-    if (await this.portOpen()) throw new Error('Harness Web stopped but the configured port remains in use')
-    this.web = undefined
-    this.recordedWebPid = undefined
-    this.running = false
-    this.writeStatus()
+    // Mark the stop as commanded before the child exits, so the exit handler neither
+    // respawns it nor counts a restart attempt against a deliberate stop.
+    this.stoppingWeb = true
+    this.cancelRespawn()
+    try {
+      const web = this.web
+      if (web !== undefined) await this.stopProcess(web)
+      else if (await this.portOpen()) await this.releaseExternalPort()
+      if (await this.portOpen()) throw new Error('Harness Web stopped but the configured port remains in use')
+      this.web = undefined
+      this.recordedWebPid = undefined
+      this.running = false
+      this.respawnAttempts = 0
+      this.writeStatus()
+    } finally {
+      this.stoppingWeb = false
+    }
   }
 
   async build() {
@@ -304,6 +366,53 @@ class RuntimeSupervisor {
   }
 
   /** build完成后才捕获最终running集合，随后按stop、start、recover顺序完成同一次restart。 */
+  /**
+   * Adopt the manifest on disk, then restart Web onto whatever it names.
+   *
+   * The manifest is read once at start and the in-memory copy is what every later
+   * operation uses, so a mirror switch that edits the file is invisible to a running
+   * Supervisor. This is the command that makes the file authoritative again: it
+   * re-reads the runtime block, adopts the new mirror, and restarts Web against it in
+   * one operation, with the same Session capture and recovery a restart performs.
+   *
+   * @returns the status after the new Web is listening.
+   */
+  async reload() {
+    const previousRuntime = this.manifest.runtime
+    const runtime = await readSupervisorManifest(this.manifestPath)
+    if (typeof runtime.runtime?.args?.[0] !== 'string') {
+      throw new Error('Supervisor manifest has no runtime.args[0] to adopt')
+    }
+    // This process owns its listening socket and progress port for its whole life, so a
+    // manifest that moves either one describes a different Supervisor rather than a new
+    // runtime for this one. Failing here beats adopting half of it and serving a socket
+    // path the file no longer names.
+    if (runtime.socketPath !== this.manifest.socketPath) {
+      throw new Error('reload cannot move socketPath (' + this.manifest.socketPath + ' -> ' + runtime.socketPath + ')')
+    }
+    if (runtime.supervisorPort !== this.manifest.supervisorPort) {
+      throw new Error('reload cannot move supervisorPort (' + String(this.manifest.supervisorPort) + ' -> ' + String(runtime.supervisorPort) + ')')
+    }
+    const previousArgs0 = previousRuntime.args[0]
+    const nextArgs0 = runtime.runtime.args[0]
+    this.announce('reload.adopting', { from: previousArgs0, to: nextArgs0 })
+    const wasRunning = this.running || await this.portOpen()
+    const sessionIds = wasRunning ? await this.captureRunningSessions() : []
+    await this.stop()
+    // Adopt the whole manifest so dshHome, port, and the build spec follow the file too.
+    this.manifest = runtime
+    this.socketPath = pipePath(this.manifest.socketPath)
+    this.recordedWebPid = Number.isInteger(this.manifest.webPid) ? this.manifest.webPid : undefined
+    await this.startWeb()
+    const recovery = await this.recoverSessions(sessionIds)
+    this.announce('reload.complete', {
+      runtime: nextArgs0,
+      recovered: recovery.recovered.length,
+      failed: recovery.failed.length,
+    })
+    return this.status()
+  }
+
   async restart(rebuild) {
     const wasRunning = this.running || await this.portOpen()
     this.announce(rebuild ? 'restart.preparingBuild' : 'restart.preparing')
@@ -340,6 +449,7 @@ class RuntimeSupervisor {
       if (command === 'start') await this.startWeb()
       else if (command === 'stop') await this.stop()
       else if (command === 'restart') return await this.restart(false)
+      else if (command === 'reload') return await this.reload()
       else if (command === 'rebuild-and-restart') return await this.restart(true)
       else throw new Error('unknown Supervisor command: ' + command)
       return this.status()
@@ -420,6 +530,7 @@ class RuntimeSupervisor {
       this.sockets.clear()
       const build = this.buildProcess
       this.buildProcess = undefined
+      this.cancelRespawn()
       if (build !== undefined) await this.stopProcess(build)
       await this.stop()
       if (this.logHandle !== undefined) closeSync(this.logHandle)
