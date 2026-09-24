@@ -197,7 +197,13 @@ export async function startProgressServer({ port, manifestPath, socketPath, logP
       response.end('Not found')
     } catch (error) {
       console.error('[supervisor-progress] request failed', error)
-      response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+      // A failure can strike after writeHead already sent the status - an SSE stream, or an
+      // asset response - and a stream cannot report it any more. Writing a second head throws
+      // ERR_HTTP_HEADERS_SENT, which is uncaught here and killed the whole Supervisor process,
+      // taking the service down with it. Report only while the head is still ours.
+      if (!response.headersSent) {
+        response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+      }
       response.end(JSON.stringify({ error: errorMessage(error) }))
     }
   })
