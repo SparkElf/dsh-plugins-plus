@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import QRCode from 'qrcode/lib/browser.js'
-import { Button, IconStopFill16, Input, Modal, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconStopFillRegular, Input, Modal, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from './contract.ts'
 import css from './MobileBridgeSection.module.css'
@@ -375,7 +375,7 @@ export function MobileBridgeSection(props: MobileBridgeSectionProps): ReactNode 
                       <span>{t('lastSeen')} {new Date(device.lastSeenAt).toLocaleString()}</span>
                       {status.domDiagnosticsEnabled ? <span>{diagnosticText(device.id)}</span> : null}
                     </span>
-                    <Button variant="outline" size="sm" icon={<IconStopFill16 size={14} />} className={css.disconnectButton} onClick={() => { setDisconnectTarget(device) }}>
+                    <Button variant="outline" size="sm" icon={<IconStopFillRegular size={14} />} className={css.disconnectButton} onClick={() => { setDisconnectTarget(device) }}>
                       {t('disconnect')}
                     </Button>
                   </li>
