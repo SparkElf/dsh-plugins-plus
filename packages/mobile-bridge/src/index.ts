@@ -369,30 +369,59 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   let handleSettingsChange = (): void => { restartConnection() }
   let connectNow = (): MobileBridgeStatusView => statusView()
   let disconnectNow = (): MobileBridgeStatusView => statusView()
+  // The bridge's own identity has to exist before the tunnel can start, and it must not depend on
+  // a service that may be absent: when 'settings' is not composed (a runtime without
+  // config-editor/profileContext disables it, and every namespace then fails to register) this
+  // callback never ran, so the identity was never minted, the status read as
+  // "mobile-bridge settings namespace is unavailable", and the phone had no ticket to scan.
+  //
+  // Identity is therefore resolved from config first — which the profile already carries — and only
+  // falls back to the settings scope for live edits when that service is present. The composed
+  // config is the same document the settings page writes, so both paths see one value.
+  const identityFrom = (value: MobileBridgeConfig): MobileBridgeConfig => {
+    const withIdentity = { ...value }
+    if (withIdentity.bridgeId === '') withIdentity.bridgeId = randomBytes(16).toString('hex')
+    if (withIdentity.bridgeToken === '') withIdentity.bridgeToken = randomBytes(32).toString('hex')
+    if (withIdentity.bridgeSecret === '') withIdentity.bridgeSecret = randomBytes(16).toString('hex')
+    return withIdentity
+  }
+  let runtimeConfig = identityFrom(normalizeConfig(config))
+  current = () => runtimeConfig
+  lastConnectionConfig = current()
+  connectionRequested = current().autoConnect
+
+  let settingsServiceAvailable = false
   ctx.inject(['settings'], settingsCtx => {
+    settingsServiceAvailable = true
     const settings = (settingsCtx as Context & { settings: SettingsProvider }).settings
-    const scope = settings.register(MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, { base: config })
-    current = () => normalizeConfig(scope.get())
+    const scope = settings.register(MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, { base: runtimeConfig })
+    current = () => identityFrom(normalizeConfig(scope.get()))
+    runtimeConfig = current()
     lastConnectionConfig = current()
     settingsCtx.effect(() => () => {
       if (isUnloading(ctx)) return
-      current = () => normalizeConfig(config)
+      current = () => runtimeConfig
       handleSettingsChange()
     })
     handleSettingsChange()
     scope.watch(() => {
       if (isUnloading(ctx)) return
+      runtimeConfig = current()
       handleSettingsChange()
     })
 
     const resolved = scope.get()
     if (resolved.bridgeId !== '' && resolved.bridgeToken !== '' && resolved.bridgeSecret !== '') return
+    // Persist the minted identity so it survives a restart and the phone keeps the pairing.
     void scope.update({
-      bridgeId: resolved.bridgeId || randomBytes(16).toString('hex'),
-      bridgeToken: resolved.bridgeToken || randomBytes(32).toString('hex'),
-      bridgeSecret: resolved.bridgeSecret || randomBytes(16).toString('hex'),
+      bridgeId: resolved.bridgeId || current().bridgeId,
+      bridgeToken: resolved.bridgeToken || current().bridgeToken,
+      bridgeSecret: resolved.bridgeSecret || current().bridgeSecret,
     }).catch((error: unknown) => { console.error('[dsh-mobile-bridge] identity persistence failed', error) })
   })
+  // Without the settings service the minted identity still has to reach connect(); announce it as
+  // though a setting had changed so the tunnel starts on the config path.
+  handleSettingsChange()
 
   const state = {
     socket: undefined as WebSocket | undefined,
@@ -850,6 +879,51 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
         if (req.method === 'POST' && path === '/mobile/bridge/disconnect') {
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(disconnectNow()))
+          return
+        }
+        // The composed configuration, read from the same snapshot connect() uses.
+        //
+        // The settings page normally reads this through the settings service, but that service is
+        // absent on a runtime without config-editor/profileContext — every namespace then fails to
+        // register and the page shows "读取移动连接配置失败" while the tunnel itself is fine. This
+        // endpoint is the one authority on what the bridge actually runs with.
+        if (req.method === 'POST' && path.startsWith('/mobile/bridge/config')) {
+          // MobileRequest exposes the body as an async iterator of chunks, not a decoded field.
+          void (async () => {
+          try {
+            const chunks: Buffer[] = []
+            for await (const chunk of req as AsyncIterable<string | Uint8Array>) {
+              chunks.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : Buffer.from(chunk))
+            }
+            const decoded = Buffer.concat(chunks).toString('utf8')
+            const parsed = JSON.parse(decoded === '' ? '{}' : decoded) as Partial<MobileBridgeConfig>
+            runtimeConfig = identityFrom({ ...runtimeConfig, ...parsed })
+            current = () => runtimeConfig
+            handleSettingsChange()
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: true }))
+          } catch (error) {
+            res.writeHead(400, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: String(error) }))
+          }
+          })()
+          return
+        }
+        if (path.startsWith('/mobile/bridge/config')) {
+          const resolved = current()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({
+            serverUrl: resolved.serverUrl,
+            localPort: resolved.localPort,
+            ownerEmail: resolved.ownerEmail,
+            emailTwoFactor: resolved.emailTwoFactor,
+            sessionDays: resolved.sessionDays,
+            autoConnect: resolved.autoConnect,
+            autoReconnect: resolved.autoReconnect,
+            domDiagnostics: resolved.domDiagnostics,
+            userKeySet: resolved.userKey !== '',
+            settingsAvailable: settingsServiceAvailable,
+          }))
           return
         }
         if (path.startsWith('/mobile/bridge/status')) {

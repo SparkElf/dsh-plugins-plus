@@ -64,31 +64,70 @@ export function apply(ctx: MobileBridgeClientContext): void {
   }, 'dsh-mobile-bridge: narrow-screen stylesheet')
 
   const operations: MobileBridgeSectionInjected = {
+    // Values come from the settings service when it is composed, and from the bridge's own config
+    // endpoint when it is not.
+    //
+    // A runtime without config-editor/profileContext disables the settings service, so every
+    // namespace fails to register; reading only through it left this page showing
+    // "读取移动连接配置失败" and no QR code while the tunnel was actually connected. The config
+    // endpoint reports what the bridge is really running with, so the page renders either way.
     loadValues: async () => {
-      const value = await rpc<SettingsDescription>('settings/describe', {})
-      const row = value.namespaces.find(candidate => candidate.ns === SETTINGS_NS)
-      if (row === undefined) throw new Error('mobile-bridge settings namespace is unavailable')
-      const userKeySet = row.secrets.some(secret => secret.set && secret.path.length === 1 && secret.path[0] === 'userKey')
-      return {
-        serverUrl: normalizeServerUrl(row.value.serverUrl),
-        localPort: row.value.localPort,
-        userKey: '',
-        userKeySet,
-        ownerEmail: row.value.ownerEmail,
-        emailTwoFactor: row.value.emailTwoFactor,
-        sessionDays: row.value.sessionDays,
-        autoConnect: row.value.autoConnect,
-        autoReconnect: row.value.autoReconnect,
-        domDiagnostics: row.value.domDiagnostics,
+      try {
+        const value = await rpc<SettingsDescription>('settings/describe', {})
+        const row = value.namespaces.find(candidate => candidate.ns === SETTINGS_NS)
+        if (row === undefined) throw new Error('mobile-bridge settings namespace is unavailable')
+        const userKeySet = row.secrets.some(secret => secret.set && secret.path.length === 1 && secret.path[0] === 'userKey')
+        return {
+          serverUrl: normalizeServerUrl(row.value.serverUrl),
+          localPort: row.value.localPort,
+          userKey: '',
+          userKeySet,
+          ownerEmail: row.value.ownerEmail,
+          emailTwoFactor: row.value.emailTwoFactor,
+          sessionDays: row.value.sessionDays,
+          autoConnect: row.value.autoConnect,
+          autoReconnect: row.value.autoReconnect,
+          domDiagnostics: row.value.domDiagnostics,
+        }
+      } catch (settingsError) {
+        const response = await fetch('/mobile/bridge/config')
+        if (!response.ok) throw settingsError
+        const row = await response.json() as {
+          serverUrl: string; localPort: number; ownerEmail: string; emailTwoFactor: boolean
+          sessionDays: number; autoConnect: boolean; autoReconnect: boolean
+          domDiagnostics: boolean; userKeySet: boolean
+        }
+        return {
+          serverUrl: normalizeServerUrl(row.serverUrl),
+          localPort: row.localPort,
+          userKey: '',
+          userKeySet: row.userKeySet,
+          ownerEmail: row.ownerEmail,
+          emailTwoFactor: row.emailTwoFactor,
+          sessionDays: row.sessionDays,
+          autoConnect: row.autoConnect,
+          autoReconnect: row.autoReconnect,
+          domDiagnostics: row.domDiagnostics,
+        }
       }
     },
     saveValues: async values => {
       const { userKey, userKeySet, ...publicValues } = values
       const persisted = { ...publicValues, serverUrl: normalizeServerUrl(values.serverUrl) }
-      await rpc('settings/update', {
-        ns: SETTINGS_NS,
-        patch: { ...persisted, ...userKey === '' ? {} : { userKey } },
-      })
+      try {
+        await rpc('settings/update', {
+          ns: SETTINGS_NS,
+          patch: { ...persisted, ...userKey === '' ? {} : { userKey } },
+        })
+      } catch {
+        // Without the settings service the same edits still have to reach the running bridge.
+        const response = await fetch('/mobile/bridge/config', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...persisted, ...userKey === '' ? {} : { userKey } }),
+        })
+        if (!response.ok) throw new Error('mobile-bridge config save failed with HTTP ' + String(response.status))
+      }
       return { ...persisted, userKey: '', userKeySet: userKeySet || userKey !== '' }
     },
     loadStatus: async () => {
