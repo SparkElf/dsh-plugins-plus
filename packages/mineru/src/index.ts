@@ -21,7 +21,9 @@ export interface Config {
 
 /** MinerU configuration schema. */
 export const Config: z<Config> = z.object({
-  endpoint: z.string().required(),
+  // 普通必填字段用 z.string()：新版 cordis 把 .required() 的取值包装成 Volatile 引用，
+  // 会让这里的 Config 不再满足 z<Config> 的取值合同。与 dataops-integration 的 callbackOrigin 保持一致。
+  endpoint: z.string(),
 })
 
 /** Cordis plugin name. */

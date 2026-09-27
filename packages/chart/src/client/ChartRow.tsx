@@ -1,6 +1,6 @@
 /** Keyed `render_chart` tool row with the chart as its primary completed content. */
 
-import { IconInspectOutline12 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconInspectOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
 import { ChartCanvas } from './ChartCanvas.tsx'
@@ -27,7 +27,7 @@ export function ChartRow({ block, inspect, t }: ChartRowProps) {
         <span>{result.isError ? t('state.failed') : t('state.unavailable')}</span>
         {inspect !== undefined && (
           <button type="button" className={css.inspect} onClick={inspect} aria-label={t('action.inspect')}>
-            <IconInspectOutline12 />
+            <IconInspectOutlineMedium />
           </button>
         )}
       </div>
@@ -40,7 +40,7 @@ export function ChartRow({ block, inspect, t }: ChartRowProps) {
         <h3 className={css.title}>{title}</h3>
         {inspect !== undefined && (
           <button type="button" className={css.inspect} onClick={inspect} aria-label={t('action.inspect')}>
-            <IconInspectOutline12 />
+            <IconInspectOutlineMedium />
           </button>
         )}
       </header>

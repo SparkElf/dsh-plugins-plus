@@ -23,7 +23,7 @@ export function apply(ctx: Context): void {
     id: TAB_ID,
     kind: TAB_KIND,
     title: () => translate(ctx, 'tab.ssh'),
-    guide: [{ order: 46, title: () => translate(ctx, 'tab.ssh'), description: () => translate(ctx, 'tab.ssh'), icon: VscRemoteExplorer }],
+    guide: [{ id: 'ssh-manager.guide', order: 46, title: () => translate(ctx, 'tab.ssh'), description: () => translate(ctx, 'tab.ssh'), icon: VscRemoteExplorer }],
   }), 'ssh-manager: right Sidebar type')
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
     { name: 'sidebar.right.pane.tab', key: TAB_ID },

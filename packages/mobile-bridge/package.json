@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-mobile-bridge",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "DeepSeek Harness plugin: an outbound E2EE tunnel, mobile presentation, and first-class Mobile Bridge settings section.",
   "type": "module",
   "main": "./lib/index.js",
@@ -58,10 +58,10 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5-rc.2",
-    "@deepseek-ai/dsh-settings": ">=0.1.5-rc.2",
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": "0.1.7-rc.2",
     "react": ">=18.2.0 <20"
   },
   "dependencies": {
@@ -69,11 +69,11 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-invariants": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-settings": "0.1.5-rc.2",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": "0.1.7-rc.2",
     "@types/qrcode": "^1.5.5",
     "@types/react": "~18.3.1",
     "lightningcss": "^1.32.0",

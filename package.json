@@ -12,17 +12,17 @@
     "verify:published-peers": "node scripts/verify-published-peers.mjs"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/cordis-plugin-include": "1.0.7",
-    "@deepseek-ai/cordis-plugin-loader": "1.0.3",
-    "@deepseek-ai/dsh-attachment": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.2",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis-plugin-include": "1.0.9",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.5",
+    "@deepseek-ai/dsh-attachment": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "0.1.7-rc.2",
     "@deepseek-ai/dsh-code-runtime": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-home-paths": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-launch-environment": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-scope": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-session-projection": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-subprocess": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-scope": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.1.7-rc.2",
     "@deepseek-ai/schemastery": "3.18.2",
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^8.0.1",
@@ -33,5 +33,12 @@
     "typescript": "^5.6.0",
     "vitest": "^4.1.8",
     "yaml": "2.9.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@deepseek-ai/cordis": "4.0.4",
+      "@deepseek-ai/cordis-plugin-loader": "1.0.5",
+      "@deepseek-ai/cordis-plugin-include": "1.0.9"
+    }
   }
 }

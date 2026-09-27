@@ -21,7 +21,7 @@ export function apply(ctx: Context): void {
     id: TAB_ID,
     kind: TAB_KIND,
     title: () => translate(ctx, 'tab.api'),
-    guide: [{ order: 47, title: () => translate(ctx, 'tab.api'), description: () => translate(ctx, 'tab.api'), icon: VscCloud }],
+    guide: [{ id: 'api-client.guide', order: 47, title: () => translate(ctx, 'tab.api'), description: () => translate(ctx, 'tab.api'), icon: VscCloud }],
   }), 'api-client: right Sidebar type')
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
     { name: 'sidebar.right.pane.tab', key: TAB_ID },

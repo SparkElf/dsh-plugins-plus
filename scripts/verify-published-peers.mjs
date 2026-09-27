@@ -97,7 +97,7 @@ function main() {
   const unsatisfiableDrift = []
   const unpublished = []
   // 与插件 pin 的运行时版本一致；预发布版本是范围陷阱的关键输入。
-  const requiredRuntime = '0.1.5-rc.2'
+  const requiredRuntime = '0.1.7-rc.2'
   for (const entry of publishablePackages(process.cwd())) {
     const published = publishedManifest(entry.name, entry.version, registry)
     // 范围可满足性只看源码，因此先于「是否已发布」判断。

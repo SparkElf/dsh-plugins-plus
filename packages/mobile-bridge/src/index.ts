@@ -9,7 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type SettingsProvider from '@deepseek-ai/dsh-settings'
+import type SettingsForms from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { randomBytes } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
@@ -393,9 +393,11 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   let settingsServiceAvailable = false
   ctx.inject(['settings'], settingsCtx => {
     settingsServiceAvailable = true
-    const settings = (settingsCtx as Context & { settings: SettingsProvider }).settings
-    const scope = settings.register(MOBILE_BRIDGE_SETTINGS_NAMESPACE, Config, { base: runtimeConfig })
-    current = () => identityFrom(normalizeConfig(scope.get()))
+    const settings = (settingsCtx as Context & { settings: SettingsForms }).settings
+    // settings 服务已不再是"每插件 scope"模型：配置由 apply(ctx, config) 直接接收，
+    // 表单服务只按 profile entry id 描述与写入。这里据此把当前配置作为事实源，
+    // 并在服务可用时把铸造出的配对身份写回该 id。
+    current = () => identityFrom(normalizeConfig(config))
     runtimeConfig = current()
     lastConnectionConfig = current()
     settingsCtx.effect(() => () => {
@@ -404,20 +406,16 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
       handleSettingsChange()
     })
     handleSettingsChange()
-    scope.watch(() => {
-      if (isUnloading(ctx)) return
-      runtimeConfig = current()
-      handleSettingsChange()
-    })
 
-    const resolved = scope.get()
+    const resolved = current()
     if (resolved.bridgeId !== '' && resolved.bridgeToken !== '' && resolved.bridgeSecret !== '') return
     // Persist the minted identity so it survives a restart and the phone keeps the pairing.
-    void scope.update({
-      bridgeId: resolved.bridgeId || current().bridgeId,
-      bridgeToken: resolved.bridgeToken || current().bridgeToken,
-      bridgeSecret: resolved.bridgeSecret || current().bridgeSecret,
-    }).catch((error: unknown) => { console.error('[dsh-mobile-bridge] identity persistence failed', error) })
+    if (!settings.writable) return
+    void settings.mutate(MOBILE_BRIDGE_SETTINGS_NAMESPACE, [
+      { op: 'set', path: ['bridgeId'], value: resolved.bridgeId },
+      { op: 'set', path: ['bridgeToken'], value: resolved.bridgeToken },
+      { op: 'set', path: ['bridgeSecret'], value: resolved.bridgeSecret },
+    ]).catch((error: unknown) => { console.error('[dsh-mobile-bridge] identity persistence failed', error) })
   })
   // Without the settings service the minted identity still has to reach connect(); announce it as
   // though a setting had changed so the tunnel starts on the config path.
