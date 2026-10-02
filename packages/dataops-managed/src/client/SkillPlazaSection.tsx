@@ -9,7 +9,6 @@ import {
   IconSkillOutlineRegular,
   IconSparkleRegular,
   IconTrashOutlineRegular,
-  Input,
   Pill,
   Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -176,17 +175,19 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
       {head}
 
       <div className={styles.toolbar}>
-        <Input
-          className={styles.search}
-          icon={<IconSearchOutlineRegular size={16} />}
-          placeholder={t('plazaSearch')}
-          value={query}
-          onChange={(event) => {
-            const next = event.target.value
-            setQuery(next)
-            void refresh(tag, next)
-          }}
-        />
+        <div className={styles.searchWrap}>
+          <span className={styles.searchIcon} aria-hidden="true"><IconSearchOutlineRegular size={16} /></span>
+          <input
+            className={styles.search}
+            placeholder={t('plazaSearch')}
+            value={query}
+            onChange={(event) => {
+              const next = event.target.value
+              setQuery(next)
+              void refresh(tag, next)
+            }}
+          />
+        </div>
         <Button
           variant="ghost"
           size="sm"
