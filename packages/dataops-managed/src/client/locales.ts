@@ -43,6 +43,8 @@ export const en = {
   plazaUnavailable: 'The skill plaza is available once this workspace is connected to DataOps.',
   plazaLoadFailed: 'The skill plaza could not be loaded. Try again.',
   plazaActionFailed: 'The action could not be completed. Try again.',
+  plazaRetry: 'Try again',
+  plazaRefresh: 'Refresh',
 } as const
 
 /** Stable key set shared by every managed DataOps locale. */
@@ -93,4 +95,6 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   plazaUnavailable: '工作区接入 DataOps 后即可使用技能广场。',
   plazaLoadFailed: '技能广场加载失败，请重试。',
   plazaActionFailed: '操作未完成，请重试。',
+  plazaRetry: '重试',
+  plazaRefresh: '刷新',
 }
