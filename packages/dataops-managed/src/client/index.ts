@@ -2,7 +2,10 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: pulls the skill center's slot declaration so this plugin can contribute to it.
+import type {} from '@sparkelf/dsh-client-ui-skill-center/client'
 import { ManagedDataOpsSection } from './ManagedDataOpsSection.tsx'
+import { SkillPlazaSection } from './SkillPlazaSection.tsx'
 import { installWanxiangBranding } from './install-branding.tsx'
 import type { ManagedDataOpsSectionInjected } from './ManagedDataOpsSection.tsx'
 import { en, zh, type ManagedDataOpsKey } from './locales.ts'
@@ -35,6 +38,20 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     inject: () => ({ t }),
   }, ManagedDataOpsSection))
+
+  /**
+   * The skill plaza, contributed to the skill center page.
+   *
+   * The skill center declares the slot and renders whatever it holds; a profile without this
+   * plugin leaves it empty, which is what keeps the plaza out of a deployment that never
+   * installed DataOps.
+   */
+  ctx.slots.inject('skill-center.section', () => ctx.slots.register({
+    name: 'skill-center.section',
+    id: 'dataops-plaza',
+    order: 10,
+    inject: () => ({ t }),
+  }, SkillPlazaSection))
 
   const synchronizeJwt = async (): Promise<void> => {
     const response = await fetch(new URL(MANAGED_AUTH_PATH, window.location.origin), {

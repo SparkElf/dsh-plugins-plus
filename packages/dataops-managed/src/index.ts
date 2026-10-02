@@ -8,11 +8,12 @@ import * as McpClient from '@sparkelf/dsh-plugin-mcp-credentials'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-settings'
 import { ModelSync, type SyncStateStore } from './model-sync.ts'
+import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
 
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
 /** Host services required by managed JWT and MCP ownership. */
-export const inject = ['credentials', 'webServer', 'tools', 'settings']
+export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills']
 
 export const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
 
@@ -22,8 +23,19 @@ export const MANAGED_PLUGIN_ID = 'dataops-managed'
 /** Same-origin route the workspace settings pages use to read and change model sharing. */
 export const MODEL_SYNC_PATH = '/integrations/dataops/model-sync'
 
+/** Same-origin route the skill center uses to read and change plaza sharing. */
+export const SKILL_PLAZA_PATH = '/integrations/dataops/skill-plaza'
+
 /** The live sync instance, so the settings routes can act on it after activation. */
 let modelSyncRef: ModelSync | undefined
+
+/** The live plaza instance, so the skill center routes can act on it after activation. */
+let skillPlazaRef: SkillPlaza | undefined
+
+/** The live skill plaza, once this plugin activated. */
+export function currentSkillPlaza(): SkillPlaza | undefined {
+  return skillPlazaRef
+}
 
 /** The live model-sync instance, once this plugin activated. */
 export function currentModelSync(): ModelSync | undefined {
@@ -142,6 +154,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   const modelSync = new ModelSync(ctx, { baseUrl, credentialRef: config.credentialRef }, syncStore)
   modelSyncRef = modelSync
+  const skillPlaza = new SkillPlaza(ctx, { baseUrl, credentialRef: config.credentialRef })
+  skillPlazaRef = skillPlaza
 
   /**
    * Adopt the publisher's models once the workspace has a session.
@@ -243,6 +257,70 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'dataops-managed: model sync routes')
+
+  /**
+   * The skill plaza surface the workspace's skill center reads and writes.
+   *
+   * Same-origin only, like the model routes: the browser reaches these through the gateway
+   * that already authenticated it, and the DataOps JWT they act with is the one this plugin
+   * holds rather than a value the page supplies.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: SKILL_PLAZA_PATH,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      const plaza = currentSkillPlaza()
+      if (plaza === undefined) {
+        writeJson(response, 503, { error: 'skill plaza is not active' })
+        return
+      }
+      try {
+        if (request.method === 'GET') {
+          const url = new URL(request.url ?? '/', 'http://localhost')
+          writeJson(response, 200, {
+            skills: await plaza.list({ tag: url.searchParams.get('tag') ?? undefined, query: url.searchParams.get('q') ?? undefined }),
+            tags: await plaza.tags(),
+          })
+          return
+        }
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' })
+          response.end()
+          return
+        }
+        const body = await readJson(request)
+        const action = typeof body?.action === 'string' ? body.action : ''
+        if (action === 'local-skills') {
+          writeJson(response, 200, { skills: await readLocalSkills(ctx) })
+          return
+        }
+        if (action === 'share') {
+          const name = typeof body?.name === 'string' ? body.name : ''
+          const instruction = typeof body?.instruction === 'string' ? body.instruction : ''
+          const description = typeof body?.description === 'string' ? body.description : undefined
+          const tags = Array.isArray(body?.tags) ? body.tags.filter((tag): tag is string => typeof tag === 'string') : []
+          const shared = await plaza.share({ name, description, instruction, tags })
+          writeJson(response, 200, { skill: shared })
+          return
+        }
+        if (action === 'unshare') {
+          if (typeof body?.id === 'number') await plaza.unshare(body.id)
+          writeJson(response, 200, { success: true })
+          return
+        }
+        if (action === 'install') {
+          const result = typeof body?.id === 'number' ? await plaza.install(body.id) : null
+          writeJson(response, 200, result ?? { installed: false, skillKey: null, keptLocal: false })
+          return
+        }
+        writeJson(response, 400, { error: 'unknown action' })
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: skill plaza request failed')
+        ctx.logger.warn(error)
+        writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: skill plaza routes')
 }
 
 /** Read and parse a JSON request body, tolerating an absent one. */
