@@ -4,7 +4,6 @@ import {
   Button,
   IconDownloadOutlineRegular,
   IconRefreshOutlineRegular,
-  IconSearchOutlineRegular,
   IconShareOutlineRegular,
   IconSkillOutlineRegular,
   IconSparkleRegular,
