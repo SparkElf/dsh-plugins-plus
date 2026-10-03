@@ -50,47 +50,24 @@
 }
 
 .toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   margin-bottom: 12px;
 }
 
-/* The skill center's own search field: a 36px box on the tertiary hairline with a 10px radius,
-   so this one and the page's read as the same control. The icon sits inside the frame, which is
-   why this is not the settings panel's Input primitive -- that one is 32px and carries its own
-   frame, and next to the page's field the two read as different controls. */
-.searchWrap {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
+/* The skill center's own search field, restated rather than approximated: same 36px height,
+   10px radius, 12px inset, hairline on the input itself, and full width. An earlier version put
+   the frame on a wrapper beside a refresh button, which left this field 44px narrower than the
+   one above it and drew its border on the wrong element. */
+.search {
   box-sizing: border-box;
+  width: 100%;
   height: 36px;
   padding: 0 12px;
-  border: 0.5px solid var(--dsw-alias-border-l3);
+  border: 1px solid var(--dsw-alias-border-l3);
   border-radius: 10px;
-}
-
-.searchWrap:focus-within {
-  border-color: var(--dsw-alias-state-business-primary);
-}
-
-.searchIcon {
-  display: inline-flex;
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.search {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  outline: none;
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font-size: 13px;
+  outline: none;
 }
 
 .search::placeholder {

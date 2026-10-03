@@ -175,26 +175,15 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
       {head}
 
       <div className={styles.toolbar}>
-        <div className={styles.searchWrap}>
-          <span className={styles.searchIcon} aria-hidden="true"><IconSearchOutlineRegular size={16} /></span>
-          <input
-            className={styles.search}
-            placeholder={t('plazaSearch')}
-            value={query}
-            onChange={(event) => {
-              const next = event.target.value
-              setQuery(next)
-              void refresh(tag, next)
-            }}
-          />
-        </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          icon={<IconRefreshOutlineRegular size={16} />}
-          aria-label={t('plazaRefresh')}
-          disabled={busy}
-          onClick={() => { void refresh() }}
+        <input
+          className={styles.search}
+          placeholder={t('plazaSearch')}
+          value={query}
+          onChange={(event) => {
+            const next = event.target.value
+            setQuery(next)
+            void refresh(tag, next)
+          }}
         />
       </div>
 
