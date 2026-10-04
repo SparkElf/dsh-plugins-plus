@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-dataops-managed",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "DataOps JWT intake and credential-backed MCP tools for managed DeepSeek Harness workspaces.",
   "type": "module",
   "main": "./lib/index.js",
@@ -71,7 +71,7 @@
     "@deepseek-ai/dsh-credentials": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-host-webserver": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-settings": ">=0.1.7-rc.2",
-    "@deepseek-ai/dsh-skill": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-skill": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": ">=0.1.7-rc.2",
     "@deepseek-ai/schemastery": ">=3.18.1",
     "@sparkelf/dsh-plugin-mcp-credentials": ">=0.1.0-rc.14",
