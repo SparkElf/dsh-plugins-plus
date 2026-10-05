@@ -1,0 +1,39 @@
+{
+  "name": "@sparkelf/dsh-image-hoist",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Route-compatible tool-result image hoisting: move images returned by tools onto the preceding user message for upstreams that cannot read function_call_output images",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./projection": {
+      "default": "./lib/projection.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/projection.js",
+    "README.md"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-session": ">=0.2.1-alpha.1",
+    "@deepseek-ai/schemastery": ">=3.18.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "verify:published-peers": "node ../../scripts/verify-published-peers.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SparkElf/dsh-plugins-plus.git",
+    "directory": "packages/image-hoist"
+  }
+}
