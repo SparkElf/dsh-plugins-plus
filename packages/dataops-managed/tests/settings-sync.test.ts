@@ -133,6 +133,40 @@ describe('SettingsSync.adopt', () => {
   })
 })
 
+describe('SettingsSync.status', () => {
+  it('reports a mounted namespace the workspace still follows', async () => {
+    const values: SectionValues = { permission: { a: 1 } }
+    const sync = new SettingsSync(contextFor(values) as never, storeFor())
+
+    expect(sync.status(['permission'])).toEqual([
+      { ns: 'permission', followState: 'following', applied: false, mounted: true },
+    ])
+  })
+
+  it('marks a namespace no plugin owns, so a row for it is not offered as applicable', () => {
+    const sync = new SettingsSync(contextFor({}) as never, storeFor())
+
+    expect(sync.status(['absent'])).toEqual([
+      { ns: 'absent', followState: 'following', applied: false, mounted: false },
+    ])
+  })
+
+  it('reports applied and detached after adoption and a detach', async () => {
+    const values: SectionValues = { permission: { a: 1 } }
+    const sync = new SettingsSync(contextFor(values) as never, storeFor())
+
+    await sync.adopt([section('permission', { a: 2 })])
+    expect(sync.status(['permission'])).toEqual([
+      { ns: 'permission', followState: 'following', applied: true, mounted: true },
+    ])
+
+    await sync.detach('permission')
+    expect(sync.status(['permission'])).toEqual([
+      { ns: 'permission', followState: 'detached', applied: true, mounted: true },
+    ])
+  })
+})
+
 describe('SettingsSync.detach', () => {
   it('stops a later publication from replacing what the workspace holds', async () => {
     const values: SectionValues = { permission: { defaultPreset: 'workspace-write' } }

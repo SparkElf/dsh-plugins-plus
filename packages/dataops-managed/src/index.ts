@@ -311,7 +311,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
       try {
         if (request.method === 'GET') {
-          writeJson(response, 200, await sync.status())
+          writeJson(response, 200, {
+            ...await sync.status(),
+            // The sections travel beside the models because the panel shows both, and a separate
+            // request would let the two rows disagree about which publication they describe.
+            sections: settingsSyncRef === undefined ? [] : settingsSyncRef.status(distributedNamespaces()),
+          })
           return
         }
         if (request.method !== 'POST') {
@@ -330,6 +335,19 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         if (action === 'detach') {
           await sync.detach()
           writeJson(response, 200, await sync.status())
+          return
+        }
+        if (action === 'detach-section') {
+          const ns = typeof body?.ns === 'string' ? body.ns.trim() : ''
+          if (ns === '') {
+            writeJson(response, 400, { error: 'detach-section needs a namespace' })
+            return
+          }
+          await settingsSyncRef?.detach(ns)
+          writeJson(response, 200, {
+            ...await sync.status(),
+            sections: settingsSyncRef === undefined ? [] : settingsSyncRef.status(distributedNamespaces()),
+          })
           return
         }
         if (action === 'resume') {

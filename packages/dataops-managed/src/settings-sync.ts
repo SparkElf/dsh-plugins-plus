@@ -30,6 +30,18 @@ interface SettingsEntry {
 /** Whether this workspace still follows the publisher for one namespace. */
 export type SectionFollowState = 'following' | 'detached'
 
+/** One distributed namespace as the settings UI reads it. */
+export interface DistributedSectionStatus {
+  /** DSH settings namespace. */
+  ns: string
+  /** Whether this workspace still takes the publisher's values for it. */
+  followState: SectionFollowState
+  /** Whether adoption has applied values for it. */
+  applied: boolean
+  /** Whether a plugin in this workspace owns the namespace, so applying it would do something. */
+  mounted: boolean
+}
+
 /** Per-namespace bookkeeping this workspace keeps. */
 export interface SectionSyncRecord {
   /** Whether the user here wrote this namespace, so adoption stops for it. */
@@ -153,6 +165,28 @@ export class SettingsSync {
 
     if (stateChanged) await this.store.write(next)
     return written
+  }
+
+  /**
+   * Describe the distributed settings for the settings UI.
+   *
+   * Reports every namespace the deployment offers, whether this workspace still follows the
+   * publisher for it, and whether a plugin here owns it. A namespace no plugin owns cannot be
+   * applied, so a panel marks that row rather than offering a control that would do nothing.
+   * @param namespaces - Namespaces the deployment distributes.
+   * @returns One entry per namespace, in the order given.
+   */
+  status(namespaces: readonly string[]): DistributedSectionStatus[] {
+    const state = this.store.read()
+    return namespaces.map((ns) => {
+      const record = this.recordOf(state, ns)
+      return {
+        ns,
+        followState: record.detached ? 'detached' as const : 'following' as const,
+        applied: record.adoptedFingerprint !== null,
+        mounted: this.readSection(ns) !== undefined,
+      }
+    })
   }
 
   /**
