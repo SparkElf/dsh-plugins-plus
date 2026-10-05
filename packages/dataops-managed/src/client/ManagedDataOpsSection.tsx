@@ -55,7 +55,7 @@ export function ManagedDataOpsSection(props: ManagedDataOpsSectionProps) {
           <span />
         </button>
       </div>
-      <ModelSharing t={t} />
+      <PublishDefaults t={t} />
       <dl className={styles.details}>
         <div className={styles.detailRow}>
           <dt>{t('identityLabel')}</dt>
@@ -70,80 +70,26 @@ export function ManagedDataOpsSection(props: ManagedDataOpsSectionProps) {
   )
 }
 
-/** What the sharing panel knows about this workspace. */
-type SharingState =
+
+/** What the publish panel knows about this workspace. */
+type PublishState =
   | { kind: 'loading' }
   | { kind: 'unavailable' }
   | { kind: 'ready'; status: ModelSyncStatus }
   | { kind: 'failed' }
 
 /**
- * Show the settings namespaces this deployment distributes, and let a user stop following one.
+ * Publish this workspace's configuration as the default other users start from.
  *
- * Per namespace, because a user who wants the publisher's models may still want their own
- * permission default. The models panel above owns models; this owns everything else, so the two
- * do not compete for the same decision.
- * @param props - Translate function and the current sharing state.
- * @returns The distributed-settings panel, or nothing when the deployment distributes none.
- */
-function DistributedSettings({
-  t,
-  status,
-  busy,
-  act,
-}: {
-  t: (key: keyof typeof en) => string
-  status: ModelSyncStatus
-  busy: boolean
-  act: (body: Record<string, unknown>) => Promise<void>
-}) {
-  if (status.sections.length === 0) return null
-  return (
-    <div className={styles.modelPanel}>
-      <h3 className={styles.modelTitle}>{t('sectionsTitle')}</h3>
-      <p className={styles.modelDescription}>{t('sectionsDescription')}</p>
-      <div className={styles.modelList}>
-        {status.sections.map((section) => {
-          const following = section.followState === 'following'
-          return (
-            <div className={styles.modelRow} key={section.ns}>
-              <code className={styles.modelId}>{section.ns}</code>
-              <span className={styles.modelListDescription}>
-                {!section.mounted
-                  ? t('sectionNotMounted')
-                  : following
-                    ? (section.applied ? t('sectionFollowing') : t('sectionIdle'))
-                    : t('sectionDetached')}
-              </span>
-              {following ? (
-                <button
-                  type="button"
-                  className={styles.modelAction}
-                  disabled={busy}
-                  onClick={() => { void act({ action: 'detach-section', ns: section.ns }) }}
-                >
-                  {t('sectionDetach')}
-                </button>
-              ) : null}
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-/**
- * Share this workspace's models, and choose which of them other users may use.
- *
- * The panel shows the sharing control to an administrator alone, and tells every other user
- * which configuration their workspace is using, including how to stop following it. Nothing
- * here decides permissions: DataOps reports who may publish.
+ * One action rather than a set of controls: the configuration is whatever this workspace already
+ * holds -- the models, the permission default, the general settings -- and the button copies it to
+ * DataOps. Every other user's workspace takes that copy as its starting values and may then change
+ * anything, at which point their own version wins and this button never reaches it again.
  * @param props - Translate function from the section.
- * @returns The sharing panel.
+ * @returns The publish row.
  */
-function ModelSharing({ t }: { t: (key: keyof typeof en) => string }) {
-  const [state, setState] = useState<SharingState>({ kind: 'loading' })
+function PublishDefaults({ t }: { t: (key: keyof typeof en) => string }) {
+  const [state, setState] = useState<PublishState>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -157,10 +103,10 @@ function ModelSharing({ t }: { t: (key: keyof typeof en) => string }) {
 
   useEffect(() => { void refresh() }, [refresh])
 
-  const act = useCallback(async (body: Record<string, unknown>) => {
+  const publish = useCallback(async () => {
     setBusy(true)
     try {
-      const status = await postModelSyncAction(body)
+      const status = await postModelSyncAction({ action: 'publish-defaults' })
       if (status !== null) setState({ kind: 'ready', status })
     } catch {
       setState({ kind: 'failed' })
@@ -170,101 +116,51 @@ function ModelSharing({ t }: { t: (key: keyof typeof en) => string }) {
   }, [])
 
   if (state.kind === 'loading') return null
-  if (state.kind === 'unavailable') {
+  if (state.kind === 'unavailable' || state.kind === 'failed') {
     return (
       <div className={styles.modelPanel}>
-        <h3 className={styles.modelTitle}>{t('modelsTitle')}</h3>
-        <p className={styles.modelDescription}>{t('modelsUnavailable')}</p>
-      </div>
-    )
-  }
-  if (state.kind === 'failed') {
-    return (
-      <div className={styles.modelPanel}>
-        <h3 className={styles.modelTitle}>{t('modelsTitle')}</h3>
-        <p className={styles.modelDescription} role="alert">{t('loadFailed')}</p>
+        <h3 className={styles.modelTitle}>{t('defaultsTitle')}</h3>
+        <p className={styles.modelDescription} role={state.kind === 'failed' ? 'alert' : undefined}>
+          {state.kind === 'failed' ? t('loadFailed') : t('modelsUnavailable')}
+        </p>
       </div>
     )
   }
 
   const { status } = state
-  const following = status.followState === 'following'
+  // A viewer DataOps does not authorize to publish sees the same explanation without the button,
+  // because the permission rule lives in DataOps and the browser must not restate it.
+  if (!status.canPublish) {
+    return (
+      <div className={styles.modelPanel}>
+        <h3 className={styles.modelTitle}>{t('defaultsTitle')}</h3>
+        <p className={styles.modelDescription}>{t('defaultsNotAdmin')}</p>
+      </div>
+    )
+  }
+
   return (
     <div className={styles.modelPanel}>
-      <h3 className={styles.modelTitle}>{t('modelsTitle')}</h3>
-      <p className={styles.modelDescription}>{t('modelsDescription')}</p>
-
-      {status.canPublish ? (
-        <>
-          <div className={styles.brandingRow}>
-            <div className={styles.brandingCopy}>
-              <strong>{t('syncTitle')}</strong>
-              <span>{t('syncDescription')}</span>
-            </div>
-            <button
-              type="button"
-              className={styles.switch}
-              role="switch"
-              aria-label={t('syncToggle')}
-              aria-checked={status.publisherSharing}
-              data-checked={status.publisherSharing}
-              disabled={busy}
-              onClick={() => { void act({ action: 'publish', sharingEnabled: !status.publisherSharing }) }}
-            >
-              <span />
-            </button>
-          </div>
-          {status.publisherSharing && status.models.length > 0 ? (
-            <div className={styles.modelList}>
-              <strong className={styles.modelListTitle}>{t('modelsListTitle')}</strong>
-              <span className={styles.modelListDescription}>{t('modelsListDescription')}</span>
-              {status.models.map((model) => (
-                <div className={styles.modelRow} key={model.id}>
-                  <code className={styles.modelId}>{model.id}</code>
-                  <button
-                    type="button"
-                    className={styles.switch}
-                    role="switch"
-                    aria-label={t('modelShareLabel') + ': ' + model.id}
-                    aria-checked={model.shared}
-                    data-checked={model.shared}
-                    disabled={busy}
-                    onClick={() => {
-                      const next = model.shared
-                        ? [...status.privateModelIds, model.id]
-                        : status.privateModelIds.filter((id) => id !== model.id)
-                      void act({ action: 'private-models', privateModelIds: next, sharingEnabled: true })
-                    }}
-                  >
-                    <span />
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {status.publisherSharing && status.models.length === 0 ? (
-            <p className={styles.modelDescription}>{t('modelsEmpty')}</p>
-          ) : null}
-        </>
-      ) : (
-        <div className={styles.brandingRow}>
-          <div className={styles.brandingCopy}>
-            <strong>{following ? t('followTitle') : t('detachedTitle')}</strong>
-            <span>{following && !status.publisherSharing ? t('noPublisher') : (following ? t('followDescription') : t('detachedDescription'))}</span>
-          </div>
-          {following ? null : (
-            <button
-              type="button"
-              className={styles.modelAction}
-              disabled={busy}
-              onClick={() => { void act({ action: 'resume' }) }}
-            >
-              {busy ? t('resuming') : t('resume')}
-            </button>
-          )}
+      <h3 className={styles.modelTitle}>{t('defaultsTitle')}</h3>
+      <p className={styles.modelDescription}>{t('defaultsDescription')}</p>
+      <div className={styles.brandingRow}>
+        <div className={styles.brandingCopy}>
+          <strong>{t('defaultsActionTitle')}</strong>
+          <span>
+            {status.publishedAt === null
+              ? t('defaultsNeverPublished')
+              : t('defaultsPublishedAt') + ' ' + status.publishedAt}
+          </span>
         </div>
-      )}
-      <DistributedSettings t={t} status={status} busy={busy} act={act} />
+        <button
+          type="button"
+          className={styles.modelAction}
+          disabled={busy}
+          onClick={() => { void publish() }}
+        >
+          {busy ? t('defaultsPublishing') : t('defaultsPublish')}
+        </button>
+      </div>
     </div>
   )
 }

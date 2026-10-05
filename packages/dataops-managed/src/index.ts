@@ -332,6 +332,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           writeJson(response, 200, await sync.status())
           return
         }
+        if (action === 'publish-defaults') {
+          // One action that copies whatever this workspace holds: the models plus every namespace
+          // the deployment distributes. Sharing stays on so a reader picks it up.
+          await sync.publish(true)
+          writeJson(response, 200, {
+            ...await sync.status(),
+            sections: settingsSyncRef === undefined ? [] : settingsSyncRef.status(distributedNamespaces()),
+          })
+          return
+        }
         if (action === 'detach') {
           await sync.detach()
           writeJson(response, 200, await sync.status())
