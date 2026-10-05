@@ -27,6 +27,24 @@ export interface ModelSyncStatus {
   canPublish: boolean
   /** Models this workspace holds. */
   models: ModelSyncModel[]
+  /**
+   * Settings namespaces this deployment distributes.
+   *
+   * Present with the models in one response, so the two rows describe the same publication.
+   */
+  sections: DistributedSection[]
+}
+
+/** One settings namespace the deployment distributes. */
+export interface DistributedSection {
+  /** DSH settings namespace, such as `permission`. */
+  ns: string
+  /** Whether this workspace still takes the publisher's values for it. */
+  followState: 'following' | 'detached'
+  /** Whether adoption has applied values for it. */
+  applied: boolean
+  /** Whether a plugin here owns the namespace, so stopping would affect this workspace. */
+  mounted: boolean
 }
 
 /** Narrow a response body to the status shape, rejecting anything else. */
@@ -48,6 +66,19 @@ function asStatus(value: unknown): ModelSyncStatus | null {
           if (typeof entry !== 'object' || entry === null) return []
           const model = entry as Record<string, unknown>
           return typeof model.id === 'string' ? [{ id: model.id, shared: model.shared === true }] : []
+        })
+      : [],
+    sections: Array.isArray(record.sections)
+      ? record.sections.flatMap((entry): DistributedSection[] => {
+          if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return []
+          const section = entry as Record<string, unknown>
+          if (typeof section.ns !== 'string' || section.ns === '') return []
+          return [{
+            ns: section.ns,
+            followState: section.followState === 'detached' ? 'detached' : 'following',
+            applied: section.applied === true,
+            mounted: section.mounted === true,
+          }]
         })
       : [],
   }

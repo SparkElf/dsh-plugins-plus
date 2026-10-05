@@ -78,6 +78,62 @@ type SharingState =
   | { kind: 'failed' }
 
 /**
+ * Show the settings namespaces this deployment distributes, and let a user stop following one.
+ *
+ * Per namespace, because a user who wants the publisher's models may still want their own
+ * permission default. The models panel above owns models; this owns everything else, so the two
+ * do not compete for the same decision.
+ * @param props - Translate function and the current sharing state.
+ * @returns The distributed-settings panel, or nothing when the deployment distributes none.
+ */
+function DistributedSettings({
+  t,
+  status,
+  busy,
+  act,
+}: {
+  t: (key: keyof typeof en) => string
+  status: ModelSyncStatus
+  busy: boolean
+  act: (body: Record<string, unknown>) => Promise<void>
+}) {
+  if (status.sections.length === 0) return null
+  return (
+    <div className={styles.modelPanel}>
+      <h3 className={styles.modelTitle}>{t('sectionsTitle')}</h3>
+      <p className={styles.modelDescription}>{t('sectionsDescription')}</p>
+      <div className={styles.modelList}>
+        {status.sections.map((section) => {
+          const following = section.followState === 'following'
+          return (
+            <div className={styles.modelRow} key={section.ns}>
+              <code className={styles.modelId}>{section.ns}</code>
+              <span className={styles.modelListDescription}>
+                {!section.mounted
+                  ? t('sectionNotMounted')
+                  : following
+                    ? (section.applied ? t('sectionFollowing') : t('sectionIdle'))
+                    : t('sectionDetached')}
+              </span>
+              {following ? (
+                <button
+                  type="button"
+                  className={styles.modelAction}
+                  disabled={busy}
+                  onClick={() => { void act({ action: 'detach-section', ns: section.ns }) }}
+                >
+                  {t('sectionDetach')}
+                </button>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/**
  * Share this workspace's models, and choose which of them other users may use.
  *
  * The panel shows the sharing control to an administrator alone, and tells every other user
@@ -208,6 +264,7 @@ function ModelSharing({ t }: { t: (key: keyof typeof en) => string }) {
           )}
         </div>
       )}
+      <DistributedSettings t={t} status={status} busy={busy} act={act} />
     </div>
   )
 }
