@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
+import type { PublishedSection } from './settings-sync.ts'
 import {
   mergeProviders,
   modelIdsByProvider,
@@ -41,6 +42,14 @@ export interface SyncConfig {
   baseUrl: string
   /** DSH credential reference holding the current DataOps access JWT. */
   credentialRef: string
+  /**
+   * Collect the settings sections this workspace offers to others.
+   *
+   * Injected rather than read here because which namespaces travel is a deployment decision:
+   * this class carries a publication, and the deployment decides what belongs in one.
+   * @returns The sections to publish, in the order they should be applied.
+   */
+  collectSections?: () => Promise<PublishedSection[]>
 }
 
 /** What the settings UI reads to describe the current state. */
@@ -64,7 +73,11 @@ export interface SyncStatus {
 /** Publication a workspace may adopt, as the DataOps API reports it. */
 interface PublishedSnapshot {
   sharingEnabled: boolean
-  payload: { providers: Record<string, Record<string, unknown>>; sharedModelIds: string[] }
+  payload: {
+    providers: Record<string, Record<string, unknown>>
+    sharedModelIds: string[]
+    sections?: PublishedSection[]
+  }
   updatedAt: string | null
 }
 
@@ -169,6 +182,7 @@ export class ModelSync {
         sharingEnabled,
         providers: current.providers,
         sharedModelIds: this.offeredModelIds(current.providers, state.privateModelIds),
+        sections: await this.config.collectSections?.() ?? [],
       }),
     })
     if (!response.ok) throw new Error(`Shared model publish failed with HTTP ${String(response.status)}`)
@@ -262,6 +276,27 @@ export class ModelSync {
    */
   async detach(): Promise<void> {
     await this.store.write({ ...this.store.read(), detached: true })
+  }
+
+  /**
+   * Read the settings sections the current publication offers.
+   *
+   * Separate from `adopt`, which owns the models: a workspace adopts models and settings from one
+   * publication but keeps separate bookkeeping for each, because a user who changed the permission
+   * default has not thereby chosen their own models.
+   * @returns The offered sections, or an empty list when nobody publishes or none are offered.
+   */
+  async readPublishedSections(): Promise<PublishedSection[]> {
+    try {
+      const published = await this.fetchPublished()
+      if (published === undefined || !published.sharingEnabled) return []
+      return published.payload.sections ?? []
+    } catch (error) {
+      // A publication that cannot be read must not stop the models from being adopted, which is
+      // what the caller does next; it retries on the following start.
+      void error
+      return []
+    }
   }
 
   /**

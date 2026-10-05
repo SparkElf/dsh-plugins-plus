@@ -8,6 +8,13 @@ import * as McpClient from '@sparkelf/dsh-plugin-mcp-credentials'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-settings'
 import { ModelSync, type SyncStateStore } from './model-sync.ts'
+import {
+  SECTION_SYNC_DEFAULT,
+  SettingsSync,
+  type PublishedSection,
+  type SectionSyncState,
+  type SectionSyncStore,
+} from './settings-sync.ts'
 import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
 
 /** Cordis plugin name for the DataOps-managed integration. */
@@ -42,6 +49,14 @@ export function currentModelSync(): ModelSync | undefined {
   return modelSyncRef
 }
 
+/** The live settings-sync instance, once this plugin activated. */
+let settingsSyncRef: SettingsSync | undefined
+
+/** @returns The live instance, or undefined before this plugin activated. */
+export function currentSettingsSync(): SettingsSync | undefined {
+  return settingsSyncRef
+}
+
 /** Configuration for the DataOps-managed MCP connection. */
 export interface Config {
   /** DataOps browser/API origin reachable from the DSH Host. */
@@ -60,6 +75,20 @@ export interface Config {
    * their own models, which is a fact about this workspace.
    */
   modelSync: ModelSyncState
+  /**
+   * Settings-distribution state this workspace keeps.
+   *
+   * Volatile, like the model-sync state beside it, and for the same reason: it records whether
+   * the user here wrote their own values, which is a fact about this workspace.
+   */
+  settingsSync: SectionSyncState
+  /**
+   * Settings namespaces this deployment distributes to other workspaces.
+   *
+   * Empty by default: a deployment that publishes nothing offers no defaults, and a reader takes
+   * its own values. Naming a namespace here is what puts it in every publication.
+   */
+  distributedSettingsNamespaces: string[]
 }
 
 /** What this workspace remembers about sharing model configuration. */
@@ -90,6 +119,15 @@ export const Config: z<Config> = z.object({
    * left open because the sync state is this plugin's own record, not user configuration.
    */
   modelSync: z.any().default(MODEL_SYNC_DEFAULT).volatile(),
+  /** Volatile for the same reason as `modelSync`: it is this plugin's own record. */
+  settingsSync: z.any().default(SECTION_SYNC_DEFAULT).volatile(),
+  /**
+   * Namespaces offered in a publication. Validated as strings so a malformed profile entry fails
+   * at load rather than producing a publication no reader can apply.
+   */
+  distributedSettingsNamespaces: z.array(z.string()).default([]).description(
+    'Settings namespaces offered to other workspaces when this one publishes.',
+  ),
 })
 
 function bearerToken(request: IncomingMessage): string | null {
@@ -152,7 +190,57 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       await ctx.settings.update(MANAGED_PLUGIN_ID, { modelSync: next })
     },
   }
-  const modelSync = new ModelSync(ctx, { baseUrl, credentialRef: config.credentialRef }, syncStore)
+  /**
+   * The settings-distribution state lives in this plugin's own Config, so the settings service
+   * persists it in the workspace document and it survives a restart.
+   */
+  const sectionStore: SectionSyncStore = {
+    read: () => ({
+      sections: typeof config.settingsSync?.sections === 'object' && config.settingsSync.sections !== null
+        ? config.settingsSync.sections
+        : {},
+    }),
+    write: async (next) => {
+      await ctx.settings.update(MANAGED_PLUGIN_ID, { settingsSync: next })
+    },
+  }
+  const settingsSync = new SettingsSync(ctx, sectionStore)
+  settingsSyncRef = settingsSync
+
+  /**
+   * The namespaces this deployment distributes.
+   *
+   * Listed here rather than inside the sync because what a deployment offers is its own choice:
+   * the sync knows how to carry a section, and this decides which ones travel.
+   */
+  const distributedNamespaces = (): string[] => {
+    const configured = config.distributedSettingsNamespaces
+    return Array.isArray(configured) ? configured.filter((ns): ns is string => typeof ns === 'string' && ns !== '') : []
+  }
+
+  /**
+   * Read the sections this workspace would publish.
+   *
+   * A namespace no plugin owns is skipped: publishing a section this deployment cannot apply
+   * would offer readers values nothing on their side reads.
+   */
+  const collectSections = async (): Promise<PublishedSection[]> => {
+    const collected: PublishedSection[] = []
+    for (const ns of distributedNamespaces()) {
+      const descriptor = ctx.settings.describe().find((entry) => entry.ns === ns)
+      if (descriptor === undefined) continue
+      const value = descriptor.value
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+      collected.push({ ns, value: value as Record<string, unknown> })
+    }
+    return collected
+  }
+
+  const modelSync = new ModelSync(
+    ctx,
+    { baseUrl, credentialRef: config.credentialRef, collectSections },
+    syncStore,
+  )
   modelSyncRef = modelSync
   const skillPlaza = new SkillPlaza(ctx, { baseUrl, credentialRef: config.credentialRef })
   skillPlazaRef = skillPlaza
@@ -168,6 +256,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       await modelSync.adopt()
     } catch (error) {
       ctx.logger.warn('dataops-managed: model sync could not adopt the published models')
+      ctx.logger.warn(error)
+    }
+    try {
+      // The sections come from the same publication the models did, so a workspace that just
+      // adopted models applies the settings that publication carried in the same pass.
+      const published = await modelSync.readPublishedSections()
+      if (published.length > 0) await settingsSync.adopt(published)
+    } catch (error) {
+      ctx.logger.warn('dataops-managed: distributed settings could not be adopted')
       ctx.logger.warn(error)
     }
   }
