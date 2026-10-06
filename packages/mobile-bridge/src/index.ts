@@ -385,7 +385,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     if (withIdentity.bridgeSecret === '') withIdentity.bridgeSecret = randomBytes(16).toString('hex')
     return withIdentity
   }
-  let runtimeConfig = identityFrom(normalizeConfig(config))
+  // The minted identity is what the server knows, so it has to outlive the call that minted it.
+  // Reading the composed config again would see its empty defaults and produce a different
+  // identity every time, leaving each paired phone attached to a bridgeId the server had already
+  // replaced — its frames then failed, and a phone already paired had to pair again.
+  let mintedIdentity = identityFrom({ ...config })
+  let runtimeConfig = mintedIdentity
   current = () => runtimeConfig
   lastConnectionConfig = current()
   connectionRequested = current().autoConnect
@@ -395,9 +400,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     settingsServiceAvailable = true
     const settings = (settingsCtx as Context & { settings: SettingsForms }).settings
     // settings 服务已不再是"每插件 scope"模型：配置由 apply(ctx, config) 直接接收，
-    // 表单服务只按 profile entry id 描述与写入。这里据此把当前配置作为事实源，
-    // 并在服务可用时把铸造出的配对身份写回该 id。
-    current = () => identityFrom(normalizeConfig(config))
+    // 表单服务只按 profile entry id 描述与写入。这里据此把当前配置作为事实源。
+    //
+    // 事实源是已铸造并写回的身份，而不是重新读一遍 config：config 是装配期对象，它的
+    // bridgeId 永远是 schema 默认的空串，于是每次读都铸出新身份，服务器上旧 bridgeId 的
+    // 配对随之失效——已配对的手机就这样掉线。
+    current = () => identityFrom({ ...normalizeConfig(config), ...mintedIdentity })
     runtimeConfig = current()
     lastConnectionConfig = current()
     settingsCtx.effect(() => () => {
