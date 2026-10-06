@@ -31,7 +31,6 @@
 
 .details {
   margin: 2px 0 0;
-  border-top: 1px solid var(--dsw-alias-border-l2);
 }
 
 .detailRow {
@@ -39,7 +38,10 @@
   grid-template-columns: minmax(140px, 2fr) minmax(0, 3fr);
   gap: 20px;
   padding: 12px 0;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.detailRow + .detailRow {
+  border-top: 1px solid var(--dsw-alias-border-l2);
 }
 
 .detailRow dt,
@@ -61,9 +63,10 @@
   display: flex;
   align-items: center;
   gap: 20px;
-  padding: 12px 0;
+  /* Only a leading rule. Two rules per block made every pair of neighbours draw a double line,
+     which read as a page of underlines rather than as separated groups. */
+  padding: 14px 0 12px;
   border-top: 1px solid var(--dsw-alias-border-l2);
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
 .brandingCopy {
@@ -134,9 +137,8 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 0;
+  padding: 14px 0 12px;
   border-top: 1px solid var(--dsw-alias-border-l2);
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
 .modelTitle {
