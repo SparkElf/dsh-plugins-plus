@@ -174,6 +174,36 @@ function requestIp(req: IncomingMessage): string {
   return value?.trim() || req.socket.remoteAddress || 'unknown'
 }
 
+/**
+ * Whether one request reached this server over TLS.
+ *
+ * The session cookie carries `Secure` only when it does, because a browser refuses to store or send
+ * a `Secure` cookie over plain HTTP. The phone service worker authenticates its relay socket from
+ * that cookie alone -- it opens `/ws/client` without a token -- so a deployment served over HTTP
+ * without this check lost the cookie, and the phone could not authenticate its socket at all.
+ * @param req - Request whose scheme to classify.
+ * @returns True when the client used HTTPS.
+ */
+function requestIsSecure(req: IncomingMessage): boolean {
+  const forwarded = req.headers['x-forwarded-proto']
+  const value = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0]
+  if (value !== undefined && value.trim() !== '') return value.trim() === 'https'
+  return (req.socket as { encrypted?: boolean }).encrypted === true
+}
+
+/**
+ * Session cookie attributes, with `Secure` only where a browser can return the cookie.
+ * @param req - Request the cookie answers.
+ * @param token - Session token to store.
+ * @param days - Lifetime in days.
+ * @returns The `Set-Cookie` value.
+ */
+function sessionCookie(req: IncomingMessage, token: string, days: number): string {
+  return COOKIE + '=' + encodeURIComponent(token)
+    + '; HttpOnly; SameSite=Lax; Path=/; Max-Age=' + String(days * 86400)
+    + (requestIsSecure(req) ? '; Secure' : '')
+}
+
 function requestDeviceName(req: IncomingMessage): string {
   const userAgent = req.headers['user-agent'] ?? ''
   const platform = /iPad/u.test(userAgent)
@@ -319,10 +349,10 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
     return { token, device }
   }
 
-  const respondLogin = (res: ServerResponse, token: string, days: number): void => {
+  const respondLogin = (req: IncomingMessage, res: ServerResponse, token: string, days: number): void => {
     res.writeHead(200, {
       'content-type': 'application/json',
-      'set-cookie': [COOKIE + '=' + encodeURIComponent(token) + '; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=' + String(days * 86400)],
+      'set-cookie': [sessionCookie(req, token, days)],
     })
     res.end(JSON.stringify({ token }))
   }
@@ -409,7 +439,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             if (priorDevice === undefined) throw new Error('scan a desktop pairing QR first')
             store.bindDevice(token, priorDevice.bridgeId, { name: requestDeviceName(req), ip: requestIp(req) }, priorDevice.id)
           }
-          respondLogin(res, token, days)
+          respondLogin(req, res, token, days)
         } catch (error) { fail(res, 401, 'email login failed', error) }
         return
       }
@@ -419,7 +449,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           const verify = externalAuth[provider]
           if (verify === undefined) throw new Error('unknown provider')
           const externalId = await verify(payload)
-          respondLogin(res, store.loginExternal(provider, externalId), DEFAULT_SESSION_DAYS)
+          respondLogin(req, res, store.loginExternal(provider, externalId), DEFAULT_SESSION_DAYS)
         } catch (error) { fail(res, 401, 'external login failed', error) }
         return
       }
@@ -434,7 +464,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             return
           }
           const { token } = pairDevice(req, ticket, 'bridge', randomBytes(12).toString('hex'))
-          respondLogin(res, token, ticket.sessionDays)
+          respondLogin(req, res, token, ticket.sessionDays)
         } catch (error) { fail(res, 401, 'pairing login failed', error) }
         return
       }
@@ -445,7 +475,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
           if (ticket.email2fa === undefined) throw new Error('no pending challenge')
           store.consumeEmailCode(ticket.email2fa, emailCode)
           const { token } = pairDevice(req, ticket, 'bridge', randomBytes(12).toString('hex'))
-          respondLogin(res, token, ticket.sessionDays)
+          respondLogin(req, res, token, ticket.sessionDays)
         } catch (error) { fail(res, 401, 'pairing verification failed', error) }
         return
       }
@@ -497,7 +527,7 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
             if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ control: 'paired', devices: deviceViews(ticket.bridgeId) }))
           }
           res.writeHead(302, {
-            'set-cookie': [COOKIE + '=' + encodeURIComponent(token) + '; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=' + String(days * 86400)],
+            'set-cookie': [sessionCookie(req, token, days)],
             location: '/',
           })
           res.end()
@@ -621,7 +651,11 @@ export function createBridgeServer(store: UserStore, options: BridgeServerRuntim
       const device = store.deviceFor(token)
       const bridgeId = device?.bridgeId
       if (device === undefined || bridgeId === undefined) {
-        wss.handleUpgrade(req, socket, head, client => { client.close(4003, 'device revoked') })
+        // 4003 means the desktop revoked this device, and the phone treats it as terminal: it clears
+        // the pairing and stops reconnecting. A request that simply arrived without a usable session
+        // is not that, and reporting it as a revocation left a phone whose cookie was missing with a
+        // dead pairing it never got told to renew. 4004 keeps the two apart.
+        wss.handleUpgrade(req, socket, head, client => { client.close(4004, 'pairing required') })
         return
       }
       if (bridges.get(bridgeId)?.readyState !== WebSocket.OPEN) {
