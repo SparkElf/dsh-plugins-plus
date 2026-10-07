@@ -12,6 +12,8 @@ import z from '@deepseek-ai/schemastery'
 import type SettingsForms from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { randomBytes } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import WebSocket from 'ws'
 import { base64ToBytes, bytesToBase64, decryptJSON, deriveKey, encryptJSON } from './crypto.ts'
@@ -378,6 +380,56 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   // Identity is therefore resolved from config first — which the profile already carries — and only
   // falls back to the settings scope for live edits when that service is present. The composed
   // config is the same document the settings page writes, so both paths see one value.
+  /**
+   * Where a minted identity is remembered, so a paired phone survives a restart.
+   *
+   * The settings form cannot carry it: `mutate` refuses an entry with no volatile field, and this
+   * plugin declares none -- the write-back therefore failed every restart, a fresh identity was
+   * minted, and the relay no longer knew the bridge the phone had paired with. The file lives
+   * under the Harness home, beside the other per-deployment state this plugin reads.
+   * @returns The absolute path of the identity document.
+   */
+  const identityPath = (): string => {
+    const home = process.env.DSH_HOME?.trim()
+    return join(home === undefined || home === '' ? process.cwd() : home, 'mobile-bridge-identity.json')
+  }
+
+  /**
+   * Read the remembered identity, or an empty shape when none is stored or it is unreadable.
+   * A malformed file is treated as absent so a bad write cannot wedge the bridge: minting anew is
+   * the same outcome as a first run, and the file is rewritten on the next connection.
+   * @returns The stored identity fields, any of which may be empty.
+   */
+  const readStoredIdentity = (): { bridgeId: string; bridgeToken: string; bridgeSecret: string } => {
+    const empty = { bridgeId: '', bridgeToken: '', bridgeSecret: '' }
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(identityPath(), 'utf8'))
+      if (typeof parsed !== 'object' || parsed === null) return empty
+      const record = parsed as Record<string, unknown>
+      const field = (key: string): string => (typeof record[key] === 'string' ? (record[key] as string) : '')
+      return { bridgeId: field('bridgeId'), bridgeToken: field('bridgeToken'), bridgeSecret: field('bridgeSecret') }
+    } catch {
+      return empty
+    }
+  }
+
+  /**
+   * Remember the identity for the next start. Written to a sibling and renamed so a crash mid-write
+   * leaves the previous identity intact rather than a truncated file.
+   * @param value - The identity to store.
+   */
+  const writeStoredIdentity = (value: { bridgeId: string; bridgeToken: string; bridgeSecret: string }): void => {
+    try {
+      const path = identityPath()
+      mkdirSync(dirname(path), { recursive: true })
+      const temporary = `${path}.tmp`
+      writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+      renameSync(temporary, path)
+    } catch (error: unknown) {
+      console.error('[dsh-mobile-bridge] identity persistence failed', error)
+    }
+  }
+
   const identityFrom = (value: MobileBridgeConfig): MobileBridgeConfig => {
     const withIdentity = { ...value }
     if (withIdentity.bridgeId === '') withIdentity.bridgeId = randomBytes(16).toString('hex')
@@ -389,7 +441,12 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
   // Reading the composed config again would see its empty defaults and produce a different
   // identity every time, leaving each paired phone attached to a bridgeId the server had already
   // replaced — its frames then failed, and a phone already paired had to pair again.
-  let mintedIdentity = identityFrom({ ...config })
+  let mintedIdentity = identityFrom({ ...config, ...readStoredIdentity() })
+  writeStoredIdentity({
+    bridgeId: mintedIdentity.bridgeId,
+    bridgeToken: mintedIdentity.bridgeToken,
+    bridgeSecret: mintedIdentity.bridgeSecret,
+  })
   let runtimeConfig = mintedIdentity
   current = () => runtimeConfig
   lastConnectionConfig = current()
@@ -415,15 +472,6 @@ export function apply(ctx: Context, config: MobileBridgeConfig): void {
     })
     handleSettingsChange()
 
-    const resolved = current()
-    if (resolved.bridgeId !== '' && resolved.bridgeToken !== '' && resolved.bridgeSecret !== '') return
-    // Persist the minted identity so it survives a restart and the phone keeps the pairing.
-    if (!settings.writable) return
-    void settings.mutate(MOBILE_BRIDGE_SETTINGS_NAMESPACE, [
-      { op: 'set', path: ['bridgeId'], value: resolved.bridgeId },
-      { op: 'set', path: ['bridgeToken'], value: resolved.bridgeToken },
-      { op: 'set', path: ['bridgeSecret'], value: resolved.bridgeSecret },
-    ]).catch((error: unknown) => { console.error('[dsh-mobile-bridge] identity persistence failed', error) })
   })
   // Without the settings service the minted identity still has to reach connect(); announce it as
   // though a setting had changed so the tunnel starts on the config path.

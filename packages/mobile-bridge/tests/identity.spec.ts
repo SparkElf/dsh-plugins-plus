@@ -73,6 +73,25 @@ const currentFrom = (): (() => Record<string, string>) => {
 }
 
 describe('pairing identity', () => {
+  it('remembers the minted identity in a file under the Harness home', () => {
+    // The settings form cannot carry this identity: `mutate` refuses an entry with no volatile
+    // field, and a failed write-back left every restart with a new bridgeId. The file is the
+    // mechanism that keeps an already-paired phone addressed to a bridge the relay still serves.
+    expect(pluginSource, 'the plugin must read a stored identity').toContain('readStoredIdentity')
+    expect(pluginSource, 'the plugin must write a stored identity').toContain('writeStoredIdentity')
+    const pathHelper = /const identityPath = \(\): string => \{([\s\S]*?)\n  \}/u.exec(pluginSource)?.[1]
+    expect(pathHelper, 'the identity path must resolve from the Harness home').toBeDefined()
+    expect(pathHelper).toContain('DSH_HOME')
+    expect(pathHelper).toContain('mobile-bridge-identity.json')
+  })
+
+  it('restores the identity from the file rather than minting a new one', () => {
+    // The seeding call is what makes the value survive a restart; without it the file is written
+    // and never read, which is the failure the probe in this repository's notes measured.
+    const seeding = /identityFrom\(\{ \.\.\.config, \.\.\.readStoredIdentity\(\) \}\)/u.exec(pluginSource)
+    expect(seeding, 'the identity must be seeded from the stored file').not.toBeNull()
+  })
+
   it('mints an identity when the composed config carries none', () => {
     const identity = identityFromOf()({ ...composedConfig })
     expect(identity.bridgeId).toMatch(/^[0-9a-f]{32}$/u)
