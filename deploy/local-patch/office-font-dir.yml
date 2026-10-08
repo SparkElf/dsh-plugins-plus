@@ -1,0 +1,12 @@
+# Local patch fragment: document fonts for the office-to-pdf provider.
+#
+# Installed into the user layer by scripts/compose-patch.mjs. The user layer is the last patch layer
+# the loader applies, so an entry here overrides the same entry declared by a bundle - and unlike a
+# package's own patch, it survives a plugin upgrade.
+#
+# Why the variable is not named DSH_OFFICE_FONT_DIR: app-boot treats the DSH_ prefix as bootstrap-only
+# and exits the runtime when any discovered .env sets one (isBootstrapOnly in app-boot's readEnvLayer).
+# An ordinary name can live in the committed .env.base and be composed by scripts/compose-env.sh.
+- id: office-to-pdf
+  config:
+    fontDirectories: !!js "process.env.OFFICE_FONT_DIR ? [process.env.OFFICE_FONT_DIR] : undefined"

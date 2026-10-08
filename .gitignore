@@ -3,3 +3,6 @@ lib/
 test-results/
 playwright-report/
 .secrets/
+
+# Composed output; never commit. Sources are .env.base and .secrets/env.
+.env
