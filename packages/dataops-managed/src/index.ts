@@ -16,6 +16,7 @@ import {
   type SectionSyncStore,
 } from './settings-sync.ts'
 import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
+import { WorkspaceLimits, currentWorkspaceLimits, setWorkspaceLimits } from './workspace-limits.ts'
 
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
@@ -33,6 +34,9 @@ export const MODEL_SYNC_PATH = '/integrations/dataops/model-sync'
 /** Same-origin route the skill center uses to read and change plaza sharing. */
 export const SKILL_PLAZA_PATH = '/integrations/dataops/skill-plaza'
 
+/** Same-origin route the Settings panel uses to read and change this workspace's limits. */
+export const WORKSPACE_LIMITS_PATH = '/integrations/dataops/workspace-limits'
+
 /** The live sync instance, so the settings routes can act on it after activation. */
 let modelSyncRef: ModelSync | undefined
 
@@ -48,6 +52,8 @@ export function currentSkillPlaza(): SkillPlaza | undefined {
 export function currentModelSync(): ModelSync | undefined {
   return modelSyncRef
 }
+
+export { currentWorkspaceLimits }
 
 /** The live settings-sync instance, once this plugin activated. */
 let settingsSyncRef: SettingsSync | undefined
@@ -113,7 +119,7 @@ export const Config: z<Config> = z.object({
   baseUrl: z.string().default('http://host.docker.internal:3101'),
   serverName: z.string().default('dataops'),
   credentialRef: z.string().role('credential-ref').default('DATAOPS_ACCESS_TOKEN'),
-  toolCallTimeoutMs: z.number().min(1).default(120_000),
+  toolCallTimeoutMs: z.number().min(1).default(300_000),
   /**
    * Volatile so the settings service persists it in this workspace's document. The shape is
    * left open because the sync state is this plugin's own record, not user configuration.
@@ -244,6 +250,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   modelSyncRef = modelSync
   const skillPlaza = new SkillPlaza(ctx, { baseUrl, credentialRef: config.credentialRef })
   skillPlazaRef = skillPlaza
+  const workspaceLimits = new WorkspaceLimits(ctx, { baseUrl, credentialRef: config.credentialRef })
+  setWorkspaceLimits(workspaceLimits)
 
   /**
    * Adopt the publisher's models once the workspace has a session.
@@ -446,6 +454,57 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'dataops-managed: skill plaza routes')
+
+  /**
+   * The workspace limits an administrator sets in DataOps.
+   *
+   * Read through the plugin because it holds the DataOps JWT; the page cannot reach those settings
+   * itself. Same-origin only, like its neighbours.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: WORKSPACE_LIMITS_PATH,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      const limits = currentWorkspaceLimits()
+      if (limits === undefined) {
+        writeJson(response, 503, { error: 'workspace limits are not active' })
+        return
+      }
+      try {
+        if (request.method === 'GET') {
+          const status = await limits.status()
+          if (status === undefined) {
+            writeJson(response, 503, { error: 'workspace limits are not active' })
+            return
+          }
+          writeJson(response, 200, status)
+          return
+        }
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' })
+          response.end()
+          return
+        }
+        const body = await readJson(request)
+        const fileReadMaxBytes = body?.fileReadMaxBytes
+        const uploadMaxBytes = body?.uploadMaxBytes
+        if (typeof fileReadMaxBytes !== 'number' || typeof uploadMaxBytes !== 'number') {
+          writeJson(response, 400, { error: 'both byte ceilings are required' })
+          return
+        }
+        const status = await limits.save({ fileReadMaxBytes, uploadMaxBytes })
+        if (status === undefined) {
+          writeJson(response, 503, { error: 'workspace limits are not active' })
+          return
+        }
+        writeJson(response, 200, status)
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: workspace limits request failed')
+        ctx.logger.warn(error)
+        writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: workspace limits route')
 }
 
 /** Read and parse a JSON request body, tolerating an absent one. */
