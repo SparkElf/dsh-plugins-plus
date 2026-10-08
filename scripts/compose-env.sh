@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Compose the deployment environment dsh actually reads.
+# Compose the deployment environment dsh reads.
 #
 #   scripts/compose-env.sh              write the composed file
 #   scripts/compose-env.sh --dry-run    print what would be written
@@ -8,21 +8,24 @@
 # Why this exists
 # ---------------
 # The runtime reads two .env layers - the invoking directory's and the harness home's - and applies
-# them WITHOUT resolving paths: a value goes into process.env exactly as written. The consumers then
-# read it with `process.env.NAME` inside a !!js config expression, so a relative path would never be
-# resolved by anything. This script is therefore the one place a relative path becomes absolute.
+# them WITHOUT resolving paths: a value goes into process.env exactly as written, and the consumers
+# read it with process.env.NAME inside a !!js config expression. Nothing downstream resolves a
+# relative path, so this script is the one place a relative path becomes absolute.
 #
-# It also keeps the two halves apart. .env.base holds non-secret values and is committed; the
-# secrets directory holds credentials and is ignored by git. Composing them here means the runtime
-# sees one file while the repository carries only what is safe to publish.
+# It also keeps the two halves apart: .env.base holds non-secret values and is committed, the
+# secrets directory holds credentials and is git-ignored, and the runtime sees one composed file.
 #
 # Sources, in order of increasing precedence (later wins):
-#   .env.base            committed, relative paths resolved against the repository root
+#   .env.base            committed, relative values resolved against the repository root
 #   .secrets/env         ignored, verbatim
 #
-# Names beginning with DSH_, XDG_, DYLD_ or BASH_FUNC_ are refused: app-boot treats those prefixes
-# as bootstrap-only and exits the runtime when a .env sets one, so this script fails loudly instead
-# of writing a file that cannot boot.
+# Names beginning with DSH_, XDG_, DYLD_ or BASH_FUNC_ are refused by app-boot's readEnvLayer()
+# (isBootstrapOnly), which treats those prefixes as bootstrap-only and EXITS THE RUNTIME when a
+# discovered .env declares one - because such a name can change how the process starts or where its
+# code loads from. This deployment carries the dsh-patch-bootstrap-exempt-names patch, which lists
+# DSH_OFFICE_FONT_DIR in BOOTSTRAP_EXEMPT_NAMES: that variable names a font directory and decides
+# nothing about launch, so it is allowed here. The check below is kept for every OTHER DSH_ name,
+# and passing one still fails loudly rather than writing a file that cannot boot.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,56 +40,80 @@ for arg in "$@"; do
   esac
 done
 
-# A name the runtime would refuse, checked before anything is written.
-is_bootstrap_name() {
+# Names the runtime accepts in a .env despite the prefix rule, because app-boot's
+# BOOTSTRAP_EXEMPT_NAMES lists them. Kept in step with
+# deepseek-harness-plus/patches/npm/bootstrap-exempt-names, which is where the exemption lives.
+is_exempt_name() {
+  case "$1" in
+    DSH_OFFICE_FONT_DIR) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A name the runtime refuses in a .env. Writing one would produce a file that cannot boot.
+is_refused_name() {
+  is_exempt_name "$1" && return 1
   case "$1" in
     DSH_*|XDG_*|DYLD_*|BASH_FUNC_*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Expand one value: a relative path becomes absolute against the repository root, anything already
-# absolute, a URL, or a plain token is passed through. Quoted values keep their quotes stripped.
-expand_value() {
+# Resolve a value to an absolute path when - and only when - it names something inside this
+# repository. The test is the filesystem, not the shape of the string: guessing from the character
+# set turned an API key into $REPO_ROOT/<key> once, which is the kind of silent corruption a
+# heuristic produces.
+resolve_value() {
   local value="$1"
   case "$value" in
-    "/*"|"~"*|http://*|https://*|""|*[!A-Za-z0-9._/-]*) printf '%s' "$value" ;;
-    *) printf '%s' "$REPO_ROOT/$value" ;;
+    ''|/*|~*|http://*|https://*) printf '%s' "$value"; return ;;
   esac
+  if [ -e "$REPO_ROOT/$value" ]; then
+    printf '%s' "$REPO_ROOT/$value"
+  else
+    printf '%s' "$value"
+  fi
 }
+
+lines=''
+count=0
 
 emit() {
   local file="$1" label="$2"
   [ -f "$file" ] || return 0
+  local line name value
   while IFS= read -r line || [ -n "$line" ]; do
-    # Comments and blanks are dropped: the runtime strips them anyway (the capability interview
-    # rewrites this file and keeps only assignments), so keeping them here would only pretend the
-    # output is hand-editable when it is generated.
     case "$line" in ''|'#'*) continue ;; esac
-    local name="${line%%=*}"
+    name="${line%%=*}"
     case "$name" in *[!A-Za-z0-9_]*) continue ;; esac
-    if is_bootstrap_name "$name"; then
-      echo "compose-env: $label defines $name, which the runtime refuses in any .env" >&2
-      echo "compose-env: rename it (drop the reserved prefix); see app-boot isBootstrapOnly()" >&2
+    if is_refused_name "$name"; then
+      echo "compose-env: $label defines $name, which app-boot refuses in any .env" >&2
+      echo "compose-env: a name like that must come from the launched environment; see the header" >&2
       exit 3
     fi
-    local value="${line#*=}"
+    value="${line#*=}"
     value="${value%\"}"; value="${value#\"}"
     value="${value%\'}"; value="${value#\'}"
-    if [ "$label" = base ]; then value="$(expand_value "$value")"; fi
-    printf '%s=%s\n' "$name" "$value"
+    value="$(resolve_value "$value")"
+    # An earlier source wins, so .env.base is not overridden by a later file by accident.
+    case "$lines" in
+      *$'\n'"$name="*) continue ;;
+      "$name="*) continue ;;
+    esac
+    lines="${lines}${name}=${value}"$'\n'
+    count=$((count + 1))
   done < "$file"
 }
 
-composed="$( { emit "$BASE" base; emit "$SECRETS" secrets; } )"
+emit "$BASE" base
+emit "$SECRETS" secrets
 
-if [ -z "$composed" ]; then
+if [ "$count" -eq 0 ]; then
   echo "compose-env: nothing to compose (no $BASE and no $SECRETS)" >&2
   exit 1
 fi
 
-header="# Generated by scripts/compose-env.sh from .env.base and .secrets/env."
-body="$header"$'\n'"# Edit those files, not this one; the next compose overwrites this."$'\n'"$composed"
+body="# Generated by scripts/compose-env.sh from .env.base and .secrets/env."$'\n'"# Edit those files, not this one; the next compose overwrites this."$'\n'"$lines"
 
 if [ "$DRY" = yes ]; then
   printf '%s\n' "$body"
@@ -96,5 +123,5 @@ fi
 install -d -m 700 "$(dirname "$OUT")"
 printf '%s\n' "$body" > "$OUT"
 chmod 600 "$OUT"
-echo "compose-env: wrote $OUT"
-printf '%s\n' "$composed" | sed 's/=.*/=<set>/' | sed 's/^/  /'
+echo "compose-env: wrote $OUT ($count name(s))"
+printf '%s\n' "$lines" | sed 's/=.*/=<set>/' | sed 's/^/  /'
