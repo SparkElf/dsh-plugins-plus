@@ -16,7 +16,12 @@ import {
   type SectionSyncStore,
 } from './settings-sync.ts'
 import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
-import { WorkspaceLimits, currentWorkspaceLimits, setWorkspaceLimits } from './workspace-limits.ts'
+import {
+  WorkspaceLimits,
+  WorkspaceLimitsRejection,
+  currentWorkspaceLimits,
+  setWorkspaceLimits,
+} from './workspace-limits.ts'
 
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
@@ -63,6 +68,36 @@ export function currentSettingsSync(): SettingsSync | undefined {
   return settingsSyncRef
 }
 
+/**
+ * A volatile config reference.
+ *
+ * A field marked volatile is not stored with the plugin's own configuration: the settings
+ * service keeps it in this workspace's document and hands the plugin a reference that it
+ * updates in place, so a value written through the Settings panel is visible without a
+ * restart. Reading the field directly therefore reads the reference, not the value.
+ */
+interface VolatileRef<T> {
+  /** The current value behind the reference. */
+  get(): T
+}
+
+/**
+ * Read the value behind a possibly-volatile field.
+ *
+ * A volatile field always arrives as a reference, but the plain shape is accepted too so a
+ * caller that validated the config without a settings service still reads its value.
+ * @param field - The config field as the runtime supplied it.
+ * @param fallback - Value to use when nothing is stored yet.
+ * @returns The current value.
+ */
+function volatileValue<T>(field: T | VolatileRef<T> | undefined, fallback: T): T {
+  if (field === undefined) return fallback
+  if (typeof field === 'object' && field !== null && 'get' in field && typeof field.get === 'function') {
+    return (field as VolatileRef<T>).get() ?? fallback
+  }
+  return field as T
+}
+
 /** Configuration for the DataOps-managed MCP connection. */
 export interface Config {
   /** DataOps browser/API origin reachable from the DSH Host. */
@@ -79,15 +114,19 @@ export interface Config {
    * Volatile, so the settings service stores it in this workspace's own document. It belongs
    * to the workspace rather than to DataOps because it records whether the user here wrote
    * their own models, which is a fact about this workspace.
+   *
+   * Volatile, so the runtime supplies a reference and the read goes through `volatileValue`.
    */
-  modelSync: ModelSyncState
+  modelSync: ModelSyncState | VolatileRef<ModelSyncState>
   /**
    * Settings-distribution state this workspace keeps.
    *
    * Volatile, like the model-sync state beside it, and for the same reason: it records whether
    * the user here wrote their own values, which is a fact about this workspace.
+   *
+   * Volatile, like the field above, so the read goes through `volatileValue`.
    */
-  settingsSync: SectionSyncState
+  settingsSync: SectionSyncState | VolatileRef<SectionSyncState>
   /**
    * Settings namespaces this deployment distributes to other workspaces.
    *
@@ -180,18 +219,39 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     if (fiber !== undefined && fiber.uid !== null) await fiber.dispose()
   }, 'dataops-managed: MCP lifecycle')
 
-  if (await ctx.credentials.resolve(accessRef) !== undefined) await ensureMcp()
+  /**
+   * Connect the MCP client when a JWT is already stored.
+   *
+   * A connect can fail for reasons this plugin does not own — the stored JWT may have expired,
+   * or DataOps may be unreachable at this moment — and those are states the settings routes
+   * report and recover from. Awaiting it here would abort activation, leaving the plugin with
+   * no routes at all: the panel then cannot read the very state that explains the failure, and
+   * the browser reports a connection error instead. The routes below are registered first, and
+   * a failed connect is reported rather than thrown.
+   */
+  const connectExisting = async (): Promise<void> => {
+    if (await ctx.credentials.resolve(accessRef) === undefined) return
+    try {
+      await ensureMcp()
+    } catch (error) {
+      ctx.logger.warn('dataops-managed: connecting the DataOps MCP server failed; the settings routes stay up so a new JWT can be connected')
+      ctx.logger.warn(error)
+    }
+  }
 
   /**
    * The sync state lives in this plugin's own Config, so the settings service persists it in
    * the workspace document and it survives a restart.
    */
   const syncStore: SyncStateStore = {
-    read: () => ({
-      detached: config.modelSync?.detached === true,
-      adoptedModelIds: Array.isArray(config.modelSync?.adoptedModelIds) ? config.modelSync.adoptedModelIds : [],
-      privateModelIds: Array.isArray(config.modelSync?.privateModelIds) ? config.modelSync.privateModelIds : [],
-    }),
+    read: () => {
+      const state = volatileValue(config.modelSync, MODEL_SYNC_DEFAULT)
+      return {
+        detached: state?.detached === true,
+        adoptedModelIds: Array.isArray(state?.adoptedModelIds) ? state.adoptedModelIds : [],
+        privateModelIds: Array.isArray(state?.privateModelIds) ? state.privateModelIds : [],
+      }
+    },
     write: async (next) => {
       await ctx.settings.update(MANAGED_PLUGIN_ID, { modelSync: next })
     },
@@ -201,11 +261,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
    * persists it in the workspace document and it survives a restart.
    */
   const sectionStore: SectionSyncStore = {
-    read: () => ({
-      sections: typeof config.settingsSync?.sections === 'object' && config.settingsSync.sections !== null
-        ? config.settingsSync.sections
-        : {},
-    }),
+    read: () => {
+      const state = volatileValue(config.settingsSync, SECTION_SYNC_DEFAULT)
+      return {
+        sections: typeof state?.sections === 'object' && state.sections !== null ? state.sections : {},
+      }
+    },
     write: async (next) => {
       await ctx.settings.update(MANAGED_PLUGIN_ID, { settingsSync: next })
     },
@@ -499,12 +560,20 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         }
         writeJson(response, 200, status)
       } catch (error) {
+        // A rejection DataOps already explained keeps its status and message: the panel shows the
+        // reason and the user can correct the value. Anything else is a fault here, not input.
+        if (error instanceof WorkspaceLimitsRejection) {
+          writeJson(response, error.status, { error: error.message })
+          return
+        }
         ctx.logger.warn('dataops-managed: workspace limits request failed')
         ctx.logger.warn(error)
         writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
       }
     },
   }), 'dataops-managed: workspace limits route')
+
+  await connectExisting()
 }
 
 /** Read and parse a JSON request body, tolerating an absent one. */

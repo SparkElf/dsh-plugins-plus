@@ -42,6 +42,36 @@ function asByteCount(value: unknown): number | null {
 }
 
 /**
+ * A rejection DataOps answered with, carrying its status and message.
+ *
+ * Without this the caller can only tell that something failed, and a value DataOps refused —
+ * which the user can correct — is indistinguishable from a fault in the request path.
+ */
+export class WorkspaceLimitsRejection extends Error {
+  constructor(
+    /** HTTP status DataOps answered with. */
+    readonly status: number,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'WorkspaceLimitsRejection'
+  }
+}
+
+/** Read DataOps' own explanation from a failed response, falling back to the status line. */
+async function rejectionMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = asRecord(await response.json())
+    const message = body?.message
+    if (typeof message === 'string' && message.trim() !== '') return message
+    if (Array.isArray(message) && typeof message[0] === 'string') return message[0]
+  } catch {
+    // A body that is absent or not JSON leaves the fallback as the only explanation available.
+  }
+  return `${fallback} with HTTP ${String(response.status)}`
+}
+
+/**
  * The workspace limits an administrator sets in DataOps.
  *
  * The plugin holds the DataOps JWT, so the browser cannot read these itself; this class is the
@@ -78,7 +108,9 @@ export class WorkspaceLimits {
       headers: { authorization: `Bearer ${token}` },
     })
     if (response.status === 401) return undefined
-    if (!response.ok) throw new Error(`Workspace limits read failed with HTTP ${String(response.status)}`)
+    if (!response.ok) {
+      throw new WorkspaceLimitsRejection(response.status, await rejectionMessage(response, 'Workspace limits read failed'))
+    }
     const body = asRecord(await response.json())
     const settings = body === null ? null : asRecord(body.settings)
     const size = settings === null ? null : asRecord(settings.workspaceSize)
@@ -108,7 +140,9 @@ export class WorkspaceLimits {
       body: JSON.stringify({ workspaceSize: limits }),
     })
     if (response.status === 401) return undefined
-    if (!response.ok) throw new Error(`Workspace limits write failed with HTTP ${String(response.status)}`)
+    if (!response.ok) {
+      throw new WorkspaceLimitsRejection(response.status, await rejectionMessage(response, 'Workspace limits write failed'))
+    }
     return this.status()
   }
 }

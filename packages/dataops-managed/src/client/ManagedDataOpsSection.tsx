@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
-import { StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useCallback, useEffect, useId, useState, useSyncExternalStore } from 'react'
+import { Button, SettingsValueField, StateDot, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { en } from './locales.ts'
 import { setWanxiangBrandEnabled, wanxiangBrandPreference } from './brand-store.ts'
-import { MODEL_SYNC_PATH, fetchModelSyncStatus, postModelSyncAction } from './model-sync-client.ts'
+import { fetchModelSyncStatus, postModelSyncAction } from './model-sync-client.ts'
 import type { ModelSyncStatus } from './model-sync-client.ts'
-import { fetchWorkspaceLimits, saveWorkspaceLimits } from './workspace-limits-client.ts'
+import {
+  WorkspaceLimitsRejection,
+  fetchWorkspaceLimits,
+  saveWorkspaceLimits,
+} from './workspace-limits-client.ts'
 import type { WorkspaceLimits, WorkspaceLimitsStatus } from './workspace-limits-client.ts'
 import styles from './ManagedDataOpsSection.module.css'
 
@@ -18,8 +22,32 @@ export interface ManagedDataOpsSectionInjected {
 /** Props accepted by the managed DataOps Settings section. */
 export type ManagedDataOpsSectionProps = Partial<InjectFace<ManagedDataOpsSectionInjected>>
 
+/** The panel's unit, so a stored byte count survives a round trip through the input. */
+const BYTES_PER_MIB = 1024 * 1024
+
+/** Render a byte ceiling as the whole MiB the input shows. */
+function toMib(bytes: number): string {
+  return String(Math.round((bytes / BYTES_PER_MIB) * 100) / 100)
+}
+
+/** Parse a MiB draft into a byte ceiling, or null when it is not a positive count. */
+function toBytes(text: string): number | null {
+  if (text.trim() === '') return null
+  const mib = Number(text)
+  if (!Number.isFinite(mib) || mib <= 0) return null
+  const bytes = Math.round(mib * BYTES_PER_MIB)
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null
+}
+
+/** Format a stored publication time for the row, or nothing when it never published. */
+function publishedText(publishedAt: string): string | null {
+  const at = new Date(publishedAt)
+  return Number.isNaN(at.getTime()) ? null : at.toLocaleString()
+}
+
 /**
- * Explain the DataOps-managed JWT and permission owner, and share model configuration.
+ * The DataOps settings this workspace owns: its connection state, its branding, its file ceilings,
+ * and the default configuration it publishes to other workspaces.
  * @param props - Settings slot injection values.
  * @returns The localized managed DataOps section, or nothing before injection.
  */
@@ -35,64 +63,200 @@ export function ManagedDataOpsSection(props: ManagedDataOpsSectionProps) {
   return (
     <section className={styles.section}>
       <h2 className={styles.title}>{t('title')}</h2>
-      <div className={styles.statusRow}>
+      <div className={styles.status}>
         <StateDot state="done" />
-        <strong>{t('managed')}</strong>
+        <span>{t('managed')}</span>
       </div>
-      <p className={styles.description}>{t('description')}</p>
-      <div className={styles.brandingRow}>
-        <div className={styles.brandingCopy}>
-          <strong>{t('brandingTitle')}</strong>
-          <span>{t('brandingDescription')}</span>
-        </div>
-        <button
-          type="button"
-          className={styles.switch}
-          role="switch"
-          aria-label={t('brandingToggle')}
-          aria-checked={branding.enabled}
-          data-checked={branding.enabled}
-          onClick={() => { setWanxiangBrandEnabled(!branding.enabled) }}
-        >
-          <span />
-        </button>
-      </div>
-      <PublishDefaults t={t} />
-      <WorkspaceLimitsPanel t={t} />
-      <dl className={styles.details}>
-        <div className={styles.detailRow}>
-          <dt>{t('identityLabel')}</dt>
-          <dd>{t('identityValue')}</dd>
-        </div>
-        <div className={styles.detailRow}>
-          <dt>{t('toolsLabel')}</dt>
-          <dd>{t('toolsValue')}</dd>
-        </div>
-      </dl>
+      <BrandingRow t={t} enabled={branding.enabled} />
+      <LimitsCard t={t} />
+      <DefaultsCard t={t} />
     </section>
   )
 }
 
+/** The branding toggle as one settings row. */
+function BrandingRow({ t, enabled }: { t: (key: keyof typeof en) => string; enabled: boolean }) {
+  return (
+    <div className={styles.card}>
+      <div className={styles.row}>
+        <span className={styles.label}>{t('brandingTitle')}</span>
+        <Switch
+          checked={enabled}
+          label={t('brandingToggle')}
+          onChange={(next) => { setWanxiangBrandEnabled(next) }}
+        />
+      </div>
+    </div>
+  )
+}
 
-/** What the publish panel knows about this workspace. */
-type PublishState =
+/** What either card knows about its remote document. */
+type LoadState<T> =
   | { kind: 'loading' }
   | { kind: 'unavailable' }
-  | { kind: 'ready'; status: ModelSyncStatus }
+  | { kind: 'ready'; status: T }
   | { kind: 'failed' }
+
+/** The one row a card renders while it cannot offer its controls. */
+function UnavailableCard({ title, t, state }: {
+  title: string
+  t: (key: keyof typeof en) => string
+  state: 'unavailable' | 'failed'
+}) {
+  return (
+    <section className={styles.card}>
+      <h3 className={styles.heading}>{title}</h3>
+      <div className={styles.status} role={state === 'failed' ? 'alert' : undefined}>
+        <StateDot state={state === 'failed' ? 'error' : 'idle'} />
+        <span>{state === 'failed' ? t('loadFailed') : t('unavailable')}</span>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * The file ceilings DataOps enforces on this workspace.
+ *
+ * The values live in DataOps and are read through the plugin, which holds the JWT; the panel only
+ * ever holds what the administrator is allowed to see.
+ * @param props - Translate function from the section.
+ * @returns The limits card.
+ */
+function LimitsCard({ t }: { t: (key: keyof typeof en) => string }) {
+  const [state, setState] = useState<LoadState<WorkspaceLimitsStatus>>({ kind: 'loading' })
+  const [fileReadMib, setFileReadMib] = useState('')
+  const [uploadMib, setUploadMib] = useState('')
+  /** The ceilings the draft started from, so Save stays off until one of them changes. */
+  const [saved, setSaved] = useState('')
+  /** Why DataOps refused the last save, kept beside the draft it refused. */
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const fileReadId = useId()
+  const uploadId = useId()
+
+  const apply = useCallback((status: WorkspaceLimitsStatus) => {
+    setState({ kind: 'ready', status })
+    const file = toMib(status.limits.fileReadMaxBytes)
+    const upload = toMib(status.limits.uploadMaxBytes)
+    setFileReadMib(file)
+    setUploadMib(upload)
+    setSaved(file + '|' + upload)
+    setRefusal(null)
+  }, [])
+
+  const refresh = useCallback(async () => {
+    try {
+      const status = await fetchWorkspaceLimits()
+      if (status === null) setState({ kind: 'unavailable' })
+      else apply(status)
+    } catch {
+      setState({ kind: 'failed' })
+    }
+  }, [apply])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const fileReadBytes = toBytes(fileReadMib)
+  const uploadBytes = toBytes(uploadMib)
+  const writable = state.kind === 'ready' && state.status.canWrite
+  const dirty = fileReadMib + '|' + uploadMib !== saved
+  const ready = fileReadBytes !== null && uploadBytes !== null && dirty
+
+  /** Edit one ceiling, dropping a refusal that no longer describes what is in the field. */
+  const edit = useCallback((set: (text: string) => void) => (text: string) => {
+    set(text)
+    setRefusal(null)
+  }, [])
+
+  const submit = useCallback(async () => {
+    if (fileReadBytes === null || uploadBytes === null) return
+    setBusy(true)
+    setRefusal(null)
+    try {
+      const limits: WorkspaceLimits = { fileReadMaxBytes: fileReadBytes, uploadMaxBytes: uploadBytes }
+      const status = await saveWorkspaceLimits(limits)
+      if (status === null) setState({ kind: 'unavailable' })
+      else apply(status)
+    } catch (error) {
+      // A refused value keeps the fields and the draft, so the user can correct it in place.
+      // Anything else left the card unable to describe its own state, so it reports the read.
+      if (error instanceof WorkspaceLimitsRejection) setRefusal(error.message)
+      else setState({ kind: 'failed' })
+    } finally {
+      setBusy(false)
+    }
+  }, [fileReadBytes, uploadBytes, apply])
+
+  if (state.kind === 'loading') return null
+  if (state.kind !== 'ready') {
+    return <UnavailableCard title={t('limitsTitle')} t={t} state={state.kind} />
+  }
+
+  const disabled = busy || !writable
+  return (
+    <section className={styles.card}>
+      <h3 className={styles.heading}>{t('limitsTitle')}</h3>
+      <div className={styles.fields}>
+        <div>
+          <SettingsValueField
+            id={fileReadId}
+            label={t('limitsFileReadLabel')}
+            text={fileReadMib}
+            numeric
+            invalid={fileReadBytes === null}
+            overridden={false}
+            overriddenLabel=""
+            resetLabel=""
+            invalidLabel={t('limitsInvalid')}
+            disabled={disabled}
+            onEdit={edit(setFileReadMib)}
+            onReset={() => undefined}
+          />
+        </div>
+        <div>
+          <SettingsValueField
+            id={uploadId}
+            label={t('limitsUploadLabel')}
+            text={uploadMib}
+            numeric
+            invalid={uploadBytes === null}
+            overridden={false}
+            overriddenLabel=""
+            resetLabel=""
+            invalidLabel={t('limitsInvalid')}
+            disabled={disabled}
+            onEdit={edit(setUploadMib)}
+            onReset={() => undefined}
+          />
+        </div>
+      </div>
+      <div className={styles.actions}>
+        {refusal === null
+          ? null
+          : (
+            <span className={styles.refusal} role="alert">
+              <StateDot state="error" />
+              <span>{refusal}</span>
+            </span>
+          )}
+        <Button variant="primary" size="sm" disabled={disabled || !ready} onClick={() => { void submit() }}>
+          {busy ? t('limitsSaving') : t('limitsSave')}
+        </Button>
+      </div>
+    </section>
+  )
+}
 
 /**
  * Publish this workspace's configuration as the default other users start from.
  *
  * One action rather than a set of controls: the configuration is whatever this workspace already
- * holds -- the models, the permission default, the general settings -- and the button copies it to
- * DataOps. Every other user's workspace takes that copy as its starting values and may then change
- * anything, at which point their own version wins and this button never reaches it again.
+ * holds, and the button copies it to DataOps.
  * @param props - Translate function from the section.
- * @returns The publish row.
+ * @returns The default-configuration card.
  */
-function PublishDefaults({ t }: { t: (key: keyof typeof en) => string }) {
-  const [state, setState] = useState<PublishState>({ kind: 'loading' })
+function DefaultsCard({ t }: { t: (key: keyof typeof en) => string }) {
+  const [state, setState] = useState<LoadState<ModelSyncStatus>>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -110,187 +274,45 @@ function PublishDefaults({ t }: { t: (key: keyof typeof en) => string }) {
     setBusy(true)
     try {
       const status = await postModelSyncAction({ action: 'publish-defaults' })
-      if (status !== null) setState({ kind: 'ready', status })
+      if (status === null) setState({ kind: 'unavailable' })
+      else setState({ kind: 'ready', status })
     } catch {
       setState({ kind: 'failed' })
     } finally {
       setBusy(false)
     }
   }, [])
-
-  if (state.kind === 'loading') return null
-  if (state.kind === 'unavailable' || state.kind === 'failed') {
-    return (
-      <div className={styles.modelPanel}>
-        <h3 className={styles.modelTitle}>{t('defaultsTitle')}</h3>
-        <p className={styles.modelDescription} role={state.kind === 'failed' ? 'alert' : undefined}>
-          {state.kind === 'failed' ? t('loadFailed') : t('modelsUnavailable')}
-        </p>
-      </div>
-    )
-  }
-
-  const { status } = state
-  // A viewer DataOps does not authorize to publish sees the same explanation without the button,
-  // because the permission rule lives in DataOps and the browser must not restate it.
-  if (!status.canPublish) {
-    return (
-      <div className={styles.modelPanel}>
-        <h3 className={styles.modelTitle}>{t('defaultsTitle')}</h3>
-        <p className={styles.modelDescription}>{t('defaultsNotAdmin')}</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className={styles.modelPanel}>
-      <h3 className={styles.modelTitle}>{t('defaultsTitle')}</h3>
-      <p className={styles.modelDescription}>{t('defaultsDescription')}</p>
-      <div className={styles.brandingRow}>
-        <div className={styles.brandingCopy}>
-          <strong>{t('defaultsActionTitle')}</strong>
-          <span>
-            {status.publishedAt === null
-              ? t('defaultsNeverPublished')
-              : t('defaultsPublishedAt') + ' ' + status.publishedAt}
-          </span>
-        </div>
-        <button
-          type="button"
-          className={styles.modelAction}
-          disabled={busy}
-          onClick={() => { void publish() }}
-        >
-          {busy ? t('defaultsPublishing') : t('defaultsPublish')}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/** What the limits panel knows. */
-type LimitsState =
-  | { kind: 'loading' }
-  | { kind: 'unavailable' }
-  | { kind: 'ready'; status: WorkspaceLimitsStatus }
-  | { kind: 'failed' }
-
-/** The panel's unit, so a stored byte count survives a round trip through the input. */
-const BYTES_PER_MIB = 1024 * 1024
-
-/** Render a byte ceiling as the whole MiB the input shows. */
-function toMib(bytes: number): string {
-  return String(Math.round((bytes / BYTES_PER_MIB) * 100) / 100)
-}
-
-/**
- * Read and change the file-size ceilings DataOps enforces on this workspace.
- *
- * The values live in DataOps and are read through the plugin, which holds the JWT; the panel only
- * ever holds what the administrator is allowed to see.
- * @param props - Translate function from the section.
- * @returns The limits panel.
- */
-function WorkspaceLimitsPanel({ t }: { t: (key: keyof typeof en) => string }) {
-  const [state, setState] = useState<LimitsState>({ kind: 'loading' })
-  const [fileReadMib, setFileReadMib] = useState('')
-  const [uploadMib, setUploadMib] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const apply = useCallback((status: WorkspaceLimitsStatus) => {
-    setState({ kind: 'ready', status })
-    setFileReadMib(toMib(status.limits.fileReadMaxBytes))
-    setUploadMib(toMib(status.limits.uploadMaxBytes))
-  }, [])
-
-  const refresh = useCallback(async () => {
-    try {
-      const status = await fetchWorkspaceLimits()
-      if (status === null) setState({ kind: 'unavailable' })
-      else apply(status)
-    } catch {
-      setState({ kind: 'failed' })
-    }
-  }, [apply])
-
-  useEffect(() => { void refresh() }, [refresh])
-
-  const submit = useCallback(async () => {
-    const fileReadMaxBytes = Math.round(Number(fileReadMib) * BYTES_PER_MIB)
-    const uploadMaxBytes = Math.round(Number(uploadMib) * BYTES_PER_MIB)
-    if (!Number.isSafeInteger(fileReadMaxBytes) || fileReadMaxBytes <= 0) return
-    if (!Number.isSafeInteger(uploadMaxBytes) || uploadMaxBytes <= 0) return
-    setBusy(true)
-    try {
-      const limits: WorkspaceLimits = { fileReadMaxBytes, uploadMaxBytes }
-      const status = await saveWorkspaceLimits(limits)
-      if (status === null) setState({ kind: 'unavailable' })
-      else apply(status)
-    } catch {
-      setState({ kind: 'failed' })
-    } finally {
-      setBusy(false)
-    }
-  }, [fileReadMib, uploadMib, apply])
 
   if (state.kind === 'loading') return null
   if (state.kind !== 'ready') {
-    return (
-      <div className={styles.modelPanel}>
-        <h3 className={styles.modelTitle}>{t('limitsTitle')}</h3>
-        <p className={styles.modelDescription} role={state.kind === 'failed' ? 'alert' : undefined}>
-          {state.kind === 'failed' ? t('loadFailed') : t('limitsUnavailable')}
-        </p>
-      </div>
-    )
+    return <UnavailableCard title={t('defaultsTitle')} t={t} state={state.kind} />
   }
 
+  const published = state.status.publishedAt === null
+    ? null
+    : publishedText(state.status.publishedAt)
+
+  // A viewer DataOps does not authorize to publish sees the state without the action, because the
+  // permission rule lives in DataOps and the browser must not restate it.
   return (
-    <div className={styles.modelPanel}>
-      <h3 className={styles.modelTitle}>{t('limitsTitle')}</h3>
-      <p className={styles.modelDescription}>{t('limitsDescription')}</p>
-      <div className={styles.details}>
-        <label className={styles.detailRow}>
-          <span>{t('limitsFileReadLabel')}</span>
-          <input
-            className={styles.limitsInput}
-            type="number"
-            min="1"
-            step="1"
-            aria-label={t('limitsFileReadLabel')}
-            value={fileReadMib}
-            disabled={busy || !state.status.canWrite}
-            onChange={event => { setFileReadMib(event.target.value) }}
-          />
-        </label>
-        <label className={styles.detailRow}>
-          <span>{t('limitsUploadLabel')}</span>
-          <input
-            className={styles.limitsInput}
-            type="number"
-            min="1"
-            step="1"
-            aria-label={t('limitsUploadLabel')}
-            value={uploadMib}
-            disabled={busy || !state.status.canWrite}
-            onChange={event => { setUploadMib(event.target.value) }}
-          />
-        </label>
+    <section className={styles.card}>
+      <div className={styles.row}>
+        <div className={styles.copy}>
+          <span className={styles.label}>{t('defaultsTitle')}</span>
+          <span className={styles.meta}>
+            {published === null
+              ? t('defaultsNeverPublished')
+              : t('defaultsPublishedAt') + ' · ' + published}
+          </span>
+        </div>
+        {state.status.canPublish
+          ? (
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => { void publish() }}>
+              {busy ? t('defaultsPublishing') : t('defaultsPublish')}
+            </Button>
+          )
+          : <span className={styles.meta}>{t('defaultsNotAdmin')}</span>}
       </div>
-      <div className={styles.brandingRow}>
-        <span className={styles.modelDescription}>{t('limitsUnit')}</span>
-        <button
-          type="button"
-          className={styles.modelAction}
-          disabled={busy || !state.status.canWrite}
-          onClick={() => { void submit() }}
-        >
-          {busy ? t('limitsSaving') : t('limitsSave')}
-        </button>
-      </div>
-    </div>
+    </section>
   )
 }
-
-/** Re-exported so the settings entry can be discovered from the section alone. */
-export { MODEL_SYNC_PATH }

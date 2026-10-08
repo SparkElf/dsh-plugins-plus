@@ -41,6 +41,31 @@ function readJson(value: unknown): Record<string, unknown> | null {
 }
 
 /**
+ * A write DataOps refused, carrying the reason it gave.
+ *
+ * The message is written for the person who set the value, so the panel shows it as-is rather
+ * than replacing it with a generic failure notice.
+ */
+export class WorkspaceLimitsRejection extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'WorkspaceLimitsRejection'
+  }
+}
+
+/** Read the reason from a refused response, falling back to the status line. */
+async function refusalReason(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = readJson(await response.json())
+    const error = body?.error
+    if (typeof error === 'string' && error.trim() !== '') return error
+  } catch {
+    // A body that is absent or not JSON leaves the fallback as the only explanation available.
+  }
+  return `${fallback} with HTTP ${String(response.status)}`
+}
+
+/**
  * Read the workspace limits the panel shows.
  * @returns The status, or null when the workspace is not connected to DataOps.
  */
@@ -64,7 +89,11 @@ export async function saveWorkspaceLimits(limits: WorkspaceLimits): Promise<Work
     body: JSON.stringify(limits),
   })
   if (response.status === 503) return null
-  if (!response.ok) throw new Error(`Workspace limits write failed with HTTP ${String(response.status)}`)
+  // A refusal names a value the user chose, so the card keeps that draft and shows the reason.
+  if (response.status === 400) {
+    throw new WorkspaceLimitsRejection(await refusalReason(response, 'Workspace limits write refused'))
+  }
+  if (!response.ok) throw new Error(await refusalReason(response, 'Workspace limits write failed'))
   const body = readJson(await response.json())
   return body === null ? null : asStatus(body)
 }
