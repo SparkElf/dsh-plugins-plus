@@ -5,6 +5,8 @@ import type { en } from './locales.ts'
 import { setWanxiangBrandEnabled, wanxiangBrandPreference } from './brand-store.ts'
 import { MODEL_SYNC_PATH, fetchModelSyncStatus, postModelSyncAction } from './model-sync-client.ts'
 import type { ModelSyncStatus } from './model-sync-client.ts'
+import { fetchWorkspaceLimits, saveWorkspaceLimits } from './workspace-limits-client.ts'
+import type { WorkspaceLimits, WorkspaceLimitsStatus } from './workspace-limits-client.ts'
 import styles from './ManagedDataOpsSection.module.css'
 
 /** Values injected by the DSH Settings slot. */
@@ -56,6 +58,7 @@ export function ManagedDataOpsSection(props: ManagedDataOpsSectionProps) {
         </button>
       </div>
       <PublishDefaults t={t} />
+      <WorkspaceLimitsPanel t={t} />
       <dl className={styles.details}>
         <div className={styles.detailRow}>
           <dt>{t('identityLabel')}</dt>
@@ -159,6 +162,130 @@ function PublishDefaults({ t }: { t: (key: keyof typeof en) => string }) {
           onClick={() => { void publish() }}
         >
           {busy ? t('defaultsPublishing') : t('defaultsPublish')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** What the limits panel knows. */
+type LimitsState =
+  | { kind: 'loading' }
+  | { kind: 'unavailable' }
+  | { kind: 'ready'; status: WorkspaceLimitsStatus }
+  | { kind: 'failed' }
+
+/** The panel's unit, so a stored byte count survives a round trip through the input. */
+const BYTES_PER_MIB = 1024 * 1024
+
+/** Render a byte ceiling as the whole MiB the input shows. */
+function toMib(bytes: number): string {
+  return String(Math.round((bytes / BYTES_PER_MIB) * 100) / 100)
+}
+
+/**
+ * Read and change the file-size ceilings DataOps enforces on this workspace.
+ *
+ * The values live in DataOps and are read through the plugin, which holds the JWT; the panel only
+ * ever holds what the administrator is allowed to see.
+ * @param props - Translate function from the section.
+ * @returns The limits panel.
+ */
+function WorkspaceLimitsPanel({ t }: { t: (key: keyof typeof en) => string }) {
+  const [state, setState] = useState<LimitsState>({ kind: 'loading' })
+  const [fileReadMib, setFileReadMib] = useState('')
+  const [uploadMib, setUploadMib] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const apply = useCallback((status: WorkspaceLimitsStatus) => {
+    setState({ kind: 'ready', status })
+    setFileReadMib(toMib(status.limits.fileReadMaxBytes))
+    setUploadMib(toMib(status.limits.uploadMaxBytes))
+  }, [])
+
+  const refresh = useCallback(async () => {
+    try {
+      const status = await fetchWorkspaceLimits()
+      if (status === null) setState({ kind: 'unavailable' })
+      else apply(status)
+    } catch {
+      setState({ kind: 'failed' })
+    }
+  }, [apply])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const submit = useCallback(async () => {
+    const fileReadMaxBytes = Math.round(Number(fileReadMib) * BYTES_PER_MIB)
+    const uploadMaxBytes = Math.round(Number(uploadMib) * BYTES_PER_MIB)
+    if (!Number.isSafeInteger(fileReadMaxBytes) || fileReadMaxBytes <= 0) return
+    if (!Number.isSafeInteger(uploadMaxBytes) || uploadMaxBytes <= 0) return
+    setBusy(true)
+    try {
+      const limits: WorkspaceLimits = { fileReadMaxBytes, uploadMaxBytes }
+      const status = await saveWorkspaceLimits(limits)
+      if (status === null) setState({ kind: 'unavailable' })
+      else apply(status)
+    } catch {
+      setState({ kind: 'failed' })
+    } finally {
+      setBusy(false)
+    }
+  }, [fileReadMib, uploadMib, apply])
+
+  if (state.kind === 'loading') return null
+  if (state.kind !== 'ready') {
+    return (
+      <div className={styles.modelPanel}>
+        <h3 className={styles.modelTitle}>{t('limitsTitle')}</h3>
+        <p className={styles.modelDescription} role={state.kind === 'failed' ? 'alert' : undefined}>
+          {state.kind === 'failed' ? t('loadFailed') : t('limitsUnavailable')}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className={styles.modelPanel}>
+      <h3 className={styles.modelTitle}>{t('limitsTitle')}</h3>
+      <p className={styles.modelDescription}>{t('limitsDescription')}</p>
+      <div className={styles.details}>
+        <label className={styles.detailRow}>
+          <span>{t('limitsFileReadLabel')}</span>
+          <input
+            className={styles.limitsInput}
+            type="number"
+            min="1"
+            step="1"
+            aria-label={t('limitsFileReadLabel')}
+            value={fileReadMib}
+            disabled={busy || !state.status.canWrite}
+            onChange={event => { setFileReadMib(event.target.value) }}
+          />
+        </label>
+        <label className={styles.detailRow}>
+          <span>{t('limitsUploadLabel')}</span>
+          <input
+            className={styles.limitsInput}
+            type="number"
+            min="1"
+            step="1"
+            aria-label={t('limitsUploadLabel')}
+            value={uploadMib}
+            disabled={busy || !state.status.canWrite}
+            onChange={event => { setUploadMib(event.target.value) }}
+          />
+        </label>
+      </div>
+      <div className={styles.brandingRow}>
+        <span className={styles.modelDescription}>{t('limitsUnit')}</span>
+        <button
+          type="button"
+          className={styles.modelAction}
+          disabled={busy || !state.status.canWrite}
+          onClick={() => { void submit() }}
+        >
+          {busy ? t('limitsSaving') : t('limitsSave')}
         </button>
       </div>
     </div>

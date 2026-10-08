@@ -213,3 +213,14 @@
   cursor: default;
   opacity: 0.5;
 }
+
+.limitsInput {
+  width: 6rem;
+  padding: 4px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+}

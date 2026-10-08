@@ -39,6 +39,14 @@ export const en = {
   plazaActionFailed: 'The action could not be completed. Try again.',
   plazaRetry: 'Try again',
   plazaRefresh: 'Refresh',
+  limitsTitle: 'Workspace limits',
+  limitsDescription: 'The largest files this workspace may read and upload. Set by an administrator in DataOps.',
+  limitsUnavailable: 'Workspace limits are available once this workspace is connected to DataOps.',
+  limitsFileReadLabel: 'Largest file to read',
+  limitsUploadLabel: 'Largest file to upload',
+  limitsUnit: 'Units are MiB.',
+  limitsSave: 'Save limits',
+  limitsSaving: 'Saving…',
 } as const
 
 /** Stable key set shared by every managed DataOps locale. */
@@ -85,4 +93,12 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   plazaActionFailed: '操作未完成，请重试。',
   plazaRetry: '重试',
   plazaRefresh: '刷新',
+  limitsTitle: '工作区限制',
+  limitsDescription: '本工作区可读取与上传的最大文件。由 DataOps 管理员设置。',
+  limitsUnavailable: '工作区连接到 DataOps 后可用。',
+  limitsFileReadLabel: '最大读取文件',
+  limitsUploadLabel: '最大上传文件',
+  limitsUnit: '单位：MiB。',
+  limitsSave: '保存限制',
+  limitsSaving: '保存中…',
 }
