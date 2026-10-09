@@ -106,8 +106,13 @@ export interface Config {
   serverName: string
   /** DSH credential reference that stores the current DataOps access JWT. */
   credentialRef: string
-  /** Per-tool-call timeout forwarded to the MCP client. */
-  toolCallTimeoutMs: number
+  /**
+   * Per-tool-call timeout forwarded to the MCP client.
+   *
+   * Volatile, so the settings service stores the platform default in this workspace's document
+   * and the panel can raise it without a profile edit. The read goes through `volatileValue`.
+   */
+  toolCallTimeoutMs: number | VolatileRef<number>
   /**
    * Model-sync state this workspace keeps.
    *
@@ -146,6 +151,15 @@ export interface ModelSyncState {
   privateModelIds: string[]
 }
 
+/**
+ * Per-tool-call timeout a workspace starts with.
+ *
+ * Named rather than inlined so the schema default and the read fallback cannot drift: the field is
+ * volatile, so a workspace that never changed it reads no value at all and both places have to
+ * answer the same number.
+ */
+export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 300_000
+
 /** Default sync state before this workspace stored anything. */
 const MODEL_SYNC_DEFAULT: ModelSyncState = {
   detached: false,
@@ -158,7 +172,16 @@ export const Config: z<Config> = z.object({
   baseUrl: z.string().default('http://host.docker.internal:3101'),
   serverName: z.string().default('dataops'),
   credentialRef: z.string().role('credential-ref').default('DATAOPS_ACCESS_TOKEN'),
-  toolCallTimeoutMs: z.number().min(1).default(300_000),
+  /**
+   * Volatile so the settings service persists it in this workspace's document: the timeout an
+   * operator needs depends on the query behind a tool, which is deployment knowledge the profile
+   * that mounts this plugin does not have.
+   *
+   * `z.any()` like the sync state above, and for the same reason: a volatile field is delivered
+   * to `apply` as a reference rather than a value, so a narrowed schema would describe a shape
+   * the runtime does not pass. The range is enforced where the value is read.
+   */
+  toolCallTimeoutMs: z.any().default(DEFAULT_TOOL_CALL_TIMEOUT_MS).volatile(),
   /**
    * Volatile so the settings service persists it in this workspace's document. The shape is
    * left open because the sync state is this plugin's own record, not user configuration.
@@ -201,7 +224,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       url: `${baseUrl}/api/ai/data-query/mcp`,
       headers: {},
       bearerTokenRef: config.credentialRef,
-      toolCallTimeoutMs: config.toolCallTimeoutMs,
+      toolCallTimeoutMs: volatileValue(config.toolCallTimeoutMs, DEFAULT_TOOL_CALL_TIMEOUT_MS),
     })
     mcpFiber = fiber
     try {
