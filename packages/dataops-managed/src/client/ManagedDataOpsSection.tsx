@@ -11,6 +11,12 @@ import {
   saveWorkspaceLimits,
 } from './workspace-limits-client.ts'
 import type { WorkspaceLimits, WorkspaceLimitsStatus } from './workspace-limits-client.ts'
+import {
+  TOOL_TIMEOUT_MAX_SECONDS,
+  TOOL_TIMEOUT_MIN_SECONDS,
+  fetchToolTimeout,
+  saveToolTimeout,
+} from './tool-timeout-client.ts'
 import styles from './ManagedDataOpsSection.module.css'
 
 /** Values injected by the DSH Settings slot. */
@@ -69,6 +75,7 @@ export function ManagedDataOpsSection(props: ManagedDataOpsSectionProps) {
       </div>
       <BrandingRow t={t} enabled={branding.enabled} />
       <LimitsCard t={t} />
+      <TimeoutCard t={t} />
       <DefaultsCard t={t} />
     </section>
   )
@@ -248,8 +255,117 @@ function LimitsCard({ t }: { t: (key: keyof typeof en) => string }) {
 }
 
 /**
- * Publish this workspace's configuration as the default other users start from.
+ * How long one tool call may run before it is abandoned.
  *
+ * The value lives in this plugin's own configuration, so it is per workspace and survives a
+ * restart. It is edited in seconds because that is the unit an operator reasons in; the plugin
+ * stores milliseconds and converts on the way through.
+ * @param props - Translate function from the section.
+ * @returns The tool-call timeout card.
+ */
+function TimeoutCard({ t }: { t: (key: keyof typeof en) => string }) {
+  const [state, setState] = useState<LoadState<number>>({ kind: 'loading' })
+  const [seconds, setSeconds] = useState('')
+  /** The value the draft started from, so Save stays off until it changes. */
+  const [saved, setSaved] = useState('')
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const id = useId()
+
+  const apply = useCallback((milliseconds: number) => {
+    setState({ kind: 'ready', status: milliseconds })
+    const text = String(Math.round(milliseconds / 1000))
+    setSeconds(text)
+    setSaved(text)
+    setRefusal(null)
+  }, [])
+
+  const refresh = useCallback(async () => {
+    try {
+      const status = await fetchToolTimeout()
+      if (status === null) setState({ kind: 'unavailable' })
+      else apply(status.toolCallTimeoutMs)
+    } catch {
+      setState({ kind: 'failed' })
+    }
+  }, [apply])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const parsed = Number(seconds)
+  const valid = seconds.trim() !== '' && Number.isFinite(parsed)
+    && parsed >= TOOL_TIMEOUT_MIN_SECONDS && parsed <= TOOL_TIMEOUT_MAX_SECONDS
+  const dirty = seconds !== saved
+  const disabled = busy
+
+  const submit = useCallback(async () => {
+    if (!valid) return
+    setBusy(true)
+    setRefusal(null)
+    try {
+      const status = await saveToolTimeout(Math.round(parsed * 1000))
+      if (status === null) setState({ kind: 'unavailable' })
+      else apply(status.toolCallTimeoutMs)
+    } catch (error) {
+      // A refused value keeps the field and the draft, so the user can correct it in place.
+      if (error instanceof Error) setRefusal(error.message)
+      else setState({ kind: 'failed' })
+    } finally {
+      setBusy(false)
+    }
+  }, [valid, parsed, apply])
+
+  if (state.kind === 'loading') return null
+  if (state.kind !== 'ready') {
+    return <UnavailableCard title={t('timeoutTitle')} t={t} state={state.kind} />
+  }
+
+  return (
+    <section className={styles.card}>
+      <h3 className={styles.heading}>{t('timeoutTitle')}</h3>
+      <div className={styles.fields}>
+        <div>
+          <SettingsValueField
+            id={id}
+            label={t('timeoutLabel')}
+            text={seconds}
+            numeric
+            invalid={!valid}
+            overridden={false}
+            overriddenLabel=""
+            resetLabel=""
+            invalidLabel={t('timeoutInvalid')}
+            disabled={disabled}
+            onEdit={(text) => { setSeconds(text); setRefusal(null) }}
+            onReset={() => undefined}
+          />
+        </div>
+      </div>
+      <div className={styles.actions}>
+        {refusal === null
+          ? null
+          : (
+            <span className={styles.refusal} role="alert">
+              <StateDot state="error" />
+              <span>{refusal}</span>
+            </span>
+          )}
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={disabled || !valid || !dirty}
+          onClick={() => { void submit() }}
+        >
+          {busy ? t('limitsSaving') : t('limitsSave')}
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * Publish this workspace's configuration as the default other users start from.
+
  * One action rather than a set of controls: the configuration is whatever this workspace already
  * holds, and the button copies it to DataOps.
  * @param props - Translate function from the section.

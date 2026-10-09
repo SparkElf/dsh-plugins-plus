@@ -42,6 +42,13 @@ export const SKILL_PLAZA_PATH = '/integrations/dataops/skill-plaza'
 /** Same-origin route the Settings panel uses to read and change this workspace's limits. */
 export const WORKSPACE_LIMITS_PATH = '/integrations/dataops/workspace-limits'
 
+/** Same-origin route the Settings panel uses to read and change the tool-call timeout. */
+export const TOOL_TIMEOUT_PATH = '/integrations/dataops/tool-timeout'
+
+/** The ends a tool-call timeout may take, in whole seconds. */
+export const TOOL_TIMEOUT_MIN_SECONDS = 1
+export const TOOL_TIMEOUT_MAX_SECONDS = 3600
+
 /** The live sync instance, so the settings routes can act on it after activation. */
 let modelSyncRef: ModelSync | undefined
 
@@ -595,6 +602,52 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'dataops-managed: workspace limits route')
+
+  /**
+   * The tool-call timeout, stored in this plugin's own Config.
+   *
+   * The settings service keeps the value in this workspace's document and updates the volatile
+   * reference in place, so a change takes effect on the next connection without a restart. The
+   * profile therefore does not have to anticipate how long a deployment's queries take.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: TOOL_TIMEOUT_PATH,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      const read = () => volatileValue(config.toolCallTimeoutMs, DEFAULT_TOOL_CALL_TIMEOUT_MS)
+      if (request.method === 'GET') {
+        writeJson(response, 200, { toolCallTimeoutMs: read() })
+        return
+      }
+      if (request.method !== 'POST') {
+        response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' })
+        response.end()
+        return
+      }
+      try {
+        const body = await readJson(request)
+        const milliseconds = body?.toolCallTimeoutMs
+        if (typeof milliseconds !== 'number' || !Number.isSafeInteger(milliseconds)) {
+          writeJson(response, 400, { error: 'toolCallTimeoutMs must be a whole number of milliseconds' })
+          return
+        }
+        const seconds = milliseconds / 1000
+        if (seconds < TOOL_TIMEOUT_MIN_SECONDS || seconds > TOOL_TIMEOUT_MAX_SECONDS) {
+          writeJson(response, 400, {
+            error: 'the timeout must be between ' + String(TOOL_TIMEOUT_MIN_SECONDS)
+              + ' and ' + String(TOOL_TIMEOUT_MAX_SECONDS) + ' seconds',
+          })
+          return
+        }
+        await ctx.settings.update(MANAGED_PLUGIN_ID, { toolCallTimeoutMs: milliseconds })
+        writeJson(response, 200, { toolCallTimeoutMs: milliseconds })
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: tool timeout request failed')
+        ctx.logger.warn(error)
+        writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: tool timeout route')
 
   await connectExisting()
 }
