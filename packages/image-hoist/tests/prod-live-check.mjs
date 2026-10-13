@@ -11,7 +11,10 @@ import { execFileSync } from 'node:child_process';
 import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+const zstdcat = (file) => execFileSync('zstdcat', [file], { encoding: 'utf8', maxBuffer: 2 ** 31 - 1 });
+
 const ROOT = '/root/.dsh/sessions/--root-projects--';
+const PROBE = '/tmp/hoist-probe.png';
 const before = new Set(readdirSync(ROOT));
 
 const browser = await chromium.launch({
@@ -40,25 +43,30 @@ try {
   await send.first().click();
   console.log('PROD-INFO prompt sent');
 
-  // Wait for the new session's log to stop growing.
+  // Wait for the turn to finish, judged by the session's own terminal marker.
+  // Log size is not a completion signal: a slow tool call (a 600x300 probe read
+  // takes tens of seconds) leaves the file unchanged long enough to look settled,
+  // and reading there reports a healthy hoist as a miss.
   let session = null;
-  let last = -1;
-  let stable = 0;
-  for (let i = 0; i < 70; i += 1) {
+  let settled = false;
+  for (let i = 0; i < 90; i += 1) {
     await page.waitForTimeout(5000);
     if (session === null) {
-      const now = readdirSync(ROOT).filter((d) => !before.has(d));
-      if (now.length > 0) session = now[0];
+      const now = readdirSync(ROOT)
+        .filter((d) => !before.has(d))
+        .map((d) => ({ d, m: statSync(join(ROOT, d)).mtimeMs }))
+        .sort((a, b) => b.m - a.m);
+      if (now.length > 0) session = now[0].d;
     }
     if (session === null) continue;
     const file = join(ROOT, session, 'session.v4.jsonl.zstd');
-    let size = 0;
-    try { size = statSync(file).size; } catch { /* not flushed yet */ }
-    if (size > 0 && size === last) stable += 1; else stable = 0;
-    last = size;
-    if (stable >= 3) break;
+    try {
+      settled = zstdcat(file).includes('"turn/end"');
+    } catch { /* not flushed yet */ }
+    if (settled) break;
   }
   if (session === null) throw new Error('no new session appeared');
+  if (!settled) throw new Error('the turn never reached turn/end');
 
   const file = join(ROOT, session, 'session.v4.jsonl.zstd');
   const text = execFileSync('zstdcat', [file], { encoding: 'utf8', maxBuffer: 2 ** 31 - 1 });
@@ -74,12 +82,39 @@ try {
     if (t.trim().length > 0) answer = t.trim();
   }
 
+  // The probe carries a fixed four-digit number: the model naming it is what proves
+  // the image reached the provider, because a route billed as base64 text cannot read
+  // the picture. The durable log deliberately still holds the image on its tool result
+  // -- the hoist is a projection applied when the request is composed, so the raw log
+  // is expected to keep both copies.
+  const EXPECTED = '7391';
+  const readIt = answer.includes(EXPECTED);
+  const hoistTargets = hoists.flatMap((h) => (h.data?.targets ?? []));
+  const imagesOnUser = events.filter((e) => e.type === 'user/message' &&
+    (e.data?.message?.content ?? []).some((b) => b.type === 'image'));
+
+  // A base64-billed route spends roughly one token per four bytes of image on top of the
+  // text baseline; a hoisted one spends a couple of hundred tokens for the whole picture.
+  const probeBytes = existsSync(PROBE) ? statSync(PROBE).size : null;
+  const inputs = events
+    .filter((e) => e.type === 'assistant/message' && typeof e.data?.usage?.inputTokens === 'number')
+    .map((e) => e.data.usage.inputTokens);
+  const worst = inputs.length > 0 ? Math.max(...inputs) : null;
+
   console.log('PROD-INFO session:', session);
-  console.log('PROD-INFO image/hoist events :', hoists.length, JSON.stringify(hoists.map((h) => h.data)));
-  console.log('PROD-INFO tool results with image:', toolImages.length);
-  console.log('PROD-INFO model answer:', JSON.stringify(answer.slice(-60)));
+  console.log('PROD-INFO image/hoist events :', hoists.length, JSON.stringify(hoistTargets));
+  console.log('PROD-INFO images left on tool results:', toolImages.length, '(expected: the log keeps its copy)');
+  // The raw log keeps every image on its tool result: the hoist is a projection applied
+  // while the request is composed, so the projected view -- not this file -- carries the
+  // copy that rides on the user message.
+  console.log('PROD-INFO images on user messages in the raw log:', imagesOnUser.length, '(projection only; 0 here is expected)');
+  console.log('PROD-INFO model answer:', JSON.stringify(answer.slice(-60)), 'expected', EXPECTED);
+  console.log('PROD-INFO largest request input:', worst, 'tokens for a', probeBytes, 'byte probe',
+    `(base64 billing would add ~${probeBytes ? Math.round(probeBytes / 4) : '?'} tokens)`);
   console.log('PROD-INFO plugin live:', hoists.length > 0 ? 'YES' : 'NO');
-  outcome = hoists.length > 0 ? 'PROD-PASS' : 'PROD-FAIL plugin did not hoist';
+  outcome = hoists.length > 0 && hoistTargets.length > 0 && readIt
+    ? 'PROD-PASS'
+    : `PROD-FAIL hoists=${hoists.length} targets=${hoistTargets.length} readIt=${readIt}`;
 } catch (error) {
   outcome = `PROD-FAIL ${String(error?.message ?? error).slice(0, 180)}`;
 } finally {
