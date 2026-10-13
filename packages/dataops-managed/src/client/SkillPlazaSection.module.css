@@ -88,29 +88,39 @@
   color: var(--dsw-alias-state-business-primary);
 }
 
+/* The plaza grid. Columns are as wide as a card can usefully be and the count follows the
+   available width, so the section keeps its vertical grouping -- heading, filter, then cards --
+   while a wide viewport shows several cards per band instead of one per band. */
 .cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 12px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-/* The hover surface reaches 8px past the content on both sides while the row's content stays
-   aligned with the page header, as the skill center's own rows do. */
 .card {
   min-width: 0;
-  margin: 0 -8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--dsw-alias-border-l3);
   border-radius: 12px;
+  transition: border-color 160ms ease, background-color 160ms ease;
 }
 
 .card:hover {
+  border-color: var(--dsw-alias-border-l2);
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.cardHead {
+.cardTop {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 8px;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .cardIcon {
@@ -118,25 +128,14 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
+  width: 36px;
+  height: 36px;
   border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: 10px;
   color: var(--dsw-alias-label-secondary);
 }
 
-.cardMain {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
 .cardTitle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   font-size: 14px;
   font-weight: 500;
   line-height: 20px;
@@ -154,7 +153,7 @@
   line-height: 18px;
   color: var(--dsw-alias-label-secondary);
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -163,14 +162,16 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 2px;
 }
 
+/* The actions keep to the bottom edge, so cards of unequal height still line up on the row. */
 .cardEnd {
   display: flex;
   flex: none;
   align-items: center;
   gap: 4px;
+  margin-top: auto;
+  padding-top: 4px;
 }
 
 /* The empty state holds the same frame as a row glyph so the section keeps its rhythm with no

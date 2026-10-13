@@ -33,12 +33,17 @@ type PlazaState =
   | { kind: 'failed' }
 
 /**
- * One plaza row, laid out like the skill center's own rows so the section reads as part of the
- * page rather than a panel bolted onto it.
- * @param props - the row's skill, its actions, and the dictionary resolver.
- * @returns the rendered row.
+ * One skill as a card in the plaza grid.
+ *
+ * A plaza entry carries a name, a description, tags, and its own actions; a full-width row left
+ * most of that width empty and forced every entry onto its own line. The card stacks the same
+ * parts vertically, so a grid column count can change without the content reflowing into a
+ * different shape.
+ *
+ * @param props - the card's skill, its actions, and the dictionary resolver.
+ * @returns the rendered card.
  */
-function PlazaRow({ skill, busy, onInstall, onUnshare, t }: {
+function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
   skill: PlazaSkill
   busy: boolean
   onInstall: () => void
@@ -47,44 +52,40 @@ function PlazaRow({ skill, busy, onInstall, onUnshare, t }: {
 }): ReactNode {
   return (
     <li className={styles.card}>
-      <div className={styles.cardHead}>
-        <span className={styles.cardIcon}><IconSkillOutlineRegular size={22} /></span>
-        <div className={styles.cardMain}>
-          <div className={styles.cardTitle}>
-            {skill.name}
-            {skill.sharedByMe ? <Tag tone="info" className={styles.mine}>{t('plazaMine')}</Tag> : null}
-          </div>
-          {skill.description === undefined ? null : (
-            <div className={styles.cardDesc}>{skill.description}</div>
-          )}
-          {skill.tags.length === 0 ? null : (
-            <div className={styles.cardMarks}>
-              {skill.tags.map((item) => <Tag tone="quiet" key={item}>{item}</Tag>)}
-            </div>
-          )}
+      <div className={styles.cardTop}>
+        <span className={styles.cardIcon}><IconSkillOutlineRegular size={20} /></span>
+        {skill.sharedByMe ? <Tag tone="info" className={styles.mine}>{t('plazaMine')}</Tag> : null}
+      </div>
+      <div className={styles.cardTitle}>{skill.name}</div>
+      {skill.description === undefined ? null : (
+        <div className={styles.cardDesc}>{skill.description}</div>
+      )}
+      {skill.tags.length === 0 ? null : (
+        <div className={styles.cardMarks}>
+          {skill.tags.map((item) => <Tag tone="quiet" key={item}>{item}</Tag>)}
         </div>
-        <div className={styles.cardEnd}>
+      )}
+      <div className={styles.cardEnd}>
+        <Button
+          variant="outline"
+          size="sm"
+          icon={<IconDownloadOutlineRegular size={16} />}
+          disabled={busy}
+          onClick={onInstall}
+        >
+          {t('plazaInstall')}
+        </Button>
+        {skill.sharedByMe ? (
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
-            icon={<IconDownloadOutlineRegular size={16} />}
+            icon={<IconTrashOutlineRegular size={16} />}
             disabled={busy}
-            onClick={onInstall}
+            onClick={onUnshare}
           >
-            {t('plazaInstall')}
+            {t('plazaUnshare')}
           </Button>
-          {skill.sharedByMe ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={<IconTrashOutlineRegular size={16} />}
-              disabled={busy}
-              onClick={onUnshare}
-            >
-              {t('plazaUnshare')}
-            </Button>
-          ) : null}
-        </div>
+        ) : null}
       </div>
     </li>
   )
@@ -208,7 +209,7 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
 
       <ul className={styles.cards}>
         {listing.skills.map((skill) => (
-          <PlazaRow
+          <PlazaCard
             key={skill.id}
             skill={skill}
             busy={busy}
