@@ -8,7 +8,6 @@ import {
   IconSkillOutlineRegular,
   IconTrashOutlineRegular,
   Modal,
-  Pill,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { en } from './locales.ts'
@@ -218,11 +217,22 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
 
       {listing.tags.length === 0 ? null : (
         <div className={styles.tagBar}>
-          <Pill active={tag === ''} onClick={() => { setTag(''); void refresh('', query) }}>{t('plazaAllTags')}</Pill>
+          <button
+            type="button"
+            className={tag === '' ? styles.chip + ' ' + styles.chipOn : styles.chip}
+            onClick={() => { setTag(''); void refresh('', query) }}
+          >
+            {t('plazaAllTags')}
+          </button>
           {listing.tags.map((item) => (
-            <Pill key={item} active={tag === item} onClick={() => { setTag(item); void refresh(item, query) }}>
+            <button
+              type="button"
+              key={item}
+              className={tag === item ? styles.chip + ' ' + styles.chipOn : styles.chip}
+              onClick={() => { setTag(item); void refresh(item, query) }}
+            >
               {item}
-            </Pill>
+            </button>
           ))}
         </div>
       )}
