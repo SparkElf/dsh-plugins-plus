@@ -49,31 +49,6 @@
   color: var(--dsw-alias-label-secondary);
 }
 
-.toolbar {
-  margin-bottom: 12px;
-}
-
-/* The skill center's own search field, restated rather than approximated: same 36px height,
-   10px radius, 12px inset, hairline on the input itself, and full width. An earlier version put
-   the frame on a wrapper beside a refresh button, which left this field 44px narrower than the
-   one above it and drew its border on the wrong element. */
-.search {
-  box-sizing: border-box;
-  width: 100%;
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid var(--dsw-alias-border-l3);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--dsw-alias-label-primary);
-  font-size: 13px;
-  outline: none;
-}
-
-.search::placeholder {
-  color: var(--dsw-alias-label-tertiary);
-}
-
 .tagBar {
   display: flex;
   flex-wrap: wrap;
@@ -88,13 +63,13 @@
   color: var(--dsw-alias-state-business-primary);
 }
 
-/* The plaza grid. Columns are as wide as a card can usefully be and the count follows the
-   available width, so the section keeps its vertical grouping -- heading, filter, then cards --
-   while a wide viewport shows several cards per band instead of one per band. */
+/* Two fixed columns and a gutter, matching the skill center's own grid above and the plugin
+   market's card surface, so the two halves of this page read as one list. */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -104,41 +79,38 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px;
-  border: 1px solid var(--dsw-alias-border-l3);
+  gap: 12px;
+  align-self: start;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
-  transition: border-color 160ms ease, background-color 160ms ease;
-}
-
-.card:hover {
-  border-color: var(--dsw-alias-border-l2);
-  background: var(--dsw-alias-interactive-bg-hover);
+  background: var(--dsw-alias-bg-layer-1);
 }
 
 .cardTop {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
 
 .cardIcon {
-  display: inline-flex;
+  display: grid;
   flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border: 0.5px solid var(--dsw-alias-border-l3);
-  border-radius: 10px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-secondary);
 }
 
 .cardTitle {
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 20px;
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -149,11 +121,11 @@
 }
 
 .cardDesc {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-secondary);
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }

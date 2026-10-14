@@ -20,6 +20,14 @@ import styles from './SkillPlazaSection.module.css'
 export interface SkillPlazaSectionInjected {
   /** Translate one DataOps plaza message key. */
   t: (key: keyof typeof en) => string
+  /**
+   * The page's current search text.
+   *
+   * The page draws one search field for every skill it shows, and this section is part of that
+   * page. Filtering here with the same text keeps the visible result consistent with the field;
+   * drawing a second field would offer the same control twice and filter only half the page.
+   */
+  query: string
 }
 
 /** Props accepted by the plaza section. */
@@ -53,10 +61,10 @@ function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
   return (
     <li className={styles.card}>
       <div className={styles.cardTop}>
-        <span className={styles.cardIcon}><IconSkillOutlineRegular size={20} /></span>
+        <span className={styles.cardIcon}><IconSkillOutlineRegular size={16} /></span>
+        <div className={styles.cardTitle}>{skill.name}</div>
         {skill.sharedByMe ? <Tag tone="info" className={styles.mine}>{t('plazaMine')}</Tag> : null}
       </div>
-      <div className={styles.cardTitle}>{skill.name}</div>
       {skill.description === undefined ? null : (
         <div className={styles.cardDesc}>{skill.description}</div>
       )}
@@ -104,8 +112,10 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
   const { t } = props
   const [state, setState] = useState<PlazaState>({ kind: 'loading' })
   const [tag, setTag] = useState('')
-  const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
+  // The page owns the search text and filters its own list with it, so this section reads the
+  // same value rather than keeping a second copy that could disagree.
+  const query = props.query ?? ''
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(async (filter: { tag?: string; query?: string }) => {
@@ -117,7 +127,9 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
     }
   }, [])
 
-  useEffect(() => { void load({}) }, [load])
+  // The page's search text arrives as a prop, so a change to it is what reloads the listing:
+  // the plaza filters on the Host, where the whole catalogue is known.
+  useEffect(() => { void load({ query }) }, [load, query])
 
   const refresh = useCallback(async (nextTag = tag, nextQuery = query) => {
     await load({ tag: nextTag, query: nextQuery })
@@ -173,19 +185,6 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
   return (
     <section className={styles.section}>
       {head}
-
-      <div className={styles.toolbar}>
-        <input
-          className={styles.search}
-          placeholder={t('plazaSearch')}
-          value={query}
-          onChange={(event) => {
-            const next = event.target.value
-            setQuery(next)
-            void refresh(tag, next)
-          }}
-        />
-      </div>
 
       {listing.tags.length === 0 ? null : (
         <div className={styles.tagBar}>
