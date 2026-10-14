@@ -1,10 +1,9 @@
 /**
  * Skill plaza section.
  *
- * The rows reuse the skill center's own measurements -- a 48px framed glyph, borderless rows
- * whose hover surface reaches 8px past the content, and a 14px title over a 13px description --
- * so the section reads as another group on that page rather than a panel bolted onto it. Every
- * colour comes from the shared alias tokens; no control here draws its own border or background.
+ * The section reuses the skill center's own measurements -- the same centred column, group
+ * heading, card surface, and card width -- so it reads as another group on that page rather
+ * than a panel bolted onto it. Every colour comes from the shared alias tokens.
  */
 
 .section {
@@ -14,7 +13,7 @@
   box-sizing: border-box;
   width: 100%;
   max-width: 960px;
-  margin: 40px auto 0;
+  margin: 24px auto 0;
   display: flex;
   flex-direction: column;
 }
@@ -22,38 +21,43 @@
 .head {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .title {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
-  line-height: 22px;
+  line-height: 20px;
   color: var(--dsw-alias-label-primary);
 }
 
-.titleIcon {
-  display: inline-flex;
-  color: var(--dsw-alias-brand-primary);
+/* The group's size, as the skill center's own group headings state theirs. */
+.titleCount {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-tertiary);
 }
 
-.intro {
+/* A section-level state line: same size and colour as the page's own, so a plaza that cannot
+   load reads as one more group rather than a differently-styled panel. */
+.status {
   margin: 0;
+  padding: 20px 0;
   font-size: 13px;
   line-height: 20px;
-  color: var(--dsw-alias-label-secondary);
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .tagBar {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 4px;
+  margin-bottom: 10px;
 }
 
 .notice {
@@ -63,13 +67,13 @@
   color: var(--dsw-alias-state-business-primary);
 }
 
-/* Two fixed columns and a gutter, matching the skill center's own grid above and the plugin
-   market's card surface, so the two halves of this page read as one list. */
+/* The same track as the skill center's grid above, so a card here is the same width as a card
+   there and the two halves of this page read as one list. */
 .cards {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
   align-items: start;
-  gap: 10px;
+  gap: 12px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -79,11 +83,11 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   align-self: start;
-  padding: 12px 14px;
+  padding: 12px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
 }
 
@@ -108,9 +112,9 @@
 .cardTitle {
   flex: 1;
   min-width: 0;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
-  line-height: 22px;
+  line-height: 20px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

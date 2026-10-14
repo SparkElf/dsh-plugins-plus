@@ -6,7 +6,6 @@ import {
   IconRefreshOutlineRegular,
   IconShareOutlineRegular,
   IconSkillOutlineRegular,
-  IconSparkleRegular,
   IconTrashOutlineRegular,
   Pill,
   Tag,
@@ -152,24 +151,25 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
   if (t === undefined) return null
   if (state.kind === 'loading') return null
 
-  // The section names itself once; the states below swap only what sits under the heading.
-  const head = (
+  // The section names itself once; the states below swap only what sits under the heading. The
+  // count sits beside the title as the skill center's own group headings carry theirs, so both
+  // halves of the page announce a group the same way.
+  const head = (count: number | null): ReactNode => (
     <div className={styles.head}>
       <h2 className={styles.title}>
-        <span className={styles.titleIcon}><IconSparkleRegular size={18} /></span>
         {t('plazaTitle')}
+        {count === null ? null : <span className={styles.titleCount}>{count}</span>}
       </h2>
-      <p className={styles.intro}>{t('plazaIntro')}</p>
     </div>
   )
 
   if (state.kind === 'unavailable') {
-    return <section className={styles.section}>{head}<p className={styles.intro}>{t('plazaUnavailable')}</p></section>
+    return <section className={styles.section}>{head(null)}<p className={styles.status}>{t('plazaUnavailable')}</p></section>
   }
   if (state.kind === 'failed') {
     return (
       <section className={styles.section}>
-        {head}
+        {head(null)}
         <div className={styles.empty} role="alert">
           <span className={styles.emptyIcon}><IconSkillOutlineRegular size={28} /></span>
           <p className={styles.emptyText}>{t('plazaLoadFailed')}</p>
@@ -184,7 +184,7 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
   const { listing } = state
   return (
     <section className={styles.section}>
-      {head}
+      {head(listing.skills.length)}
 
       {listing.tags.length === 0 ? null : (
         <div className={styles.tagBar}>

@@ -23,8 +23,6 @@ export const en = {
   defaultsNeverPublished: 'Not published yet',
   defaultsNotAdmin: 'Administrators only',
   plazaTitle: 'Skill plaza',
-  plazaIntro: 'Skills other users shared. Install one to use it in this workspace, or share a skill of your own.',
-  plazaTagFilter: 'Filter by tag',
   plazaAllTags: 'All tags',
   plazaMine: 'Shared by me',
   plazaInstall: 'Install',
@@ -36,7 +34,6 @@ export const en = {
   plazaLoadFailed: 'The skill plaza could not be loaded. Try again.',
   plazaActionFailed: 'The action could not be completed. Try again.',
   plazaRetry: 'Try again',
-  plazaRefresh: 'Refresh',
 } as const
 
 /** Stable key set shared by every managed DataOps locale. */
@@ -67,8 +64,6 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   defaultsNeverPublished: '尚未发布',
   defaultsNotAdmin: '仅管理员可发布',
   plazaTitle: '技能广场',
-  plazaIntro: '其他用户共享的技能。装载后即可在本工作区使用，也可以把自己的技能共享出去。',
-  plazaTagFilter: '按标签筛选',
   plazaAllTags: '全部标签',
   plazaMine: '我共享的',
   plazaInstall: '装载',
@@ -80,5 +75,4 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   plazaLoadFailed: '技能广场加载失败，请重试。',
   plazaActionFailed: '操作未完成，请重试。',
   plazaRetry: '重试',
-  plazaRefresh: '刷新',
 }
