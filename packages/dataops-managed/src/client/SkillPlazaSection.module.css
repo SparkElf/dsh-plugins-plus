@@ -140,47 +140,46 @@
   gap: 6px;
 }
 
-/* The disclosure under the body, above the actions, as the skill center's own cards carry. */
-.detailToggle {
-  display: inline-flex;
-  align-self: flex-start;
-  align-items: center;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
+/* Flat, borderless, and the same fill as the skill center's own labels. #ECF1FC is the
+   product's label fill, which the shared alias set does not carry. */
+.mark {
+  padding: 2px 7px;
   border: 0;
-  background: transparent;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
+  border-radius: 4px;
+  background: #ECF1FC;
+  color: var(--dsw-alias-state-business-primary);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
-.detailToggle:hover {
-  color: var(--dsw-alias-label-secondary);
+/* The card's controls, on the bottom edge with the detail button last. */
+.cardEnd {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin-top: auto;
+  padding-top: 4px;
 }
 
-.detailToggle:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 1px;
+/* The detail button takes the card's bottom-right corner. */
+.detailButton {
+  margin-left: auto;
 }
 
-.detailChevron {
-  transition: transform 120ms ease;
-}
-
-.detailToggleOpen .detailChevron {
-  transform: rotate(180deg);
-}
-
-/* The opened facts, label over value, separated from the toggle by a hairline. */
+/* The opened facts, label over value, read in the card's own dialog. */
 .detail {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 12px;
   margin: 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* The dialog widens past the shared confirm width, as the create form does. */
+.dialog {
+  width: min(560px, 100%);
 }
 
 .detailRow {
@@ -205,16 +204,6 @@
   color: var(--dsw-alias-label-secondary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-/* The actions keep to the bottom edge, so cards of unequal height still line up on the row. */
-.cardEnd {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 4px;
-  margin-top: auto;
-  padding-top: 4px;
 }
 
 /* The empty state holds the same frame as a row glyph so the section keeps its rhythm with no

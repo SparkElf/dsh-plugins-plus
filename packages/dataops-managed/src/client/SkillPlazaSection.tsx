@@ -2,14 +2,13 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Button,
-  IconChevronDownOutlineRegular,
   IconDownloadOutlineRegular,
   IconRefreshOutlineRegular,
   IconShareOutlineRegular,
   IconSkillOutlineRegular,
   IconTrashOutlineRegular,
+  Modal,
   Pill,
-  Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { en } from './locales.ts'
@@ -64,37 +63,16 @@ function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
       <div className={styles.cardTop}>
         <span className={styles.cardIcon}><IconSkillOutlineRegular size={16} /></span>
         <div className={styles.cardTitle}>{skill.name}</div>
-        {skill.sharedByMe ? <Tag tone="info" className={styles.mine}>{t('plazaMine')}</Tag> : null}
+        {skill.sharedByMe ? <span className={styles.mark}>{t('plazaMine')}</span> : null}
       </div>
       {skill.description === undefined ? null : (
         <div className={styles.cardDesc}>{skill.description}</div>
       )}
       {skill.tags.length === 0 ? null : (
         <div className={styles.cardMarks}>
-          {skill.tags.map((item) => <Tag tone="neutral" key={item}>{item}</Tag>)}
+          {skill.tags.map((item) => <span className={styles.mark} key={item}>{item}</span>)}
         </div>
       )}
-      <button
-        type="button"
-        className={open ? styles.detailToggle + ' ' + styles.detailToggleOpen : styles.detailToggle}
-        aria-expanded={open}
-        onClick={() => { setOpen(value => !value) }}
-      >
-        {open ? t('plazaHideDetail') : t('plazaShowDetail')}
-        <IconChevronDownOutlineRegular size={12} className={styles.detailChevron} />
-      </button>
-      {open ? (
-        <dl className={styles.detail}>
-          <div className={styles.detailRow}>
-            <dt className={styles.detailLabel}>{t('plazaDetailUpdated')}</dt>
-            <dd className={styles.detailValue}>{skill.updatedAt}</dd>
-          </div>
-          <div className={styles.detailRow}>
-            <dt className={styles.detailLabel}>{t('plazaDetailBody')}</dt>
-            <dd className={styles.detailValue}>{skill.instruction}</dd>
-          </div>
-        </dl>
-      ) : null}
       <div className={styles.cardEnd}>
         <Button
           variant="outline"
@@ -116,7 +94,36 @@ function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
             {t('plazaUnshare')}
           </Button>
         ) : null}
+        <Button
+          variant="outline"
+          size="sm"
+          className={styles.detailButton}
+          onClick={() => { setOpen(true) }}
+        >
+          {t('plazaShowDetail')}
+        </Button>
       </div>
+      <Modal
+        open={open}
+        onClose={() => { setOpen(false) }}
+        title={skill.name}
+        closeLabel={t('plazaClose')}
+        className={styles.dialog as string}
+        footer={(
+          <Button variant="outline" onClick={() => { setOpen(false) }}>{t('plazaClose')}</Button>
+        )}
+      >
+        <dl className={styles.detail}>
+          <div className={styles.detailRow}>
+            <dt className={styles.detailLabel}>{t('plazaDetailUpdated')}</dt>
+            <dd className={styles.detailValue}>{skill.updatedAt}</dd>
+          </div>
+          <div className={styles.detailRow}>
+            <dt className={styles.detailLabel}>{t('plazaDetailBody')}</dt>
+            <dd className={styles.detailValue}>{skill.instruction}</dd>
+          </div>
+        </dl>
+      </Modal>
     </li>
   )
 }
