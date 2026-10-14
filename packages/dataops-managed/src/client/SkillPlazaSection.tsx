@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Button,
+  IconChevronDownOutlineRegular,
   IconDownloadOutlineRegular,
   IconRefreshOutlineRegular,
   IconShareOutlineRegular,
@@ -57,6 +58,7 @@ function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
   onUnshare: () => void
   t: (key: keyof typeof en) => string
 }): ReactNode {
+  const [open, setOpen] = useState(false)
   return (
     <li className={styles.card}>
       <div className={styles.cardTop}>
@@ -69,9 +71,30 @@ function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
       )}
       {skill.tags.length === 0 ? null : (
         <div className={styles.cardMarks}>
-          {skill.tags.map((item) => <Tag tone="quiet" key={item}>{item}</Tag>)}
+          {skill.tags.map((item) => <Tag tone="neutral" key={item}>{item}</Tag>)}
         </div>
       )}
+      <button
+        type="button"
+        className={open ? styles.detailToggle + ' ' + styles.detailToggleOpen : styles.detailToggle}
+        aria-expanded={open}
+        onClick={() => { setOpen(value => !value) }}
+      >
+        {open ? t('plazaHideDetail') : t('plazaShowDetail')}
+        <IconChevronDownOutlineRegular size={12} className={styles.detailChevron} />
+      </button>
+      {open ? (
+        <dl className={styles.detail}>
+          <div className={styles.detailRow}>
+            <dt className={styles.detailLabel}>{t('plazaDetailUpdated')}</dt>
+            <dd className={styles.detailValue}>{skill.updatedAt}</dd>
+          </div>
+          <div className={styles.detailRow}>
+            <dt className={styles.detailLabel}>{t('plazaDetailBody')}</dt>
+            <dd className={styles.detailValue}>{skill.instruction}</dd>
+          </div>
+        </dl>
+      ) : null}
       <div className={styles.cardEnd}>
         <Button
           variant="outline"

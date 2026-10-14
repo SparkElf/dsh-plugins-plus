@@ -140,6 +140,73 @@
   gap: 6px;
 }
 
+/* The disclosure under the body, above the actions, as the skill center's own cards carry. */
+.detailToggle {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.detailToggle:hover {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.detailToggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+.detailChevron {
+  transition: transform 120ms ease;
+}
+
+.detailToggleOpen .detailChevron {
+  transform: rotate(180deg);
+}
+
+/* The opened facts, label over value, separated from the toggle by a hairline. */
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.detailRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detailLabel {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-caption);
+}
+
+/* The skill body is arbitrary text, so it wraps and keeps its own line breaks. */
+.detailValue {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* The actions keep to the bottom edge, so cards of unequal height still line up on the row. */
 .cardEnd {
   display: flex;
