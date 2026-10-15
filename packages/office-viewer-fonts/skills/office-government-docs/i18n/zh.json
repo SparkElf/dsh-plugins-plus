@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "f57bc485932a60cf0453f6e3c24e01ae4a93b649",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:39:18.858Z"
+  },
+  "title": "政务文档制作",
+  "description": "用 OfficeCLI 创建和修改中文政务 DOCX、XLSX、PPTX 原件；适用于公文层级、版式排版、红头编排、公文字体、校验与可点击原件交付。",
+  "summary": "调用 officecli 直接写最终 Office 原件，按操作顺序建原件、查属性合同、批量提交变更、检查层级样式并用 validate 验收。涵盖 GB/T 9704-2012 版式基线、角色样式、通用政务文档与正式红头文档页内顺序。"
+}
