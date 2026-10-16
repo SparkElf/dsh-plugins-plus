@@ -1,0 +1,5 @@
+# Knowledge-base bundle patch: mount the Host half. The Client half is declared
+# by package.json's `dsh.client` and loaded by the Web shell.
+- insert:
+    - id: knowledge-base
+      name: '@sparkelf/dsh-knowledge-base'
