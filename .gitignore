@@ -6,3 +6,6 @@ playwright-report/
 
 # Composed output; never commit. Sources are .env.base and .secrets/env.
 .env
+
+# Packed publish artifacts; lib/ is already ignored and no package tracks a tarball.
+*.tgz
