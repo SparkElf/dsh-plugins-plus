@@ -1,0 +1,85 @@
+import { describe, expect, it } from 'vitest'
+import { DEFAULT_CREDENTIAL_REF, MANAGED_ENV, resolveServerTarget, resolveWorkspaceRoot } from '../src/identity.ts'
+
+const managedEnv = (overrides: Record<string, string | undefined> = {}) => ({
+  [MANAGED_ENV.baseUrl]: 'http://host.docker.internal:3101',
+  ...overrides,
+})
+
+describe('resolveServerTarget', () => {
+  it('resolves a managed workspace from the environment alone', () => {
+    expect(resolveServerTarget({ env: managedEnv() })?.baseUrl).toBe('http://host.docker.internal:3101')
+  })
+
+  it('defaults to the DataOps access token the workspace already holds', () => {
+    // This reference is the one the credential store carries in a managed workspace;
+    // the companion container deliberately has no credential in its environment.
+    expect(resolveServerTarget({ env: managedEnv() })?.credentialRef).toBe('DATAOPS_ACCESS_TOKEN')
+    expect(DEFAULT_CREDENTIAL_REF).toBe('DATAOPS_ACCESS_TOKEN')
+  })
+
+  it('gives the settings panel precedence over the environment', () => {
+    const target = resolveServerTarget({
+      baseUrl: 'https://rooms.example.com',
+      credentialRef: 'MY_ROOM_TOKEN',
+      env: managedEnv(),
+    })
+    expect(target?.baseUrl).toBe('https://rooms.example.com')
+    expect(target?.credentialRef).toBe('MY_ROOM_TOKEN')
+  })
+
+  it('activates from a setting alone, with no DataOps environment at all', () => {
+    const target = resolveServerTarget({ baseUrl: 'https://rooms.example.com', env: {} })
+    expect(target?.baseUrl).toBe('https://rooms.example.com')
+    expect(target?.credentialRef).toBe(DEFAULT_CREDENTIAL_REF)
+  })
+
+  it('stays inactive with nothing configured anywhere', () => {
+    expect(resolveServerTarget({ env: {} })).toBeUndefined()
+  })
+
+  it('stays inactive when the URL is blank or whitespace', () => {
+    expect(resolveServerTarget({ baseUrl: '', env: {} })).toBeUndefined()
+    expect(resolveServerTarget({ baseUrl: '   ', env: {} })).toBeUndefined()
+    expect(resolveServerTarget({ env: managedEnv({ [MANAGED_ENV.baseUrl]: '  ' }) })).toBeUndefined()
+  })
+
+  it('rejects a non-HTTP base URL instead of guessing', () => {
+    expect(resolveServerTarget({ baseUrl: 'file:///tmp/x', env: {} })).toBeUndefined()
+    expect(resolveServerTarget({ baseUrl: 'not-a-url', env: {} })).toBeUndefined()
+    expect(resolveServerTarget({ baseUrl: 'ws://rooms.example.com', env: {} })).toBeUndefined()
+  })
+
+  it('accepts https, which a non-DataOps server may require', () => {
+    expect(resolveServerTarget({ baseUrl: 'https://rooms.example.com', env: {} })?.baseUrl)
+      .toBe('https://rooms.example.com')
+  })
+
+  it('strips trailing slashes so request paths never double up', () => {
+    expect(resolveServerTarget({ baseUrl: 'https://rooms.example.com/base/', env: {} })?.baseUrl)
+      .toBe('https://rooms.example.com/base')
+  })
+
+  it('trims surrounding whitespace rather than forwarding it', () => {
+    expect(resolveServerTarget({ baseUrl: ' https://rooms.example.com ', env: {} })?.baseUrl)
+      .toBe('https://rooms.example.com')
+  })
+
+  it('carries no actor: a bearer credential identifies the account server-side', () => {
+    // A configured actor could disagree with the credential and silently change which
+    // messages trigger this agent, so the target deliberately has no such field.
+    expect(Object.keys(resolveServerTarget({ env: managedEnv() }) ?? {}).sort())
+      .toEqual(['baseUrl', 'credentialRef'])
+  })
+})
+
+describe('resolveWorkspaceRoot', () => {
+  it('uses the mounted workspace root when DataOps provides one', () => {
+    expect(resolveWorkspaceRoot({ [MANAGED_ENV.mountPath]: '/workspace' })).toBe('/workspace')
+  })
+
+  it('falls back to the process directory, so a room session still has a cwd', () => {
+    expect(resolveWorkspaceRoot({})).toBe(process.cwd())
+    expect(resolveWorkspaceRoot({ [MANAGED_ENV.mountPath]: '  ' })).toBe(process.cwd())
+  })
+})

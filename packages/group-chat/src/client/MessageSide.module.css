@@ -1,0 +1,30 @@
+/*
+ * A room message written by another author.
+ *
+ * `display: contents` is what keeps this element invisible to layout: it is added only to
+ * carry the decision, and its child — the official row — keeps the exact box it had before,
+ * as a direct child of the flow item. That matters because the official row is a full-width
+ * column flex container and the message stack inside it caps itself with a percentage
+ * `max-width`; putting a flex or shrink-to-fit box between them would resolve that
+ * percentage against an indefinite width and resize every bubble.
+ *
+ * The alignment then has to be flipped on the row itself, since that is where the official
+ * rule pins it to the right: `align-items: flex-start` on a column flex container moves the
+ * message stack and the action row together, and leaves the row's width, the stack's
+ * percentage cap and the bubble's own sizing untouched.
+ *
+ * Why the child is matched structurally: the official module's class names are
+ * content-hashed and change whenever that package is rebuilt, so naming one would break on
+ * any upgrade of the shell.
+ *
+ * Why the class is written twice: this rule sets the same property as the official one at
+ * the same specificity, so the winner would otherwise depend on which stylesheet the shell
+ * injected last. Repeating the class wins on specificity in either order.
+ */
+.otherRow {
+  display: contents;
+}
+
+.otherRow.otherRow > * {
+  align-items: flex-start;
+}

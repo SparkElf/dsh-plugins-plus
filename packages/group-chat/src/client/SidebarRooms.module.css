@@ -1,0 +1,478 @@
+/* Group-chat region of the left sidebar.
+   Values copied from ui-workspace's browsing region so the two read as one design system:
+   a 36px header, a 28px icon button, a 30px expanded search field, 32px rows, and DSH's
+   own `dsw` tokens. The group-chat region is the workspace region with grouping removed,
+   because a room is 1:1 with its session. */
+
+.root {
+  /* The workspace region does not hard-code its right edge: it steps in from the sidebar's
+     own inline padding by `--dsh-session-list-edge-inset`, which it defines here as that
+     same padding. Resolving the edge from the shell's token is what lets the two regions
+     agree for any theme, so this region defines the token identically. The scrollbar pair
+     is the workspace list's: its track is laid out inside the inline padding rather than
+     over the rows. */
+  --dsh-session-list-edge-inset: var(--dsh-sidebar-inline-padding, 12px);
+  --dsh-session-list-scrollbar-width: 5px;
+  --dsh-session-list-scrollbar-offset: 2px;
+  box-sizing: border-box;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* The seat renders inside `sidebar.footer.action`, and the shell styles that container
+     as `display: flex` with the default row direction. A column child of a row container
+     is sized by its content unless it is told to grow, which left the header's trailing
+     actions parked beside the label instead of against the right edge. `flex: 1` plus
+     `min-width: 0` is what makes it span the full sidebar width. */
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  /* `footArea` does not shrink, so without a cap a long room list would grow until it
+     crowded the workspace region above it. */
+  max-height: 46vh;
+  /* No padding-right, where the workspace region's own root carries one. That root is
+     handed `regionArea`, which the shell widens 12px past the sidebar's content edge; this
+     region's seat (`footerActions`) already ends at that edge, because the shell applies
+     the inline padding to the column. Carrying the inset a second time here is exactly
+     what pulled this region's rows and header actions 12px left of the workspace's.
+     `.list` re-applies the inset from the outside instead, so both regions resolve their
+     rows to the same edge. */
+}
+
+/* ── header: copied from the workspace section header ─────────────────────────── */
+
+.sectionHeader {
+  box-sizing: border-box;
+  height: 36px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 4px;
+  margin-right: -4px;
+  padding-left: 4px;
+  border-radius: var(--dsw-radius-md);
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+}
+
+/* The label is not a small caption: it inherits the sidebar's 14px and only differs from
+   the workspace label by its text. */
+.sectionLabel {
+  flex: none;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.searchSlot {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  max-width: 28px;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 0;
+}
+
+.searchSlotExpanded {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.search,
+.searchExpanded {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  /* `flex: none`, not `flex: 1`: the slot is the flexing element, and a growing inner box
+     would stretch past the 28px button while collapsed. */
+  flex: none;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: var(--dsw-alias-label-secondary);
+  cursor: text;
+  overflow: hidden;
+}
+
+.searchExpanded {
+  width: calc(100% + 4px);
+  height: 30px;
+  margin-inline: -2px;
+  padding: 0 4px 0 0;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  color: var(--dsw-alias-label-caption);
+}
+
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.iconButton:focus-visible,
+.searchButton:focus-visible,
+.clearButton:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+
+.searchButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: inherit;
+  cursor: pointer;
+}
+
+.searchExpanded .searchButton {
+  width: 28px;
+  height: 30px;
+}
+
+.searchButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.searchExpanded .searchButton:hover {
+  background: 0 0;
+}
+
+.searchInput {
+  flex: 1;
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: 0 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 18px;
+  /* Collapsed, the input is still mounted so the caret can move into it the moment the
+     box opens. `width: 0` alone leaves a sliver of the caret visible at the end of the
+     button, which reads as a stray glyph; opacity is what actually hides it. */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s var(--ds-ease-in-out);
+}
+
+.searchExpanded .searchInput {
+  opacity: 1;
+  pointer-events: auto;
+  margin-left: -2px;
+}
+
+.searchInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.clearButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.clearButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.headerActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.viewWrap {
+  position: relative;
+  display: flex;
+}
+
+/* ── list ─────────────────────────────────────────────────────────────────────── */
+
+.listArea {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  /* These two mirrors are the workspace region's `.listArea`, and they are the other half
+     of the shared edge. `margin-left: -4px` plus `padding-left: 4px` lets the list paint
+     its hover fill and scrollbar 4px into the sidebar's left padding, so a row spans the
+     content box and hangs one 4px step to the left of it; `margin-right` widens the area
+     by the inset this region no longer spends on `.root`. Both are expressed with
+     `calc(-1 * …)` rather than a bare value because the inset is a theme token. */
+  margin-left: -4px;
+  margin-right: calc(-1 * var(--dsh-session-list-edge-inset));
+  padding-left: 4px;
+}
+
+.list {
+  min-height: 0;
+  max-height: 100%;
+  /* The workspace list's own three-part edge, which is what makes the two rows land on the
+     same pixel column. Its content is widened left past the sidebar padding (`margin-left`
+     and `padding-left`, matching `.listArea`) and its right edge is pulled *in* by the
+     three-part inset: `margin-right` cancels the area's outward widening so the scroll
+     container's right edge — where the scrollbar lives — sits at the sidebar content edge,
+     then `padding-right` steps the content back in by the inset minus the scrollbar track
+     it reserves. With no rule in the stylesheet this would fall back to a default-width
+     scrollbar and drift a pixel or two wider than the workspace rows. */
+  margin-left: -4px;
+  margin-right: var(--dsh-session-list-scrollbar-offset);
+  padding-left: 4px;
+  padding-right: calc(
+    var(--dsh-session-list-edge-inset) - var(--dsh-session-list-scrollbar-width) -
+      var(--dsh-session-list-scrollbar-offset)
+  );
+  padding-bottom: 8px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.flatList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.flatList > * + * {
+  margin-top: 2px;
+}
+
+/* Row height and structure match the workspace's session row. */
+.sessionRow,
+.sessionRowSelected {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sessionRow:hover,
+.sessionRowSelected {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowIcon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Where a session row shows its relative time, a room row shows its size. */
+.time {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  margin: 0;
+  padding: 16px 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+}
+
+/* Copied from ui-workspace's `.emptyState`: a centred column with the glyph above the
+   copy. The workspace shows the same shape for "暂无会话", so an empty group-chat region
+   reads the same way rather than as a bare sentence. */
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 80px;
+  padding: 0 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.emptyState > svg {
+  margin-bottom: 4px;
+  color: var(--dsw-alias-label-caption);
+}
+
+/* Fades the last row out instead of drawing a scrollbar track, matching the workspace
+   list's own bottom fade. Its right edge stops at the inset rather than at the area's edge,
+   which is the same edge the workspace fade stops at: `.listArea` deliberately overhangs
+   the sidebar's inline padding so rows can, and the fade has to opt back out of it. */
+.fade {
+  position: absolute;
+  left: 0;
+  right: var(--dsh-session-list-edge-inset);
+  bottom: 0;
+  height: 24px;
+  background: linear-gradient(to bottom, transparent, var(--dsw-specific-sidebar-fill));
+  pointer-events: none;
+}
+
+/* ── menus ────────────────────────────────────────────────────────────────────── */
+
+/* The portal's positioning layer, in `document.body`. The menu itself is no longer
+   absolutely positioned inside the scrolling room list — a menu inside a scrolling box is
+   clipped at the box's edge, and the lower rooms lost their bottom entries. This layer
+   carries the row's viewport coordinates instead, so the menu escapes every clipping
+   ancestor while still appearing where the operator right-clicked. */
+.menuLayer {
+  position: fixed;
+  z-index: 60;
+  /* A menu taller than the viewport still has to be reachable: it scrolls rather than
+     running off the edge, which is what the flipped placement cannot fix by itself. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+/* The trailing view menu stays absolutely positioned: its anchor (`.viewWrap`) sits in the
+   header, outside the scrolling list, so nothing clips it and the portal is unnecessary. */
+.menuInline {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  z-index: 30;
+}
+
+.menu {
+  position: relative;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1, var(--dsw-specific-sidebar-fill));
+  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+}
+
+.menuHeading {
+  display: block;
+  padding: 4px 8px 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menuItem:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.check {
+  margin-left: auto;
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The row and its context menu share a positioned wrapper: the menu is anchored to the
+   row rather than to the list, so a menu on a lower row does not open at the top. */
+.rowWrap {
+  position: relative;
+}
+
+.menuInput {
+  width: 100%;
+  margin: 2px 0 4px;
+  padding: 5px 7px;
+  border: 1px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.menuItem:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
