@@ -1,3 +1,8 @@
+---
+name: office-government-docs
+description: Create and revise Chinese government DOCX, XLSX, and PPTX originals with OfficeCLI. Use for government-document hierarchy, page layout, redhead composition, official fonts, validation, and clickable original-file delivery.
+---
+
 # OfficeCLI 政务文档
 
 用于创建、修改和验收中文政务 `.docx`、`.xlsx`、`.pptx` 原件。调用 `officecli`；编辑 DOCX/XLSX/PPTX 前分别用 `load_skill word`、`load_skill excel`、`load_skill pptx` 取得当前说明，再按需调用 `help <format> <element> --json`。不得改走 Univer、Host 渲染或中间 HTML/PNG 预览产物。

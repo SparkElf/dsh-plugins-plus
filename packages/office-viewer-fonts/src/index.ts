@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -21,9 +22,41 @@ const FONT_ROUTES = [
   { file: 'SimHei.ttf', path: '/office-viewer-fonts/SimHei.ttf' },
 ] as const
 
+/**
+ * Split a skill file into its frontmatter fields and body.
+ *
+ * The description is read here rather than kept as a constant: a copy in code drifts
+ * from the file the model actually receives, and the panel would then show text that
+ * no edit to SKILL.md can change. The body excludes the frontmatter so the model does
+ * not receive YAML it was never meant to see.
+ *
+ * @param raw - the SKILL.md contents.
+ * @returns the frontmatter block and the body below it; the block is empty without frontmatter.
+ */
+function splitFrontmatter(raw: string): { front: string; body: string } {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw)
+  if (match === null) return { front: '', body: raw }
+  return { front: match[1] ?? '', body: raw.slice(match[0].length) }
+}
+
+/**
+ * Read one frontmatter field.
+ *
+ * @param front - the frontmatter block, without its delimiters.
+ * @param key - the field name.
+ * @returns the unquoted value, or undefined when absent.
+ */
+function frontmatterField(front: string, key: string): string | undefined {
+  const line = new RegExp('^\\s*' + key + '\\s*:\\s*(.+?)\\s*$', 'mu').exec(front)
+  return line?.[1]?.replace(/^['"]|['"]$/gu, '')
+}
+
+const description = frontmatterField(splitFrontmatter(readFileSync(SKILL_FILE, 'utf8')).front, 'description')
+if (description === undefined) throw new Error('office-government-docs SKILL.md frontmatter has no description')
+
 const candidate: SkillCandidate = {
   name: 'office-government-docs',
-  description: 'Create and revise Chinese government DOCX, XLSX, and PPTX originals with OfficeCLI. Use for government-document hierarchy, page layout, redhead composition, official fonts, validation, and clickable original-file delivery.',
+  description,
   invocation: INVOCATION,
   provider: PROVIDER_NAME,
   source: 'bundled',
@@ -43,7 +76,7 @@ const provider: SkillProvider = {
       provider: candidate.provider,
       source: candidate.source,
       resourceBase: candidate.resourceBase,
-      content: await readFile(SKILL_FILE, 'utf8'),
+      content: splitFrontmatter(await readFile(SKILL_FILE, 'utf8')).body.trim(),
     }
   },
 }
