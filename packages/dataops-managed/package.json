@@ -39,6 +39,7 @@
     "lib/client.js.map",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
+    "skills/dataops-query/SKILL.md",
     "README.md",
     "LICENSE"
   ],
