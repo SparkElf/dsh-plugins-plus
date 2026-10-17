@@ -233,7 +233,7 @@ const QUERY_SKILL = {
   description:
     '用户问数、取数、查数据、要报表时使用。包含选表策略（优先总表；有地域区分时先大后小）、取数前与用户确认资源清单、以及超时时主动分批次。',
   invocation: { modelInvocable: true, userInvocable: true },
-  provider: name,
+  provider: QUERY_SKILL_NAME,
   source: 'bundled',
   resourceBase: { kind: 'directory', path: QUERY_SKILL_ROOT },
   rank: BUNDLED_SKILL_RANK,
