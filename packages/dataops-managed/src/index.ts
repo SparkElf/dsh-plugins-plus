@@ -1,10 +1,13 @@
 /** DataOps-managed JWT intake and credential-backed MCP composition. */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import * as McpClient from '@sparkelf/dsh-plugin-mcp-credentials'
+import { BUNDLED_SKILL_RANK } from '@deepseek-ai/dsh-skill'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-settings'
 import { ModelSync, type SyncStateStore } from './model-sync.ts'
@@ -212,6 +215,39 @@ function bearerToken(request: IncomingMessage): string | null {
   return token === '' ? null : token
 }
 
+/** The skill this plugin contributes: how to answer a DataOps data question. */
+const QUERY_SKILL_NAME = 'dataops-query'
+/** Location of the skill document inside the published package. */
+const QUERY_SKILL_FILE = new URL('../skills/dataops-query/SKILL.md', import.meta.url)
+/** Package root, which the skill loads its relative resources against. */
+const QUERY_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+/**
+ * Describe the query skill to the catalog without reading it.
+ *
+ * The description repeats what the skill file declares, because a catalog listing must
+ * answer whether the skill applies before its content is loaded.
+ */
+const QUERY_SKILL = {
+  name: QUERY_SKILL_NAME,
+  description:
+    '用户问数、取数、查数据、要报表时使用。包含选表策略（优先总表；有地域区分时先大后小）、取数前与用户确认资源清单、以及超时时主动分批次。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: QUERY_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: QUERY_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: QUERY_SKILL_FILE,
+} as const
+
+/** Serve the query skill to the catalog. */
+const querySkillProvider = {
+  name: QUERY_SKILL_NAME,
+  list: () => Promise.resolve([QUERY_SKILL]),
+  async get() {
+    return { ...QUERY_SKILL, content: await readFile(QUERY_SKILL_FILE, 'utf8') }
+  },
+}
 /**
  * Accept the current DataOps JWT and expose DataOps MCP tools through its credential.
  * @param ctx - DSH Host context with credentials, Web routes, and tools.
@@ -222,6 +258,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const baseUrl = new URL(config.baseUrl).origin
   const accessRef = credentialRef(config.credentialRef)
   let mcpFiber: Fiber | undefined
+
+  // The query skill ships with the plugin: a data question is the plugin's own subject, so its
+  // guidance travels with the DataOps integration rather than the deployment profile.
+  ctx.skills.registerProvider(() => querySkillProvider)
 
   const ensureMcp = async (): Promise<void> => {
     if (mcpFiber !== undefined && mcpFiber.uid !== null) return

@@ -55,7 +55,7 @@ function contextWith(hasCredential: boolean) {
     }),
     logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() },
     settings: { describe: () => [], update: async () => undefined },
-    skills: { list: () => [] },
+    skills: { list: () => [], registerProvider: () => () => undefined },
     tools: { register: () => undefined },
   }
   return { context, routes }
@@ -88,6 +88,28 @@ describe('apply', () => {
 
     await expect(apply(context as never, CONFIG)).resolves.toBeUndefined()
     expect(routes).toHaveLength(4)
+  })
+
+  it('contributes the query skill with its document readable from the package', async () => {
+    // The skill travels with the plugin, so activation must reach the catalog even when the
+    // MCP connection is refused: a data question is answered by this guidance, not the tool.
+    const registered: unknown[] = []
+    const { context } = contextWith(true)
+    ;(context as { skills: { registerProvider: (fn: () => unknown) => () => void } }).skills.registerProvider =
+      (provider: () => unknown) => { registered.push(provider()); return () => undefined }
+
+    await apply(context as never, CONFIG)
+
+    expect(registered).toHaveLength(1)
+    const provider = registered[0] as {
+      name: string
+      list: () => Promise<{ name: string; locator: URL }[]>
+      get: () => Promise<{ name: string; content: string }>
+    }
+    expect(provider.name).toBe('dataops-query')
+    expect((await provider.list())[0]?.name).toBe('dataops-query')
+    const skill = await provider.get()
+    expect(skill.content).toContain('取数')
   })
 
   it('answers the limits route rather than failing when the credential was rejected', async () => {
