@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
  */
 import { foldSurface, deriveEventMessage } from '/root/.dsh/releases/plus/plus-rc32/packages/core/session/lib/index.js';
 import { IMAGE_HOIST_TYPE, imageHoistProjection } from '../lib/projection.js';
+import { hoistedSeqs } from '../lib/index.js';
 
 const IMG = (n) => ({
   type: 'image',
@@ -151,6 +152,22 @@ console.log('\n8) the projection declares its records ignorable');
   const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
   check('the append carries the marker', /append\(IMAGE_HOIST_TYPE, \{ targets \}, \{ ignorable: true \}\)/.test(source), true);
   check('the fixture matches the append', hoistEvent(4, [{ targetSeq: 3, userSeq: 1 }]).ignorable, true);
+}
+
+console.log('\n10) the already-hoisted set is membership, not a sequence watermark');
+{
+  // A compaction splice reorders the surface, so a never-hoisted tool result can sit
+  // *below* an already-hoisted one in sequence value. A monotonic watermark would skip
+  // it forever and leave its image in function_call_output, where a route that cannot
+  // read tool-result image arrays bills the base64 as text (measured: 391,800 tokens
+  // for two such images against 3,062 for five carried on user messages).
+  const moved = hoistedSeqs([
+    hoistEvent(90, [{ targetSeq: 40, userSeq: 10 }]),
+    hoistEvent(91, [{ targetSeq: 45, userSeq: 12 }]),
+  ]);
+  check('records every moved source sequence', [...moved].sort((a, b) => a - b), [40, 45]);
+  check('a lower never-moved sequence is still pending', moved.has(42), false);
+  check('a moved sequence is not pending', moved.has(45), true);
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
