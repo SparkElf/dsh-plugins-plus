@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_CREDENTIAL_REF, MANAGED_ENV, resolveServerTarget, resolveWorkspaceRoot } from '../src/identity.ts'
+import { DEFAULT_CREDENTIAL_REF, MANAGED_ENV, ROOM_SHARED_LINK, resolveRoomDirectory, resolveServerTarget, resolveWorkspaceRoot } from '../src/identity.ts'
 
 const managedEnv = (overrides: Record<string, string | undefined> = {}) => ({
   [MANAGED_ENV.baseUrl]: 'http://host.docker.internal:3101',
@@ -81,5 +81,49 @@ describe('resolveWorkspaceRoot', () => {
   it('falls back to the process directory, so a room session still has a cwd', () => {
     expect(resolveWorkspaceRoot({})).toBe(process.cwd())
     expect(resolveWorkspaceRoot({ [MANAGED_ENV.mountPath]: '  ' })).toBe(process.cwd())
+  })
+})
+
+describe('resolveRoomDirectory', () => {
+  it('房间会话在自己的工作区里跑，不在共享目录里', () => {
+    // 共享目录是「多一个地方可看」，不是「所有路径的度量原点」。
+    // 指到共享目录会让 kb/x.md 这类已有路径解析失败（实测 ENOENT）。
+    expect(resolveRoomDirectory('room-1', null, {
+      [MANAGED_ENV.mountPath]: '/workspace',
+      [MANAGED_ENV.sharedRoot]: '/group-chat-data',
+    })).toBe('/workspace')
+  })
+
+  it('共享目录在场时也不改变房间的 cwd', () => {
+    const withShared = resolveRoomDirectory('room-1', null, {
+      [MANAGED_ENV.mountPath]: '/workspace',
+      [MANAGED_ENV.sharedRoot]: '/group-chat-data',
+    })
+    expect(withShared).toBe('/workspace')
+    expect(withShared).not.toContain('group-chat-data')
+  })
+
+  it('没有工作区挂载时回退到共享根下的 per-room 目录', () => {
+    expect(resolveRoomDirectory('room-1', null, {
+      [MANAGED_ENV.sharedRoot]: '/group-chat-data',
+    })).toBe('/group-chat-data/room-1')
+  })
+
+  it('两者都没有时回退到 DSH home 下的 per-room 目录', () => {
+    expect(resolveRoomDirectory('room-1', null, {
+      [MANAGED_ENV.home]: '/workspace/.dataops/dsh',
+    })).toBe('/workspace/.dataops/dsh/group-chat/rooms/room-1')
+  })
+
+  it('创建者显式选的目录仍然优先', () => {
+    expect(resolveRoomDirectory('room-1', '/srv/reports', {
+      [MANAGED_ENV.mountPath]: '/workspace',
+      [MANAGED_ENV.sharedRoot]: '/group-chat-data',
+    })).toBe('/srv/reports')
+  })
+
+  it('共享目录的入口名固定，供相对路径引用', () => {
+    // 容器在 workspace 根上建这个软链；模板与容器都要用它，所以值是契约。
+    expect(ROOM_SHARED_LINK).toBe('group-shared')
   })
 })

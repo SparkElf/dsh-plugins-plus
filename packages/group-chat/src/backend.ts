@@ -75,8 +75,29 @@ export interface RoomSummary {
 export interface RoomMember {
   readonly userId: string
   readonly displayName: string
+  /**
+   * The member's picture, when the server has one.
+   *
+   * Optional because it is display-only: a server that omits it still renders initials,
+   * while requiring it here would make every roster read fail over a missing avatar.
+   */
+  readonly avatarUrl?: string | null
   readonly owner: boolean
   readonly joinedAt: string
+}
+
+/**
+ * One account that can still be added to a room.
+ *
+ * Deliberately not a {@link RoomMember}: a candidate is by definition *not* in the room, so
+ * it carries the handle a picker searches on and has no join date or ownership — neither of
+ * which exists before the invite is accepted.
+ */
+export interface InviteCandidate {
+  readonly userId: string
+  readonly displayName: string
+  readonly username: string
+  readonly avatarUrl?: string | null
 }
 
 export interface EventPage {
@@ -97,6 +118,7 @@ export class BackendError extends Error {
     this.name = 'BackendError'
   }
 }
+
 
 /** True when the request never reached the backend, so retrying cannot duplicate state. */
 export const isTransportFailure = (error: unknown): boolean =>
@@ -179,6 +201,45 @@ export class GroupChatBackend {
   }
 
   /**
+   * Rooms this account could join, which is a different question from the rooms it is in.
+   *
+   * `listRooms` answers "my rooms" and the server scopes it to membership. A `discoverable`
+   * room the caller has not joined is therefore absent from that list, and a room the operator
+   * can see no way to reach is indistinguishable from one that does not exist. This separate
+   * read is what lets the picker offer them.
+   */
+  async listDiscoverableRooms(query?: string, signal?: AbortSignal): Promise<readonly RoomSummary[]> {
+    const suffix = query === undefined || query.trim().length === 0
+      ? ''
+      : `?query=${encodeURIComponent(query.trim())}`
+    const rooms = await this.request<unknown>('GET', `/api/ai/chat/rooms/search${suffix}`, undefined, signal)
+    if (!Array.isArray(rooms)) return []
+    // Same shape guard as `listRooms`, plus the `joined` filter: this server route deliberately
+    // answers both questions at once (rooms you are in *and* rooms you could join), but a caller
+    // asking for discovery wants only the second. Filtering here keeps that rule in the half
+    // that owns the route, so the browser never has to remember it.
+    return rooms.filter((room): room is RoomSummary =>
+      typeof room === 'object' && room !== null
+      && typeof (room as RoomSummary).id === 'string'
+      && (room as RoomSummary).id.length > 0
+      && (room as RoomSummary).joined === false)
+  }
+
+  /**
+   * Join a room the caller is entitled to join.
+   *
+   * Whether the caller may join is the server's decision, not this client's: discoverability,
+   * invite policy and existing membership are all facts the server holds and can change between
+   * the search that offered the room and the press that takes it. Repeating that rule here
+   * would be a second, divergent copy — so the answer is forwarded verbatim.
+   */
+  async joinRoom(roomId: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request<unknown>(
+      'POST', `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/join`, undefined, signal,
+    )
+  }
+
+  /**
    * The account this workspace acts as, asked of the server rather than configured.
    *
    * The bearer credential already identifies the caller, so the server is the only
@@ -194,9 +255,22 @@ export class GroupChatBackend {
    * records every message but can never match "the sender is me", so no turn ever starts
    * and the agent is silent with nothing in the logs to say why.
    */
-  async whoami(signal?: AbortSignal): Promise<{ readonly id: string; readonly displayName?: string } | undefined> {
+  async whoami(signal?: AbortSignal): Promise<{
+    readonly id: string
+    readonly displayName?: string
+    /**
+     * The account's role codes, when the server reports them.
+     *
+     * Carried here rather than fetched by the browser for the same reason as the name: the
+     * client half never talks to DataOps directly. Only used to decide whether to offer
+     * dissolving a room the reader does not own; the room server still decides the request.
+     */
+    readonly roleCodes?: readonly string[]
+  } | undefined> {
     try {
-      const me = await this.request<{ user?: { id?: unknown; displayName?: unknown } }>(
+      const me = await this.request<{
+        user?: { id?: unknown; displayName?: unknown; roles?: readonly { code?: unknown }[] }
+      }>(
         'GET', '/api/auth/me', undefined, signal,
       )
       const id = me.user?.id
@@ -205,7 +279,13 @@ export class GroupChatBackend {
       // message prefix both come from the server, and re-reading `/api/auth/me` there would
       // be the browser talking to DataOps, which this client half never does.
       const displayName = me.user?.displayName
-      return typeof displayName === 'string' && displayName.length > 0 ? { id, displayName } : { id }
+      const roleCodes = Array.isArray(me.user?.roles)
+        ? me.user.roles.map((role) => role?.code).filter((code): code is string => typeof code === 'string')
+        : undefined
+      let out: { id: string; displayName?: string; roleCodes?: readonly string[] } = { id }
+      if (typeof displayName === 'string' && displayName.length > 0) out = { ...out, displayName }
+      if (roleCodes !== undefined && roleCodes.length > 0) out = { ...out, roleCodes }
+      return out
     } catch {
       // An unidentified workspace still records every message; it simply never
       // starts a turn, because "the sender is me" cannot be established.
@@ -215,6 +295,31 @@ export class GroupChatBackend {
 
   async listMembers(roomId: string, signal?: AbortSignal): Promise<readonly RoomMember[]> {
     return this.request<readonly RoomMember[]>('GET', `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/members`, undefined, signal)
+  }
+
+  /**
+   * Accounts that match `q` and are not already in the room.
+   *
+   * The search runs here, on the host, because the browser holds no credential of its own:
+   * a client-side filter over a full directory is not an option, since the browser cannot
+   * read one. An absent query is sent as no parameter rather than an empty one, because an
+   * empty keyword is a browsable first page, which is what makes the picker useful before
+   * anything is typed.
+   */
+  async inviteCandidates(
+    roomId: string,
+    q?: string,
+    signal?: AbortSignal,
+  ): Promise<readonly InviteCandidate[]> {
+    const query = new URLSearchParams()
+    if (q !== undefined && q.length > 0) query.set('q', q)
+    const suffix = query.size === 0 ? '' : `?${query.toString()}`
+    return this.request<readonly InviteCandidate[]>(
+      'GET',
+      `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/invite-candidates${suffix}`,
+      undefined,
+      signal,
+    )
   }
 
   /**
@@ -278,6 +383,23 @@ export class GroupChatBackend {
     )
   }
 
+  /**
+   * Set or clear a room's announcement.
+   *
+   * Who may write it is the server's decision, not this client's: ownership is a fact the
+   * server holds and can change between the roster read that rendered the editor and the save
+   * that commits it, so repeating that rule here would be a second, divergent copy — and one
+   * that could hide the editor from an owner the server will actually accept.
+   */
+  async setAnnouncement(roomId: string, announcement: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request<unknown>(
+      'POST',
+      `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/announcement`,
+      { announcement },
+      signal,
+    )
+  }
+
   /** Add members to a room, subject to that room's invite policy. */
   async inviteMembers(
     roomId: string,
@@ -287,9 +409,44 @@ export class GroupChatBackend {
     return this.request('POST', `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/members`, { userIds }, signal)
   }
 
+  /**
+   * Remove one member from a room.
+   *
+   * The server decides who may do this (owner only) and refuses the owner as a target; this
+   * call only carries the request, so a refusal surfaces as the server's own status code.
+   */
+  async removeMember(roomId: string, userId: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request(
+      'DELETE',
+      `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`,
+      undefined,
+      signal,
+    )
+  }
+
   /** Leave a room. Its history stays on the server; the owner cannot leave. */
   async leaveRoom(roomId: string, signal?: AbortSignal): Promise<unknown> {
     return this.request('DELETE', `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/members/me`, undefined, signal)
+  }
+
+  /**
+   * End a room for every member.
+   *
+   * A different request from {@link leaveRoom}, not a variant: that one removes this caller's
+   * membership and leaves the room standing, while this one deletes the room itself. The server
+   * decides who may do it, so a refusal is forwarded rather than pre-empted here.
+   */
+  async transferOwnership(roomId: string, userId: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request(
+      'POST',
+      `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/transfer`,
+      { userId },
+      signal,
+    )
+  }
+
+  async dissolveRoom(roomId: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request('DELETE', `/api/ai/chat/rooms/${encodeURIComponent(roomId)}`, undefined, signal)
   }
 
   /**

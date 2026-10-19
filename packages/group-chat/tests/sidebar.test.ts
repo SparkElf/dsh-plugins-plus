@@ -171,16 +171,117 @@ describe('room context menu follows the settled entry set', () => {
     expect(menu).not.toContain("t('fork')")
   })
 
-  it('shows invite and leave only to a member', () => {
-    // A room the operator left is still listed under the "show left rooms" filter, and
-    // offering to leave it again would be a no-op the server rejects.
-    expect(menu).toMatch(/room\.joined && \(\s*<button[\s\S]{0,200}menuInvite/u)
-    expect(menu).toMatch(/room\.joined && \(\s*<button[\s\S]{0,200}menuLeave/u)
-  })
+    it('shows invite and leave only to a member', () => {
+      // A room the operator left is still listed under the "show left rooms" filter, and
+      // offering to leave it again would be a no-op the server rejects. The owner is excluded
+      // here because the server refuses their leave outright.
+      expect(menu).toMatch(/room\.joined && \(\s*<button[\s\S]{0,200}menuInvite/u)
+      expect(menu).toMatch(/room\.joined && store\.selfId\(\) !== room\.ownerUserId/u)
+      expect(menu).toMatch(/onRequestLeave/u)
+    })
+
+    it('offers the owner a transfer instead of a leave', () => {
+      // A room without an owner has nobody who may change its settings, so the server refuses
+      // to let the owner leave. Transferring is the way out, and it is the only entry the
+      // owner gets in place of "leave room".
+      expect(menu).toMatch(/room\.joined && store\.selfId\(\) === room\.ownerUserId/u)
+      expect(menu).toMatch(/menuTransfer/u)
+      expect(menu).toContain("kind: 'transfer'")
+    })
 
   it('renames in place rather than through a second dialog', () => {
     expect(menu).toContain('renameTitle')
     expect(menu).toContain('store.rename')
+  })
+
+  it('lists the room shared folder with a size, not as bare names', () => {
+    // The panel is one column: a file row has to say how big the file is without a table,
+    // and the section must stay absent on a deployment that has no shared tree rather than
+    // claiming "no files".
+    const panel = readFileSync(new URL('../src/client/MembersPanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toContain('listRoomFiles')
+    expect(panel).toContain('membersFilesTitle')
+    expect(panel).toContain('formatBytes')
+    expect(panel).toMatch(/state\.path === null/u)
+  })
+
+  it('re-applies a room model change to an already-open room', () => {
+    // A session keeps the model it was opened with. Without re-applying on change, an operator
+    // who fixes a rejected provider keeps watching the room fail on the credential they
+    // already replaced — and the only visible symptom is the same auth error as before.
+    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).toContain('applyModelSelection')
+    expect(source).toContain('modelKeyOf')
+    // Compared, not written every poll: selectModel per three seconds would be a write storm.
+    expect(source).toMatch(/runtime\.modelKey !== modelKeyOf\(room\)/u)
+  })
+
+  it('collapses any section so the panel survives a narrow sidebar', () => {
+    // The right sidebar is draggable and this panel stacks three sections. Without folding, a
+    // narrow column squeezes the roster until names collide; with it, each section reduces to
+    // its title row.
+    const panel = readFileSync(new URL('../src/client/MembersPanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toContain('CollapsibleSection')
+    expect(panel).toContain('aria-expanded')
+    // The label is the disclosure control, not a separate caret button: at 200px two targets
+    // would leave neither big enough to hit.
+    expect(panel).toMatch(/sectionToggle/u)
+    // Three sections use it — announcement, files, roster.
+    expect((panel.match(/<CollapsibleSection/gu) ?? []).length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('uploads into the room folder through a hidden file input', () => {
+    // The native dialog is the only picker that hands back a File without a second permission
+    // step, and the input must stay hidden: a visible one would be a duplicate control next to
+    // the button that opens it.
+    const panel = readFileSync(new URL('../src/client/MembersPanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toContain('uploadRoomFile')
+    expect(panel).toContain('membersFileUploadFailed')
+    expect(panel).toMatch(/type="file"/u)
+    const css = readFileSync(new URL('../src/client/MembersPanel.module.css', import.meta.url), 'utf8')
+    expect(css).toMatch(/\.filePicker\s*\{[^}]*display:\s*none/u)
+  })
+
+  it('opens a file preview in place instead of navigating away', () => {
+    // The panel can stay open for a long time. A preview that replaced the panel would lose
+    // the member list, and one that navigated would lose the room.
+    const panel = readFileSync(new URL('../src/client/MembersPanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toContain('getRoomFile')
+    expect(panel).toContain('membersFileTruncated')
+    expect(panel).toContain('membersFileBinary')
+    // A binary file must not be rendered as text: the backend reports textLike, the panel
+    // branches on it.
+    expect(panel).toMatch(/preview\.textLike/u)
+  })
+
+  it('offers a manual refresh for the shared folder', () => {
+    // The folder changes when the room's agent writes a file; a panel that never re-read it
+    // would show a stale list for the whole time it is open.
+    const panel = readFileSync(new URL('../src/client/MembersPanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toContain('membersFilesRefresh')
+    expect(panel).toContain('reloadKey')
+  })
+
+  it('shows unread as a badge and mentions in a separate style', () => {
+    // The trailing slot holds either the member count or the unread badge, never both: a row
+    // that grew a second trailing element would reflow every time a room gained unread.
+    expect(menu).toContain('unreadCount')
+    expect(menu).toContain('mentionCount')
+    expect(menu).toContain('styles.unread')
+    expect(menu).toContain('styles.unreadMentioned')
+    // A room this account has not joined has no reading position, so it must never badge.
+    expect(menu).toMatch(/room\.joined \? room\.unreadCount/u)
+  })
+
+  it('renders the rename field and its actions as a form, not as menu rows', () => {
+    // A bare menu row as the commit step made the dialog read like a list, and a content-box
+    // field overflowed the panel by its own border and padding. Both are layout contracts this
+    // package has regressed on before, so assert the classes the stylesheet actually defines.
+    expect(menu).toContain('menuRename')
+    expect(menu).toContain('menuInput')
+    expect(menu).toContain('menuActions')
+    expect(menu).toContain('menuConfirm')
+    expect(menu).toContain('menuCancel')
   })
 })
 
@@ -200,8 +301,12 @@ describe('room dialogs', () => {
     expect(dialogs).toContain("t('createNotice')")
   })
 
-  it('sends the invite as the server expects it', () => {
-    expect(dialogs).toContain('inviteMembers(roomId, userIds)')
+  it('invites the accounts the picker chose, not raw typed ids', () => {
+    // The dialog used to send whatever the operator typed, split on whitespace: a typo
+    // became a failed invite and there was no way to see who was about to be added. Ids now
+    // come from candidates the server resolved, so only real accounts are ever sent.
+    expect(dialogs).toContain('inviteMembers(roomId, chosen.map((member) => member.userId))')
+    expect(dialogs).toContain('searchInviteCandidates(roomId, query)')
   })
 })
 

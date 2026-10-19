@@ -335,6 +335,38 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Unread badge: a pill in the row's trailing slot. It shares that slot with the member
+   count, so it is sized like one — the row must not reflow when a room gains unread. */
+.unread {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-interactive-bg-hover));
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+  line-height: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* A mention is the one case where the badge must win attention over the room name, so it
+   takes the accent fill and its foreground colour rather than the neutral surface. */
+.unreadMentioned {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+  line-height: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 .empty {
   margin: 0;
   padding: 16px 12px;
@@ -460,19 +492,242 @@
   position: relative;
 }
 
+/* The rename panel: a menu-sized card with room for a field and its two actions. */
+.menuRename {
+  box-sizing: border-box;
+  min-width: 240px;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1, var(--dsw-specific-sidebar-fill));
+  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+}
+
+/* The shared heading keeps the horizontal padding its menu rows align to; inside this panel
+   the padding is already on the card, so the title lines up with the field instead. */
+.menuRename .menuHeading {
+  padding: 0 0 6px;
+}
+
+/* The rename field sits inside the menu's own padding, so its width must count its border
+   and padding: as a content-box it overflowed the 200px menu by exactly its horizontal
+   padding and border, and the native ring ran past the panel's edge. */
 .menuInput {
+  box-sizing: border-box;
   width: 100%;
-  margin: 2px 0 4px;
-  padding: 5px 7px;
+  margin: 2px 0 6px;
+  padding: 6px 8px;
   border: 1px solid var(--dsw-alias-border-l4);
   border-radius: var(--dsw-radius-sm);
-  background: 0 0;
+  /* The shell's base stylesheet sets a dark surface and light label, but the field still
+     inherits the platform appearance (a white ring on some builds) unless it is reset. */
+  appearance: none;
+  background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
   font: inherit;
   font-size: 13px;
+  line-height: 20px;
+  outline: none;
+}
+
+.menuInput:focus-visible {
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.menuInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The rename dialog's actions. A bare `.menuItem` reads as another menu row, so the last
+   step of the dialog looked like a list entry rather than the button that commits it. */
+.menuActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.menuConfirm {
+  box-sizing: border-box;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.menuConfirm:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.menuConfirm:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.menuCancel {
+  box-sizing: border-box;
+  padding: 5px 12px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.menuCancel:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .menuItem:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Discovery: rooms this account could join. Separated from the joined list by a hairline
+   rather than a heading alone, so the two answers never read as one list. */
+.discoverSection {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+}
+
+.discoverHeading {
+  margin: 0 0 4px;
+  padding: 0 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.discoverRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.discoverRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* The name yields space to the button: a long room name must not push Join out of reach. */
+.discoverName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoverMeta {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.joinButton {
+  flex: none;
+  padding: 2px 10px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-state-business-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.joinButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.joinButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── leave confirmation ───────────────────────────────────────────────────────── */
+
+/* The confirmation is an ordinary modal; only its body needs the dialog family's column
+   rhythm, because two lines and an error would otherwise sit flush against each other. */
+.leaveBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.leaveCopy {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* The room being left is named, not implied: two rooms can share a near-identical name and
+   the menu row the operator clicked is no longer on screen. */
+.leaveRoomName {
+  /* No padding or fill: a tinted block indented itself relative to the paragraph above and read
+     as a stray chip. The target room is part of the sentence, so it aligns with it and only the
+     weight changes to make the name itself findable. */
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
+.leaveRoomName strong {
+  font-weight: 600;
+}
+
+.leaveError {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary, #f85149);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* A destructive confirmation is the one button in this plugin whose colour carries meaning:
+   the Button primitive has no danger variant, so it borrows the error colour directly. White
+   text on red, per the platform's own destructive-action convention. */
+.leaveConfirmDanger {
+  /* Destructive fill. The primitive's `primary` variant sets its own background *and* colour,
+     so this class rides on the `ghost` variant, where the primitive sets only `color` and these
+     rules can replace it. */
+  background: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Both selectors are single-class rules on the same element, so only declaration order would
+   decide the winner; repeating the name makes this rule win outright. */
+.leaveConfirmDanger.leaveConfirmDanger {
+  color: var(--dsw-alias-label-primary);
+}
+
+.leaveConfirmDanger:hover:not(:disabled) {
+  background: var(--dsw-alias-state-error-primary);
+  filter: brightness(1.08);
+}
+
+.leaveConfirmDanger:disabled {
+  opacity: 0.5;
 }

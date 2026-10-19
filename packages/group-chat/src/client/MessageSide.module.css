@@ -28,3 +28,53 @@
 .otherRow.otherRow > * {
   align-items: flex-start;
 }
+
+/*
+ * Another author's name and picture, above their bubble.
+ *
+ * The wrapper cannot stay `display: contents` once it carries a header: a contents box generates
+ * no box of its own, so the header would become a sibling of the official row inside the flow
+ * item — the row's `align-items: flex-end` would then push the header to the right, away from the
+ * bubble it labels.
+ *
+ * So the wrapper becomes a column that shrink-wraps. The one thing that must not change is the
+ * width the official row resolves its percentage `max-width` against: `align-items: flex-start`
+ * gives it the wrapper's content width, which is the same width it had as a direct child of the
+ * flow item, so the bubble keeps its size and only its alignment moves.
+ */
+.otherRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* The header lines up with the bubble body rather than with the avatar's outer edge. */
+.author {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px 2px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.authorName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * The official row still owns the bubble's own alignment. Kept as a separate rule from the one
+ * above so the header is not dragged by it: only the row is flipped, and the header keeps the
+ * wrapper's start edge.
+ */
+.otherRow.otherRow > *:not(.author) {
+  align-items: flex-start;
+  max-width: 100%;
+}

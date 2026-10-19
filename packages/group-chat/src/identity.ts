@@ -25,10 +25,29 @@ export const MANAGED_ENV = {
   mountPath: 'DATAOPS_AI_WORKSPACE_MOUNT_PATH',
   /** DSH's own home, where per-room directories live when nobody chose one. */
   home: 'DATAOPS_DSH_HOME',
+  /**
+   * Root of the shared tree a DataOps deployment bind-mounts into the container.
+   *
+   * Set by the deployment, not by a user: it names the mount point that outlives every
+   * container, so a room's files survive a rebuild and two containers see the same tree.
+   * Unset on an installation that does not provide one, where the per-room directory under
+   * DSH's own home is still the fallback.
+   */
+  sharedRoot: 'DATAOPS_AI_WORKSPACE_GROUP_CHAT_PATH',
 } as const
 
 /** Directory under DSH's home that holds one directory per room. */
 export const ROOMS_DIRECTORY = 'group-chat/rooms'
+
+/**
+ * Where a member's workspace exposes the room's shared tree.
+ *
+ * Lives at the workspace root so a relative path reaches it from where the session is: a
+ * member types `group-shared/report.md` from their own workspace and lands in the shared
+ * tree. The container creates this symlink on start because it must be re-created with the
+ * volume, not stored in the image.
+ */
+export const ROOM_SHARED_LINK = 'group-shared'
 
 /**
  * How this plugin authenticates.
@@ -114,18 +133,23 @@ export const resolveWorkspaceRoot = (
 ): string => nonEmpty(env[MANAGED_ENV.mountPath]) ?? process.cwd()
 
 /**
- * The directory one room's session owns.
+ * The directory one room's session runs in.
  *
- * A room needs a workspace of its own, and the only thing that makes a Session belong to
- * one is its stored `cwd`: the sidebar groups Sessions by the workspace whose path equals
- * that directory, and `openSession` finds nothing to show when no workspace claims it.
- * Sharing the workspace root would put every room inside the same workspace as the
- * operator's own Sessions — the rooms would then have to share one directory scope, which
- * is the opposite of a room being a boundary a creator chose.
+ * The room's session works **in the member's own workspace**, not in the shared tree. That
+ * is what keeps every path a member already knows working: the knowledge base (`/nas/kb`),
+ * the workspace files, and any relative path they type all resolve exactly as they do in an
+ * ordinary session. Pointing the cwd at the shared tree instead made `kb/x.md` resolve under
+ * it and fail with ENOENT — a shared folder must add a place to look, not move the place
+ * every other path is measured from.
  *
- * `room.cwd` wins because a creator who named a directory meant it, and the room's members
- * all share that scope. The derived directory is the fallback for the common case where
- * nobody chose one, and it is per-room so two rooms never share a directory by accident.
+ * The shared tree is reached through {@link ROOM_SHARED_LINK}, a symlink the container keeps
+ * at the workspace root. A symlink rather than a hardlink is the only option that works
+ * across the two mounts: a directory cannot be hardlinked at all, and a file hardlink across
+ * mount points fails with EXDEV. It also keeps the two views independent, which is what a
+ * shared folder needs — adding or removing a file must not touch the other name.
+ *
+ * `room.cwd` still wins: a creator who named a directory meant it, and a room whose members
+ * deliberately share one scope is a supported configuration.
  *
  * @param roomId - the room the directory belongs to.
  * @param configured - the room's own `cwd`, when its creator set one.
@@ -139,6 +163,14 @@ export const resolveRoomDirectory = (
 ): string => {
   const chosen = nonEmpty(configured ?? undefined)
   if (chosen !== undefined) return chosen
+  // The member's own workspace. A room that wants the shared tree reaches it through the
+  // symlink at the workspace root; it does not abandon its own tree to get it.
+  const workspace = nonEmpty(env[MANAGED_ENV.mountPath])
+  if (workspace !== undefined) return workspace
+  // No workspace mount (an unmanaged run): fall back to the per-room directory so a room
+  // still gets a scope of its own rather than the process cwd.
+  const sharedRoot = nonEmpty(env[MANAGED_ENV.sharedRoot])
+  if (sharedRoot !== undefined) return join(sharedRoot, roomId)
   // A per-room directory under DSH's own home. `join` is used rather than a hardcoded
   // separator so the derivation stays correct wherever this runs, and the home falls back
   // to the conventional location the managed launcher sets so an unmanaged run still has a

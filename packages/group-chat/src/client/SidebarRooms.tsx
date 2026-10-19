@@ -26,11 +26,13 @@ import {
   IconSearchOutlineRegular,
   IconSlidersTwoOutlineRegular,
   Button,
+  Modal,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createRoom, updateRoom, type RoomSummary } from './api.ts'
 import { CreateRoomDialog } from './CreateRoomDialog.tsx'
 import { RoomDialogs } from './RoomDialogs.tsx'
+import { joinableRooms } from './rows.ts'
 import { failureOf, type RoomStore } from './store.ts'
 import type { GroupChatKey } from './locales.ts'
 import styles from './SidebarRooms.module.css'
@@ -39,6 +41,8 @@ import styles from './SidebarRooms.module.css'
 export interface SidebarRoomsInjected {
   /** Namespace-bound copy resolver, supplied by the Client entry. */
   readonly t: (key: GroupChatKey) => string
+  /** Lookup for the platform's `settings.agentPreset` namespace, bound by the Client entry. */
+  readonly tPreset: (key: string) => string
   /** The list both sidebar and page read, owned by the Client entry. */
   readonly store: RoomStore
 }
@@ -58,14 +62,15 @@ type ArchivedFilter = 'default' | 'all'
  * @returns the section header plus the flat room list.
  */
 export function SidebarRooms(props: SidebarRoomsInjected) {
-  const { t, store } = props
+  const { t, tPreset, store } = props
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
-  const { rooms, activeRoomId, failure, searchQuery } = state
+  const { rooms, activeRoomId, failure, searchQuery, discoverable } = state
 
   const [searchExpanded, setSearchExpanded] = useState(false)
   const [viewOpen, setViewOpen] = useState(false)
   const [orderBy, setOrderBy] = useState<OrderBy>('updated')
   const [archivedFilter, setArchivedFilter] = useState<ArchivedFilter>('default')
+  const [joining, setJoining] = useState<string | undefined>(undefined)
   const searchInput = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => { void store.refresh() }, [store])
@@ -103,6 +108,39 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
     setOrderBy(mode)
     setViewOpen(false)
   }, [])
+
+  // Discovery runs only for a non-empty query, and debounced: every keystroke would otherwise
+  // be a cross-account search, and the answer for "a" is never what the operator wanted.
+  useEffect(() => {
+    const keyword = searchQuery.trim()
+    if (keyword.length === 0) return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      if (!cancelled) void store.discover(keyword)
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [searchQuery, store])
+
+  // A room already in the sidebar must not also appear as joinable: the two lists answer
+  // different questions, and a room in both would offer a Join button that cannot do anything.
+  const joinable = joinableRooms(discoverable ?? [], new Set((rooms ?? []).map((room) => room.id)))
+
+  const onJoin = async (roomId: string): Promise<void> => {
+    setJoining(roomId)
+    try {
+      await store.join(roomId)
+      // Opened on success: the operator pressed Join to get into the room, so landing in it is
+      // the outcome they asked for rather than a second step they must discover.
+      store.open(roomId)
+      store.setSearch('')
+      setSearchExpanded(false)
+    } finally {
+      setJoining(undefined)
+    }
+  }
 
   return (
     <section className={styles.root} aria-label={t('title')}>
@@ -212,6 +250,36 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
               ))}
             </ul>
           )}
+
+          {/* Rooms this account could join. Shown only while searching, because that is the
+              only moment the operator is looking for something they are not already in; a
+              permanent section would put other people's rooms in a sidebar that otherwise
+              answers "what do I belong to". */}
+          {query.length > 0 && discoverable !== undefined && joinable.length > 0 && (
+            <div className={styles.discoverSection}>
+              <p className={styles.discoverHeading}>{t('discoverHeading')}</p>
+              <ul className={styles.flatList}>
+                {joinable.map((room) => (
+                  <li key={room.id}>
+                    <div className={styles.discoverRow}>
+                      <span className={styles.discoverName}>{room.name}</span>
+                      <span className={styles.discoverMeta}>
+                        {t('discoverMembers').replace('{count}', String(room.memberCount))}
+                      </span>
+                      <button
+                        type="button"
+                        className={styles.joinButton}
+                        disabled={joining === room.id}
+                        onClick={() => { void onJoin(room.id) }}
+                      >
+                        {joining === room.id ? t('joining') : t('joinRoom')}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
         {/* Matches the workspace list's bottom fade, so the list reads as scrollable
             without a visible scrollbar track. */}
@@ -222,7 +290,7 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
           `document.body`, so it only needs to be rendered by a mounted component — and
           this region is always mounted, while the room page is not: pressing "New room"
           from the sidebar must work before any room has ever been opened. */}
-      <CreateRoomDialog t={t} store={store} />
+      <CreateRoomDialog t={t} tPreset={tPreset} store={store} />
       <RoomDialogs t={t} store={store} />
     </section>
   )
@@ -241,6 +309,67 @@ function RoomRow(props: {
   // positioned against where the row was at that moment, so scrolling the list while the
   // menu is open does not drag it away from the row the operator aimed at.
   const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null)
+  // The leave confirmation lives on the row, not on the menu: choosing "leave room" closes
+  // the menu, and a confirmation owned by the menu would unmount with it. The row itself
+  // stays mounted while the room is still listed, so the dialog can stay open long enough to
+  // report a refused leave.
+  const [confirmingLeave, setConfirmingLeave] = useState(false)
+  const [leaving, setLeaving] = useState(false)
+  const [leaveFailure, setLeaveFailure] = useState<GroupChatKey | undefined>(undefined)
+  // Dissolving gets its own dialog and its own failure slot: it ends the room for everyone,
+  // unlike leaving, so sharing the leave state would print one act's refusal in the other's
+  // dialog.
+  const [confirmingDissolve, setConfirmingDissolve] = useState(false)
+  const [dissolving, setDissolving] = useState(false)
+  const [dissolveFailure, setDissolveFailure] = useState<GroupChatKey | undefined>(undefined)
+
+  // A room this account has not joined has no reading position, so it never carries a badge:
+  // the server reports 0 for it and the row keeps showing "left".
+  const unread = room.joined ? room.unreadCount ?? 0 : 0
+  const mentioned = unread > 0 && (room.mentionCount ?? 0) > 0
+
+  const closeLeave = (): void => {
+    setConfirmingLeave(false)
+    setLeaveFailure(undefined)
+  }
+
+  const closeDissolve = (): void => {
+    setConfirmingDissolve(false)
+    setDissolveFailure(undefined)
+  }
+
+  const leave = async (): Promise<void> => {
+    if (leaving) return
+    setLeaving(true)
+    setLeaveFailure(undefined)
+    try {
+      await store.leave(room.id)
+      setConfirmingLeave(false)
+    } catch (cause) {
+      // The operator is still a member, so the dialog stays open and names the reason
+      // instead of closing as if the leave had worked.
+      setLeaveFailure(failureOf(cause))
+    } finally {
+      setLeaving(false)
+    }
+  }
+
+  const dissolve = async (): Promise<void> => {
+    if (dissolving) return
+    setDissolving(true)
+    setDissolveFailure(undefined)
+    try {
+      await store.dissolve(room.id)
+      setConfirmingDissolve(false)
+    } catch (cause) {
+      // The room still exists, so the dialog stays open and names why the dissolve was
+      // refused — closing here would read as success.
+      setDissolveFailure(failureOf(cause))
+    } finally {
+      setDissolving(false)
+    }
+  }
+
   return (
     <div className={styles.rowWrap}>
       <button
@@ -261,13 +390,38 @@ function RoomRow(props: {
           </svg>
         </span>
         <span className={styles.title}>{room.name}</span>
-        <span className={styles.time}>
-          {room.joined ? t('memberCountShort').replace('{count}', String(room.memberCount)) : t('left')}
-        </span>
+        {unread > 0 ? (
+          // The unread badge replaces the member count rather than sitting beside it: the row
+          // has one trailing slot, and "3 unread" is what the reader needs from it. A mention
+          // gets its own colour so "someone wrote" and "someone wrote to me" are distinguishable
+          // at a glance without reading the number.
+          <span
+            className={mentioned ? styles.unreadMentioned : styles.unread}
+            aria-label={mentioned
+              ? t('unreadMentionAria').replace('{count}', String(unread))
+              : t('unreadAria').replace('{count}', String(unread))}
+          >
+            {unread > 99 ? '99+' : String(unread)}
+          </span>
+        ) : (
+          <span className={styles.time}>
+            {room.joined ? t('memberCountShort').replace('{count}', String(room.memberCount)) : t('left')}
+          </span>
+        )}
       </button>
       {menuAnchor !== null && (
         <RoomMenu t={t} room={room} store={store} anchor={menuAnchor}
-                  onClose={() => setMenuAnchor(null)} />
+                  onClose={() => setMenuAnchor(null)}
+                  onRequestLeave={() => { setMenuAnchor(null); setConfirmingLeave(true) }}
+                  onRequestDissolve={() => { setMenuAnchor(null); setConfirmingDissolve(true) }} />
+      )}
+      {confirmingLeave && (
+        <LeaveRoomDialog t={t} room={room} busy={leaving} failure={leaveFailure}
+                         onCancel={closeLeave} onConfirm={() => void leave()} />
+      )}
+      {confirmingDissolve && (
+        <DissolveRoomDialog t={t} room={room} busy={dissolving} failure={dissolveFailure}
+                            onCancel={closeDissolve} onConfirm={() => void dissolve()} />
       )}
     </div>
   )
@@ -287,10 +441,14 @@ function RoomMenu(props: {
   room: RoomSummary
   store: RoomStore
   onClose: () => void
+  /** Ask the row to open the leave confirmation; the menu closes as it does. */
+  onRequestLeave: () => void
+  /** Ask the row to open the dissolve confirmation; the menu closes as it does. */
+  onRequestDissolve: () => void
   /** Viewport rect of the row that opened the menu, which the portal positions against. */
   anchor: DOMRect
 }) {
-  const { t, room, store, onClose, anchor } = props
+  const { t, room, store, onClose, anchor, onRequestLeave, onRequestDissolve } = props
   const [renaming, setRenaming] = useState(false)
   const [draftName, setDraftName] = useState(room.name)
   const [busy, setBusy] = useState(false)
@@ -330,8 +488,17 @@ function RoomMenu(props: {
     )
 
   if (renaming) {
+    const commit = (): void => {
+      void run(() => store.rename(room.id, draftName.trim()))
+    }
+    const cancel = (): void => {
+      setRenaming(false)
+      setDraftName(room.name)
+    }
     return portal(
-      <div className={styles.menu} role="dialog" aria-label={t('renameTitle')}>
+      // A wider panel than the menu rows need: the field and its two actions read as one
+      // small form, and a 200px menu left the label, field and button stacked edge to edge.
+      <div className={styles.menuRename} role="dialog" aria-label={t('renameTitle')}>
         <span className={styles.menuHeading}>{t('renameTitle')}</span>
         <input
           className={styles.menuInput}
@@ -340,20 +507,23 @@ function RoomMenu(props: {
           placeholder={t('renamePlaceholder')}
           onChange={(event) => setDraftName(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && draftName.trim().length > 0) {
-              void run(() => store.rename(room.id, draftName.trim()))
-            }
-            if (event.key === 'Escape') { setRenaming(false); setDraftName(room.name) }
+            if (event.key === 'Enter' && draftName.trim().length > 0) commit()
+            if (event.key === 'Escape') cancel()
           }}
         />
-        <button
-          type="button"
-          className={styles.menuItem}
-          disabled={busy || draftName.trim().length === 0}
-          onClick={() => void run(() => store.rename(room.id, draftName.trim()))}
-        >
-          {t('save')}
-        </button>
+        <div className={styles.menuActions}>
+          <button type="button" className={styles.menuCancel} onClick={cancel}>
+            {t('cancel')}
+          </button>
+          <button
+            type="button"
+            className={styles.menuConfirm}
+            disabled={busy || draftName.trim().length === 0}
+            onClick={commit}
+          >
+            {t('save')}
+          </button>
+        </div>
       </div>,
     )
   }
@@ -372,10 +542,15 @@ function RoomMenu(props: {
           {t('menuInvite')}
         </button>
       )}
-      <button type="button" role="menuitem" className={styles.menuItem}
-              onClick={() => { store.setDialog({ kind: 'members', roomId: room.id }); onClose() }}>
-        {t('menuMembers')}
-      </button>
+      {/* Members are a side panel, not a dialog: a roster is consulted while reading, and a modal
+          would cover the conversation it describes. `openMembers` is absent on a profile without
+          the official right sidebar, where the entry would have nowhere to lead. */}
+      {store.openMembers !== undefined && (
+        <button type="button" role="menuitem" className={styles.menuItem}
+                onClick={() => { store.openMembers?.(room.id); onClose() }}>
+          {t('menuMembers')}
+        </button>
+      )}
       <button type="button" role="menuitem" className={styles.menuItem}
               onClick={() => { store.setDialog({ kind: 'settings', roomId: room.id }); onClose() }}>
         {t('menuSettings')}
@@ -384,13 +559,140 @@ function RoomMenu(props: {
               onClick={() => { void navigator.clipboard?.writeText(room.id); onClose() }}>
         {t('copyRoomId')}
       </button>
-      {room.joined && (
+      {/* The owner is offered a transfer instead of a leave: leaving is refused by the server
+          for them (a room without an owner has nobody able to change its settings), so showing
+          "leave room" would only produce a refusal. Everyone else keeps the plain leave. */}
+      {room.joined && store.selfId() === room.ownerUserId && (
         <button type="button" role="menuitem" className={styles.menuItem}
-                onClick={() => void run(() => store.leave(room.id))}>
+                onClick={() => { store.setDialog({ kind: 'transfer', roomId: room.id }); onClose() }}>
+          {t('menuTransfer')}
+        </button>
+      )}
+      {room.joined && store.selfId() !== room.ownerUserId && (
+        <button type="button" role="menuitem" className={styles.menuItem}
+                onClick={onRequestLeave}>
           {t('menuLeave')}
         </button>
       )}
+      {/* Dissolving ends the room for everyone, so it is offered only to the people the
+          server will accept it from: the owner, and an administrator. The server still
+          decides on the request itself. */}
+      {(store.selfId() === room.ownerUserId || store.administrator()) && (
+        <button type="button" role="menuitem" className={styles.menuItem}
+                onClick={onRequestDissolve}>
+          {t('menuDissolve')}
+        </button>
+      )}
     </div>,
+  )
+}
+
+  /**
+   * The dissolve-room confirmation.
+   *
+   * A separate dialog from leaving, not a variant of it: leaving removes one membership and the
+   * room carries on for everyone else, while dissolving ends it for every member and takes the
+   * messages with it. Sharing one dialog would let the far more destructive act read as the
+   * mild one.
+   *
+   * Like the leave dialog, a refusal keeps this open and prints the mapped reason: the room is
+   * still there, so closing would read as success.
+   */
+  function DissolveRoomDialog(props: {
+    t: (key: GroupChatKey) => string
+    room: RoomSummary
+    busy: boolean
+    failure: GroupChatKey | undefined
+    onCancel: () => void
+    onConfirm: () => void
+  }) {
+    const { t, room, busy, failure, onCancel, onConfirm } = props
+    return (
+      <Modal
+        open
+        onClose={onCancel}
+        title={t('menuDissolve')}
+        closeLabel={t('cancel')}
+        footer={(
+          <div className={styles.footer}>
+            <Button data-modal-autofocus variant="ghost" size="md" disabled={busy} onClick={onCancel}>
+              {t('cancel')}
+            </Button>
+            {/* Destructive, so it is red rather than the primary fill: the primitive has no
+                danger variant, and colour is the only thing separating this from a harmless
+                confirm at a glance. */}
+            <Button variant="ghost" size="md" disabled={busy}
+                    className={styles.leaveConfirmDanger}
+                    onClick={onConfirm}>
+              {t('menuDissolve')}
+            </Button>
+          </div>
+        )}
+      >
+        <div className={styles.leaveBody}>
+          <p className={styles.leaveCopy}>{t('menuDissolveConfirm')}</p>
+          {/* A bare room name read as a stray label once the dialog opened from a menu that had
+              already closed. Naming the target explicitly is what lets a reader confirm they are
+              about to delete the room they meant to. */}
+          <p className={styles.leaveRoomName}>
+            {t('menuDissolveTarget')}<strong>{room.name}</strong>
+          </p>
+          {failure !== undefined && (
+            <p className={styles.leaveError} role="alert">{t(failure)}</p>
+          )}
+        </div>
+      </Modal>
+    )
+  }
+
+
+/**
+ * The leave-room confirmation.
+ *
+ * It exists because leaving is not undoable from this surface: the sidebar keeps the room
+ * under the "left rooms" filter, but rejoining is a separate discovery step. The copy names
+ * that the agent's recorded history stays, which is the part a reader cannot infer.
+ *
+ * A refused leave keeps this dialog open and prints the mapped failure. Closing on failure
+ * was the old behaviour and read as success — the only sign it had gone wrong was the room
+ * still being in the list.
+ */
+function LeaveRoomDialog(props: {
+  t: (key: GroupChatKey) => string
+  room: RoomSummary
+  busy: boolean
+  failure: GroupChatKey | undefined
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const { t, room, busy, failure, onCancel, onConfirm } = props
+  return (
+    <Modal
+      open
+      onClose={onCancel}
+      title={t('menuLeave')}
+      closeLabel={t('cancel')}
+      footer={(
+        <div className={styles.footer}>
+          {/* Cancel is the initial focus: the safe answer is the default for a destructive
+              dialog, and Escape maps to the same command. */}
+          <Button data-modal-autofocus variant="ghost" size="md" disabled={busy} onClick={onCancel}>
+            {t('cancel')}
+          </Button>
+          <Button variant="primary" size="md" disabled={busy} onClick={onConfirm}>
+            {t('menuLeave')}
+          </Button>
+        </div>
+      )}
+    >
+      <div className={styles.leaveBody}>
+        <p className={styles.leaveCopy}>{t('menuLeaveConfirm')}</p>
+        <p className={styles.leaveRoomName}>{room.name}</p>
+        {failure !== undefined && (
+          <p className={styles.leaveError} role="alert">{t(failure)}</p>
+        )}
+      </div>
+    </Modal>
   )
 }
 

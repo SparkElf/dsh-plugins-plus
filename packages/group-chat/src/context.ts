@@ -31,31 +31,6 @@ export interface GroupChatHostServices {
     resolve(ref: CredentialRef): Promise<{ value: string; source: string } | undefined>
   }
   /**
-   * The durable workspace registry.
-   *
-   * A session belongs to a workspace only through its stored `cwd`: the sidebar groups
-   * sessions under the workspace whose path equals that directory, and
-   * `uiWorkspace.openSession` has nothing to reveal when no workspace claims the session.
-   * `sessionController.create` attaches only when it is handed a `workspaceId`, so a room
-   * that passes a `cwd` alone produces a session nothing can open — the empty state
-   * appears instead of the room.
-   *
-   * Only `create` is named. Its contract is create-or-reuse keyed on the canonical path,
-   * which is what makes calling it on every room open both idempotent and safe.
-   */
-  readonly workspaceRegistry: {
-    /**
-     * Create or reuse the workspace owning an existing directory.
-     *
-     * The path is canonicalized through `fs.realpath`, and a relative, nonexistent, or
-     * non-directory path *rejects* rather than creating anything — so the caller must
-     * make the directory first. Reuse returns the existing entity without changing its
-     * title, so a room that shares a directory with an ordinary workspace does not rename
-     * it.
-     */
-    create(path: string, title?: string): Promise<{ readonly id: string }>
-  }
-  /**
    * The Host API's own session controller.
    *
    * An agent is bound to a session by resuming it, and the controller already owns that
@@ -78,13 +53,15 @@ export interface GroupChatHostServices {
       /**
        * The workspace the session belongs to.
        *
-       * This is what attaches the session to a workspace, and only a workspace's own
-       * sessions appear in the sidebar. A session created with a bare `cwd` is persisted
-       * but owned by nothing, so nothing can open it and the shell shows a new Session
-       * instead of the room. Exactly one of `workspaceId` and `cwd` may be given: the
-       * controller refuses the pair.
+       * This is the only thing that puts a session under a Workspace row: the sidebar
+       * groups sessions from each Workspace's own `sessionIds`. A session created with a
+       * bare `cwd` is persisted, carries its directory, and is still openable by id — it
+       * just has no Workspace claiming it, so it lands in the shell's ungrouped bucket.
+       * Exactly one of `workspaceId` and `cwd` may be given: the controller refuses the
+       * pair.
        */
       readonly workspaceId?: string
+      /** The session's working directory, independent of Workspace membership. */
       readonly cwd?: string
       readonly agentPreset?: string
     }): Promise<{ readonly sessionId: string }>

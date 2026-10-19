@@ -40,8 +40,27 @@ export interface RoomSummary {
   readonly agentPreset: string | null
   readonly memberCount: number
   readonly joined: boolean
+  /**
+   * Messages from others since this account last read the room.
+   *
+   * Absent on a deployment that predates the field: the sidebar then shows no badge rather
+   * than claiming "0 unread", which would be indistinguishable from a room nobody wrote in.
+   */
+  readonly unreadCount?: number
+  /** The subset of {@link unreadCount} that mentions this account. */
+  readonly mentionCount?: number
   readonly createdAt: string
   readonly updatedAt: string
+  /**
+   * The room announcement, when this deployment stores one.
+   *
+   * `undefined` is a third state on purpose: it means the server answering this read has no
+   * announcement feature at all (an older deployment, or one rolled back after the plugin
+   * shipped), which the panel reports as unavailable. `null` is a feature that is present
+   * and has nothing written in it — the distinction is what keeps an empty banner from
+   * claiming the feature is broken.
+   */
+  readonly announcement?: string | null
 }
 
 export interface RoomMember {
@@ -49,6 +68,61 @@ export interface RoomMember {
   readonly displayName: string
   readonly owner: boolean
   readonly joinedAt: string
+  /** The member's picture, when DataOps has one. Absent means "draw initials instead". */
+  readonly avatarUrl?: string | null
+  /**
+   * The member's role, when the server reports one.
+   *
+   * Absent on a server that predates roles; `owner` above already carries the same fact, so
+   * the panel derives the role from it rather than showing every member as ordinary.
+   */
+  readonly role?: 'owner' | 'member'
+}
+
+/**
+ * One account that can still be added to a room.
+ *
+ * Separate from {@link RoomMember} because it describes a person who is *not* in the room:
+ * a candidate carries the handle and picture the picker searches and draws, and no join
+ * date or ownership, because neither exists before the invite is accepted.
+ */
+export interface InviteCandidate {
+  readonly userId: string
+  readonly displayName: string
+  readonly username: string
+  readonly avatarUrl?: string | null
+}
+
+/** Directory names the room picker can browse, relative to the browsing root. */
+export interface DirectoryListing {
+  readonly path: string
+  readonly parent: string | null
+  readonly entries: readonly { readonly name: string; readonly path: string }[]
+}
+
+/**
+ * One agent preset the deployment offers.
+ *
+ * `id` is the registry's own identifier — the `config.id` a preset declares, not the filename
+ * of the patch that declares it. The two happen to match for every shipped preset, which is
+ * exactly why the distinction has to be carried by the type: a deployment that renames a file
+ * must not silently offer a name the registry will reject at room creation.
+ */
+export interface PresetOption {
+  readonly id: string
+  /** Present only for a preset that names itself; a shipped preset's copy is a locale key. */
+  readonly name?: string
+  readonly description?: string
+  readonly order?: number
+  /** Whether this is the deployment's default preset. */
+  readonly isDefault?: boolean
+  /** Non-empty when the preset is declared but could not be activated. */
+  readonly broken?: string
+}
+
+/** Preset roster and the directories the create dialog needs. */
+export interface RoomOptions {
+  readonly presets: readonly PresetOption[]
 }
 
 export interface EventPage {
@@ -90,6 +164,10 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
     if (status === 503) throw new RoomError('credentialMissing', status)
     if (status === 401 || status === 403) throw new RoomError('credentialRejected', status)
     if (status === 404) throw new RoomError('notConfigured', status)
+    // 409 is the server refusing a state change it will not make — the owner trying to leave
+    // is the one this client can reach, and collapsing it into "unreachable" would send the
+    // reader to inspect the network instead of transferring ownership.
+    if (status === 409) throw new RoomError('ownerCannotLeave', status)
     throw new RoomError('unreachable', status)
   }
   if (response.status === 204) return undefined as T
@@ -105,10 +183,19 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
  *
  * @returns the account id, or `undefined` when the Host cannot identify this workspace.
  */
-export const readSelf = async (): Promise<string | undefined> => {
+export const readSelf = async (): Promise<{ id: string; administrator: boolean } | undefined> => {
   try {
-    const me = await call<{ id?: unknown }>('/me')
-    return typeof me?.id === 'string' && me.id.length > 0 ? me.id : undefined
+    // The host answers `roleCodes`, not the raw DataOps role objects: the client half never
+    // talks to DataOps itself, so the host is what carries the account's roles across.
+    const me = await call<{ id?: unknown; roleCodes?: unknown }>('/me')
+    if (typeof me?.id !== 'string' || me.id.length === 0) return undefined
+    // The room server owns the authoritative check; this flag only decides whether to *offer*
+    // dissolving a room the reader does not own. These two role names are the ones the
+    // deployment grants `system:admin:manage` to by default, so offering the entry matches what
+    // the server will accept.
+    const administrator = Array.isArray(me.roleCodes)
+      && me.roleCodes.some((code) => code === '管理员' || code === '超级管理员')
+    return { id: me.id, administrator }
   } catch {
     // An unidentified workspace still shows its rooms; its own messages simply stay where
     // the official renderer puts them rather than being claimed as the operator's.
@@ -119,8 +206,64 @@ export const readSelf = async (): Promise<string | undefined> => {
 /** Rooms this workspace has joined. */
 export const listRooms = (): Promise<readonly RoomSummary[]> => call('/rooms')
 
+/**
+ * Rooms this account could join, as opposed to the ones it is already in.
+ *
+ * Kept separate from {@link listRooms} because the two answer different questions: the sidebar
+ * shows what you belong to, while this is consulted only when the operator is looking for
+ * something to join. Merging them would make every list read ask for rooms the account has no
+ * relationship with.
+ *
+ * @param query - optional narrowing keyword, applied by the server.
+ * @returns matching rooms, each carrying `joined` so the caller can tell them apart.
+ */
+export const listDiscoverableRooms = (query?: string): Promise<readonly RoomSummary[]> => {
+  const suffix = query === undefined || query.trim().length === 0
+    ? ''
+    : `?query=${encodeURIComponent(query.trim())}`
+  return call(`/discover${suffix}`)
+}
+
+/**
+ * Take a seat in a room the server allows this account to join.
+ *
+ * The decision to allow it is the server's: it re-reads discoverability, invite policy and
+ * membership at the moment of the press, so a room offered a minute ago may still be refused.
+ * That refusal arrives as a `RoomError` and is shown as-is rather than being pre-empted here.
+ *
+ * @param roomId - the room to join.
+ * @returns the server's answer, including whether the account was already a member.
+ */
+export const joinRoom = (roomId: string): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/join`, { method: 'POST' })
+
 export const listMembers = (roomId: string): Promise<readonly RoomMember[]> =>
   call(`/rooms/${encodeURIComponent(roomId)}/members`)
+
+/**
+ * Accounts that match `query` and are not yet in the room.
+ *
+ * The search runs on the Host, which holds the credential: the browser has no DataOps token
+ * of its own, so a client-side filter over a full directory is not an option here. An empty
+ * query is valid and returns a browsable first page rather than nothing, which is what makes
+ * the picker usable before the operator has typed anything.
+ */
+export const searchInviteCandidates = (
+  roomId: string,
+  query: string,
+): Promise<readonly InviteCandidate[]> => {
+  const suffix = query.length === 0 ? '' : `?q=${encodeURIComponent(query)}`
+  return call(`/rooms/${encodeURIComponent(roomId)}/invite-candidates${suffix}`)
+}
+
+/** Preset names this deployment offers. An empty list means the picker falls back to typing. */
+export const readOptions = (): Promise<RoomOptions> => call('/options')
+
+/** Child directories of `path`, for the working-directory picker. */
+export const listDirectories = (path?: string): Promise<DirectoryListing> => {
+  const suffix = path === undefined || path.length === 0 ? '' : `?path=${encodeURIComponent(path)}`
+  return call(`/directories${suffix}`)
+}
 
 export const listEvents = (roomId: string, cursor?: string): Promise<EventPage> => {
   const suffix = cursor === undefined ? '' : `?cursor=${encodeURIComponent(cursor)}`
@@ -139,11 +282,40 @@ export const createRoom = (
 ): Promise<RoomSummary> =>
   call('/rooms', { method: 'POST', body: JSON.stringify({ name, ...execution }) })
 
+/**
+ * Set or clear a room's announcement.
+ *
+ * Only the room owner may write it; the server decides that, so a refusal is surfaced as-is
+ * rather than pre-empted here. An empty string clears the announcement — the server stores
+ * that as no announcement, which is why the panel treats `''` and `null` alike when reading.
+ *
+ * @param roomId - the room whose announcement to write.
+ * @param announcement - the new text, or an empty string to clear it.
+ */
+export const setAnnouncement = (roomId: string, announcement: string): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/announcement`, {
+    method: 'POST',
+    body: JSON.stringify({ announcement }),
+  })
+
 export const updateRoom = (
   roomId: string,
   patch: { name?: string; invitePolicy?: string; discoverability?: string; agentTrigger?: string },
 ): Promise<RoomSummary> =>
   call(`/rooms/${encodeURIComponent(roomId)}/update`, { method: 'POST', body: JSON.stringify(patch) })
+
+/**
+ * Hand ownership of a room to another member.
+ *
+ * The reason this exists at all is that a room's owner cannot leave it: leaving would strand the
+ * room with nobody able to change its settings. Transferring is the way out, so the server owns
+ * the rule (owner only, target must be a member) and this only carries the request.
+ */
+export const transferOwnership = (roomId: string, userId: string): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/transfer`, {
+    method: 'POST',
+    body: JSON.stringify({ userId }),
+  })
 
 export const inviteMembers = (roomId: string, userIds: readonly string[]): Promise<unknown> =>
   call(`/rooms/${encodeURIComponent(roomId)}/members`, {
@@ -153,6 +325,94 @@ export const inviteMembers = (roomId: string, userIds: readonly string[]): Promi
 
 export const leaveRoom = (roomId: string): Promise<unknown> =>
   call(`/rooms/${encodeURIComponent(roomId)}/members/me`, { method: 'DELETE' })
+
+/** One file in a room's shared folder. */
+export interface SharedFile {
+  readonly path: string
+  readonly name: string
+  readonly size: number
+  readonly directory: boolean
+}
+
+/** The shared folder of one room. */
+export interface RoomFiles {
+  readonly path: string | null
+  readonly files: readonly SharedFile[]
+}
+
+/**
+ * List a room's shared folder.
+ *
+ * An empty `path` means this deployment has no shared tree, which the panel renders as
+ * "not available" rather than as an empty folder — the two read differently to a member.
+ */
+export const listRoomFiles = (roomId: string): Promise<RoomFiles> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/files`)
+
+/** One shared file's text, as the preview shows it. */
+export interface SharedFileText {
+  readonly path: string
+  readonly name: string
+  readonly text: string
+  readonly truncated: boolean
+  readonly textLike: boolean
+}
+
+/** Read one file out of a room's shared folder. */
+export const getRoomFile = (roomId: string, path: string): Promise<SharedFileText> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/file-content?path=${encodeURIComponent(path)}`)
+
+/** Where an upload landed. */
+export interface SharedFileWrite {
+  readonly path: string
+  readonly name: string
+  readonly size: number
+}
+
+/**
+ * Upload one file into a room's shared folder.
+ *
+ * Base64 in JSON rather than multipart: the plugin's request path reads one JSON envelope for
+ * every operation, and a second body format would need its own parser, limits, and error
+ * mapping for no gain.
+ *
+ * @param roomId - the room whose folder receives the file.
+ * @param file - the browser's File object.
+ * @returns the written file.
+ */
+export const uploadRoomFile = async (roomId: string, file: File): Promise<SharedFileWrite> => {
+  const buffer = new Uint8Array(await file.arrayBuffer())
+  // Chunked: `String.fromCharCode(...bytes)` overflows the argument limit on a file of a few
+  // hundred kilobytes, and the spread is what makes the one-liner tempting.
+  let binary = ''
+  for (let index = 0; index < buffer.length; index += 1) {
+    binary += String.fromCharCode(buffer[index] as number)
+  }
+  return call(`/rooms/${encodeURIComponent(roomId)}/files`, {
+    method: 'POST',
+    body: JSON.stringify({ name: file.name, data: btoa(binary) }),
+  })
+}
+
+/**
+ * Remove one member from a room.
+ *
+ * The reserved word `me` keeps its meaning: removal always names another account, and the
+ * server rejects the owner as a target. Leaving therefore never goes through this call.
+ */
+export const removeMember = (roomId: string, userId: string): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' })
+
+/**
+ * Dissolve a room outright.
+ *
+ * Distinct from {@link leaveRoom}: leaving removes one membership and the room keeps existing
+ * for everyone else, while dissolving ends the room for every member. The server decides who
+ * may do it (the owner, or an administrator), so a refusal surfaces as copy rather than being
+ * pre-empted here.
+ */
+export const dissolveRoom = (roomId: string): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' })
 
 /**
  * Send one message.

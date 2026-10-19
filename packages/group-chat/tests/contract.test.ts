@@ -78,19 +78,23 @@ describe('plugin/backend contract', () => {
     }
 
     const pluginRoutes = new Set<string>()
-    // Matched by the base path the plugin actually uses rather than a hardcoded
-    // prefix: a drifted path must land in the set so the comparison can flag it,
-    // which a literal-prefix match would silently skip.
-    for (const line of client.split('\n')) {
-      const match = line.match(/[`'"]((?:https?:\/\/[^`'"]*)?\/[a-z][\w/-]*)[`'"?]/u)
-      if (match === null) continue
-      const path = match[1]
-        .replace(/^https?:\/\/[^/]*/u, '')
-        .split('${suffix')[0]
-        .replace(/\$\{[^}]*\}/gu, 'ROOM')
-      if (!path.includes('/chat/') && !path.includes('ROOM')) continue
-      pluginRoutes.add(normalizeRoute(path))
+    // Anchored on the request path itself rather than on the quoting around it.
+    //
+    // Two earlier extractions passed while asserting nothing. Matching a path only up to the
+    // first `${` captured `/api/ai/chat/rooms/` and dropped the segment after it, so the
+    // newest route never entered the set; reading quoted literals instead mispaired on the
+    // apostrophes in the surrounding prose, which swallowed most of the file. Scanning for
+    // the prefix and then consuming path segments and `${…}` interpolations sees every route
+    // regardless of how it is quoted or concatenated.
+    for (const match of client.matchAll(/\/api\/ai\/chat\/rooms(?:\/(?:\$\{[^}]*\}|[\w.-]+))*/gu)) {
+      pluginRoutes.add(normalizeRoute(match[0].replace(/\$\{[^}]*\}/gu, 'ROOM').replace(/^\/+/u, '')))
     }
+
+    // A route the extraction missed would make this test pass by finding nothing, so the
+    // set is required to hold every route the plugin calls — the count is what fails if the
+    // scan ever regresses to a subset again.
+    expect(pluginRoutes.size).toBeGreaterThanOrEqual(8)
+    expect([...pluginRoutes].some((route) => route.includes('ROOM'))).toBe(true)
 
     // Every route the plugin calls must exist on the backend. The backend may offer
     // more than the plugin uses (room creation, membership, search) — the browser

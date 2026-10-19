@@ -23,6 +23,12 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Brings in the official `sidebarRight` / `sidebarRightTabs` members this plugin consumes, the
+// right-sidebar slot names it registers into, and the merge map its page parameters are typed by.
+// The augmentation lives in the package's `/client` entry, so importing it is what makes those
+// names real in this compilation.
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
@@ -30,13 +36,32 @@ import type { StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
 import './contract.ts'
 import { SidebarRooms, type SidebarRoomsInjected } from './SidebarRooms.tsx'
 import { MessageSide } from './MessageSide.tsx'
+import {
+  MembersPanel, MEMBERS_TAB_KIND, MembersTabTitle,
+  type MembersPanelInjected,
+} from './MembersPanel.tsx'
+import { MembersGuideEntry, type MembersGuideEntryProps } from './GuideEntry.tsx'
 import { createRoomStore, type RoomStore } from './store.ts'
+import { PRESET_LOCALE_NS } from './rows.ts'
 import { roomSessionId } from '../session-id.ts'
 import { en, zh, type GroupChatKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     'settings.groupChat': GroupChatKey
+  }
+}
+
+declare module '@deepseek-ai/dsh-client-ui-sidebar-right/client' {
+  /**
+   * The navigation parameters this page type accepts.
+   *
+   * The official service types `openTab`'s `params` by this map, and a kind that declares none
+   * accepts `undefined` only. Declaring the room here keeps the opener typed against the body's
+   * real contract instead of casting the service to a looser shape.
+   */
+  interface SidebarRightTabParamsMap {
+    groupChatMembers: { readonly roomId: string }
   }
 }
 
@@ -112,6 +137,24 @@ const logClaimFailure = (key: string, error: unknown): void => {
 /** Main-panel key the sidebar rows select. */
 const PANEL_ID = 'group-chat' as MainPanelId
 
+/**
+ * The members tab type.
+ *
+ * `MEMBERS_TAB_ID` keys the type's slot entries; `MEMBERS_TAB_KIND` is what `openTab` resolves.
+ * They are separate values because the sidebar stores a placed tab by kind while the slot ledger
+ * is keyed by id — the same split the official schedule plugin makes.
+ */
+const MEMBERS_TAB_ID = '@sparkelf/dsh-group-chat/members'
+
+/**
+ * The guide entry's own identity, and where it sorts on the start page.
+ *
+ * An id rather than the tab's: the guide lists one box per entry, and the id is what the
+ * entry-level slot replacement below is keyed by. The order lands the box among the other
+ * `extension` types instead of at either end.
+ */
+const MEMBERS_GUIDE_ID = '@sparkelf/dsh-group-chat/members-guide'
+const MEMBERS_GUIDE_ORDER = 60
 /** Client services required for these contributions. */
 /**
  * The Workspace navigation service, declared structurally.
@@ -129,14 +172,42 @@ interface WorkspaceNavigation {
   openSession(sessionId: string): void
 }
 
+/**
+ * The slice of the Workspace controller this package needs.
+ *
+ * A dissolved room's Session outlives the room: it is a durable record, so the shell keeps
+ * listing it under whatever grouping it landed in. Archiving is the documented way to take a
+ * Session off those surfaces without destroying it, and it is exactly what the shell's own
+ * "archive session" action does.
+ */
+interface WorkspaceArchive {
+  archiveSession(sessionId: string, options?: { readonly stopActivity?: boolean }): Promise<void>
+  /** Remove a Workspace registration; its Sessions and files are kept. */
+  delete(workspaceId: string): Promise<void>
+  /** Host-authoritative Workspace rows, including each one's owning Session ids. */
+  readonly list: { getSnapshot(): WorkspaceListSnapshot | undefined }
+}
+
+/** The fields of the Workspace snapshot this package reads. */
+interface WorkspaceListSnapshot {
+  readonly phase?: string
+  readonly items: readonly {
+    readonly workspaceId: string
+    readonly path: string
+    readonly sessionIds: readonly string[]
+  }[]
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Workspace navigation, contributed by the workspace picker plugin. */
     readonly uiWorkspace: WorkspaceNavigation
+    /** Workspace state and commands, contributed by the workspace controller plugin. */
+    readonly workspaces: WorkspaceArchive
   }
 }
 
-export const inject = ['slots', 'locale', 'uiWorkspace']
+export const inject = ['slots', 'locale', 'uiWorkspace', 'workspaces', 'sidebarRightTabs', 'sidebarRight']
 
 /**
  * Register the sidebar region and the room page.
@@ -145,6 +216,10 @@ export const inject = ['slots', 'locale', 'uiWorkspace']
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'group-chat: copy')
   const t = ctx.locale.bind(NS) as (key: GroupChatKey) => string
+  // A second binding rather than a merged dictionary: the preset copy belongs to the platform's
+  // `settings.agentPreset` namespace, and a preset name this plugin translated itself would
+  // drift from the hero chip that shows the same preset under the same id.
+  const tPreset = ctx.locale.bind(PRESET_LOCALE_NS) as (key: string) => string
 
   // One store shared by both surfaces, created here because the sidebar must show the
   // same list the page is operating on.
@@ -157,6 +232,67 @@ export function apply(ctx: ClientContext): void {
     open: (roomId) => {
       base.open(roomId)
       ctx.uiWorkspace.openSession(roomSessionId(roomId))
+      // Opening a room is the operator saying "show me this conversation", and the roster is the
+      // other half of it: who is in here, and what the room has announced. The tab is revealed
+      // rather than forced — `openTab` focuses an already-placed tab of this type instead of
+      // stacking a second one, so re-entering a room keeps whatever the operator had open beside
+      // it, and a reader who closed the roster stays closed because nothing re-opens it later.
+      // Reached through the store's own action so the timing rule lives in one place: the room has
+      // to be the mounted Session before a right-sidebar tab can be placed beside it.
+      queueMicrotask(() => { store.openMembers?.(roomId) })
+    },
+    /**
+     * Dissolve a room, then take its Session off the shell's grouping surfaces.
+     *
+     * The room row disappears because the server deleted it, but the Session is a durable
+     * record that outlives the room: `dissolveRoom` cannot reach it, so without this the
+     * room's leftover workspace (from before rooms stopped registering one) and its Session
+     * entry would stay listed for a conversation that no longer exists. Archiving is the
+     * documented, reversible way to remove a Session from those surfaces — the same action
+     * the shell's own "archive session" uses.
+     *
+     * Runs after the delete so a refused dissolve leaves the Session alone.
+     */
+    dissolve: async (roomId) => {
+      await base.dissolve(roomId)
+      try {
+        await ctx.workspaces.archiveSession(roomSessionId(roomId), { stopActivity: true })
+        // A room opened before rooms stopped registering one still owns a Workspace entry,
+        // and dissolving it has to take that entry with it. Matched by the Session it owns
+        // rather than by path: the path is the room's directory, and a room may have been
+        // pointed at a directory a real workspace also uses — deleting by path would remove
+        // that one.
+        const sessionId = roomSessionId(roomId)
+        const snapshot = ctx.workspaces.list.getSnapshot()
+        for (const workspace of snapshot?.items ?? []) {
+          if (!workspace.sessionIds.includes(sessionId)) continue
+          await ctx.workspaces.delete(workspace.workspaceId)
+        }
+      } catch {
+        // The room is gone either way; a Session that could not be archived is a leftover
+        // row, not a failed dissolve. Saying so would make the delete look unsuccessful.
+      }
+    },
+    /**
+     * Open the members panel for a room.
+     *
+     * Two steps, in this order and not the other way round: the room has to be the *mounted*
+     * Session before a right-sidebar tab can be placed beside it, because `openTab` acts on the
+     * mounted seat and throws when there is none. `openSession` is synchronous in what it records
+     * but the seat re-binds on the next frame, so the tab is opened on a zero-delay task rather
+     * than inline — inline would aim at the session the operator is leaving.
+     */
+    openMembers: (roomId) => {
+      // `sidebarRight` is injected, so it is live for this whole turn. Reading it through
+      // `ctx.get` was the one-shot lookup that cannot see a service another plugin provides.
+      const open = (): void => {
+        // A page type that is not `multiple` is recorded under one address, and the official
+        // service reveals the tab already at that address instead of stacking a second copy — so
+        // re-entering a room focuses the page the reader already had, with no probing here.
+        ctx.sidebarRight.openTab(MEMBERS_TAB_KIND, { params: { roomId } })
+      }
+      if (base.getState().activeRoomId === roomId) open()
+      else setTimeout(open, 0)
     },
   }
 
@@ -164,8 +300,102 @@ export function apply(ctx: ClientContext): void {
     name: 'sidebar.footer.action',
     id: PANEL_ID,
     order: 20,
-    inject: (): SidebarRoomsInjected => ({ t, store }),
+    inject: (): SidebarRoomsInjected => ({ t, tPreset, store }),
   }, SidebarRooms))
+
+  /**
+   * The members panel, as a tab in the official right sidebar.
+   *
+   * Three registrations, because the sidebar keeps three separate facts about a tab: the type it
+   * belongs to (so navigation can resolve and persist it), the body to draw, and the chip that
+   * labels it. `id` identifies the type's slot entries; `kind` is what `openTab` takes. They are
+   * not the same value — the official schedule plugin uses
+   * `"@deepseek-ai/dsh-client-ui-schedule/task"` and `"scheduleTask"` respectively — and
+   * collapsing them would make `openTab` throw where nobody can see it.
+   *
+   * The panel is registered for every profile and decides at render time whether the Session it
+   * was opened beside is a room. Registering conditionally instead would lose a placed tab on the
+   * next reload: a tab whose type is gone cannot be restored.
+   */
+  // Registered through `ctx.inject`, not a one-shot `ctx.get`: the official right sidebar is a
+  // separate plugin, so this one may load before the registry it contributes to exists. `inject`
+  // runs the body when the service is present and re-runs it if the provider is replaced, which
+  // is also what keeps the panel alive across an HMR of either side. A profile without the right
+  // sidebar simply never runs this body, so the room list still comes up.
+  //
+  // The guide box is registered in the same body. That is deliberate: both entries are faces of
+  // one page type, and a type that appears on the start page must be openable from it.
+  /**
+   * Open this plugin's page type from the start guide.
+   *
+   * The guide's shipped box opens through the guide's own `openTab`; a replacement box is not
+   * handed that callback, so it goes through the same service the plugin already holds.
+   */
+  const openTabFromGuide = (kind: string): void => {
+    // The shipped box opens through the guide's own `tab.actions.openTab`, which a replacement
+    // box is not handed. This reaches the same service directly, so a click behaves exactly like
+    // one on a shipped box: the type opens beside the guide the reader is looking at.
+    // A click that cannot reach the sidebar is a wiring fault, not a reader's mistake: surface it
+    // rather than leaving a dead box behind.
+    try {
+      ctx.sidebarRight.openTab(kind)
+    } catch (error) {
+      console.error('[group-chat] opening the members page failed', error)
+    }
+  }
+
+  // The page type, its body, its title, and its start-guide box. `sidebarRightTabs` and
+  // `sidebarRight` are injected (see the module's `inject`), so by the time `apply` runs they
+  // are live: the official right sidebar always loads before the types that contribute to it.
+  // A profile without that sidebar does not load this plugin at all, which is the intended
+  // outcome — there would be nowhere to put the page.
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: MEMBERS_TAB_ID,
+    kind: MEMBERS_TAB_KIND,
+    // `extension` is the band for a type from outside the product; the default already means
+    // exactly that, and naming it keeps the choice visible next to `builtin` types.
+    priority: 'extension',
+    title: () => t('membersTitle'),
+    // The guide entry is what puts this type on the right sidebar's start page, beside Files,
+    // Database and the rest. Omitting `guide` is the documented way to stay off that page.
+    guide: [{
+      id: MEMBERS_GUIDE_ID,
+      order: MEMBERS_GUIDE_ORDER,
+      title: () => t('membersTitle'),
+      description: () => t('membersGuideHint'),
+    }],
+  }), 'group-chat: members tab type')
+
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab',
+    key: MEMBERS_TAB_ID,
+    locale: NS,
+    // The seat hands the inject factory the Session id and its bound actions, not a props
+    // object; the panel needs the id to know which room it belongs to.
+    inject: ((sessionId: string): MembersPanelInjected => ({ sessionId, t, store })) as never,
+  }, MembersPanel)), 'group-chat: members tab body')
+
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab.title',
+    key: MEMBERS_TAB_ID,
+    locale: NS,
+    inject: () => ({ t }),
+  }, MembersTabTitle)), 'group-chat: members tab title')
+
+  // Replace this type's own box on the start guide. The seat is keyed by the contributing
+  // type's id, and the replacement decides per Session whether the box is drawn: the guide's
+  // own list is global, so this is the only place the decision can be made.
+  ctx.effect(() => ctx.slots.inject('sidebar.right.tab.guide.entry', () => ctx.slots.register({
+    name: 'sidebar.right.tab.guide.entry',
+    key: MEMBERS_TAB_ID,
+    locale: NS,
+    // The seat calls an inject factory with the Session id; the box's own copy arrives as owner
+    // props at render time, so this returns only what the factory itself must supply.
+    inject: ((sessionId: string): Partial<MembersGuideEntryProps> => ({
+      sessionId,
+      onPick: () => { openTabFromGuide(MEMBERS_TAB_KIND) },
+    })) as never,
+  }, MembersGuideEntry)), 'group-chat: members guide box')
 
   // A room is a Session. Its messages are ordinary `user/message` events on that Session's log,
   // so the shell's own Conversation already renders them — bubbles, markdown, tool calls,
@@ -245,6 +475,10 @@ export function apply(ctx: ClientContext): void {
             // the life of the page, leaving every message on the unknown-author side forever.
             getSelfId: store.selfId,
             subscribeSelf: store.subscribe,
+            // Reads through the live store rather than a captured value: the roster arrives after
+            // the first paint, and a snapshot taken here would stay `undefined` for the life of
+            // the page, leaving every other author's bubble unlabelled.
+            getRoster: (roomId: string) => store.getState().members[roomId],
             sided: props['node'] !== undefined,
           }))
         } catch (error) {

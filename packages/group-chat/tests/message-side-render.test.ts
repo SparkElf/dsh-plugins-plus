@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest'
 import { createElement, memo, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MessageSide, messageSide, type MessageSideProps } from '../src/client/MessageSide.tsx'
+import type { RoomMember } from '../src/client/api.ts'
 
 const SELF = 'user-self'
 
@@ -38,12 +39,15 @@ const t = (key: string): string => `T:${key}`
 const render = (options: {
   source?: unknown
   selfId?: string | undefined
+  roster?: readonly RoomMember[] | undefined
 }): string => {
   const props = {
     node: { data: { source: options.source } },
     Official,
     getSelfId: () => options.selfId,
     subscribeSelf: () => () => {},
+    // Looked up by room id, the same way the registration wires it to the store.
+    getRoster: () => options.roster,
     sided: true,
     t,
   } as unknown as MessageSideProps
@@ -112,5 +116,69 @@ describe('messageSide 与渲染结果一致', () => {
     const other = { roomId: 'room-1', memberId: 'someone-else', authorKind: 'human' }
     expect(messageSide({ source: other }, SELF)).toBe('other')
     expect(render({ source: other, selfId: SELF })).toContain('data-group-chat-side="other"')
+  })
+})
+
+/**
+ * The author header: who wrote the message, drawn above a bubble from another author.
+ *
+ * Two failure modes are invisible in the source and only appear when React renders. An unknown
+ * author must not be labelled at all (a wrong name, or an internal id, attributes the words to
+ * the wrong person); and the operator's own message must never grow a header, since the whole
+ * point of the right-hand side is that "no name" already means "me".
+ */
+describe('他人消息的作者标识', () => {
+  const roster: readonly RoomMember[] = [
+    { userId: 'user-li', displayName: '李四', owner: false, joinedAt: '2026-01-01T00:00:00.000Z' },
+  ]
+
+  it('别人的消息画上昵称和头像位', () => {
+    const html = render({
+      source: { roomId: 'room-1', memberId: 'user-li', authorKind: 'human' },
+      selfId: SELF,
+      roster,
+    })
+    expect(html).toContain('李四')
+    expect(html).toContain('data-group-chat-author="user-li"')
+    // 头像本身由 Avatar 渲染；有无头像 URL 都应出现一个可访问名称。
+    expect(html).toContain('aria-label="李四"')
+  })
+
+  it('名册里没有这个人时不出名字，也不退回成 id', () => {
+    const html = render({
+      source: { roomId: 'room-1', memberId: 'user-unknown', authorKind: 'human' },
+      selfId: SELF,
+      roster,
+    })
+    expect(html).not.toContain('data-group-chat-author')
+    expect(html).not.toContain('user-unknown')
+  })
+
+  it('自己的消息不加头像和昵称', () => {
+    // 右侧气泡不署名是 IM 的惯例：没有名字就代表「我」。
+    const html = render({
+      source: { roomId: 'room-1', memberId: SELF, authorKind: 'human' },
+      selfId: SELF,
+      roster: [{ userId: SELF, displayName: '我', owner: false, joinedAt: '2026-01-01T00:00:00.000Z' }],
+    })
+    expect(html).not.toContain('data-group-chat-author')
+    expect(html).not.toContain('我')
+  })
+
+  it('agent 的消息也算别人，带上它的名字', () => {
+    const html = render({
+      source: { roomId: 'room-1', memberId: 'user-li', authorKind: 'agent' },
+      selfId: SELF,
+      roster,
+    })
+    expect(html).toContain('data-group-chat-author="user-li"')
+  })
+
+  it('普通会话的消息完全不受影响', () => {
+    // 没有 roomId 就是普通会话：官方渲染原样输出，不能多出任何包裹或署名。
+    const html = render({ source: { kind: 'user', rpcId: 'r1' }, selfId: SELF, roster })
+    expect(html).toContain('official-bubble')
+    expect(html).not.toContain('data-group-chat-author')
+    expect(html).not.toContain('data-group-chat-side')
   })
 })

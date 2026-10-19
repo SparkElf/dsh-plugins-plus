@@ -30,27 +30,27 @@ describe('a room session is created through the controller', () => {
     expect(HOST).not.toMatch(/ctx\.sessions\.create\(/u)
   })
 
-  it('attaches the session to a workspace it registers first', () => {
-    // A session created with a bare `cwd` is persisted but owned by no workspace, and the
-    // sidebar reveals a session only through the workspace that claims it. Such a room is
-    // listed in our own sidebar, yet clicking it resolves to nothing and the shell falls
-    // back to an empty new Session — the room appears to be broken.
+  it('creates the session with cwd and no workspace, so the room is not a workspace row', () => {
+    // A room is a single conversation. Registering a workspace per room put an entry in the
+    // Workspace list for every room — folders that never hold anything else, and entries that
+    // outlived the rooms that created them.
     //
-    // `workspaceRegistry.create` canonicalizes through `fs.realpath` and rejects a path
-    // that does not exist, so the directory has to be made first; it is create-or-reuse,
-    // which is what makes calling it on every room open safe.
+    // The directory is still the room's agent scope, so it is made first and passed as `cwd`.
+    // That is not the same as "a session nothing can open": `uiWorkspace.openSession` retains
+    // the Session by id and never consults workspace membership, so the room opens as before.
+    // The session lands in the shell's "Ungrouped" bucket, which is where sessions that belong
+    // to no workspace are meant to go.
     expect(HOST).toMatch(/await mkdir\(directory, \{ recursive: true \}\)/u)
-    expect(HOST).toMatch(/workspaceRegistry\.create\(directory/u)
-    expect(HOST).toMatch(/sessionController\.create\(\{[^}]*workspaceId: workspace\.id/u)
+    expect(HOST).toMatch(/cwd: directory,/u)
   })
 
   it('never passes both workspaceId and cwd', () => {
     // The controller refuses the pair outright ("session.create accepts workspaceId or
-    // cwd, not both"), and `workspaceId` is the half that also attaches the session.
+    // cwd, not both"). A room now passes only `cwd`.
     const call = HOST.slice(HOST.indexOf('await this.ctx.sessionController.create({'))
     const block = call.slice(0, call.indexOf('})'))
-    expect(block).toContain('workspaceId:')
-    expect(block).not.toMatch(/^\s*cwd:/mu)
+    expect(block).toContain('cwd:')
+    expect(block).not.toContain('workspaceId:')
   })
 
   it('derives a per-room directory when the room named none', () => {
