@@ -1044,11 +1044,28 @@ const handleRoomRequest = async (
      * copies would then disagree about the room's history.
      */
     if (action === 'messages') {
-      const content = typeof payload?.['content'] === 'string' ? payload['content'] : ''
+      // Text or content blocks. Reading only the string case would turn a message that carries
+      // an image into an empty one, and the server would reject it as blank — which looks like
+      // the route being broken rather than the block list being dropped here.
+      const raw = payload?.['content']
+      const content = typeof raw === 'string'
+        ? raw
+        : Array.isArray(raw) ? raw as readonly ContentBlockLike[] : ''
       const rpcId = typeof payload?.['rpcId'] === 'string' && payload['rpcId'].length > 0
         ? payload['rpcId']
         : `web-${String(Date.now())}`
-      return backend.sendMessage(roomId, { content, rpcId })
+      // Structured mentions, forwarded as ids rather than parsed from the text: the room's
+      // reply policy turns on whether the sender mentioned *this* workspace's member, and a
+      // regex over the words would both miss display-name variants and match a name in prose.
+      const rawMentions = payload?.['mentions']
+      const mentions = Array.isArray(rawMentions)
+        ? rawMentions.filter((id): id is string => typeof id === 'string' && id.length > 0)
+        : undefined
+      return backend.sendMessage(roomId, {
+        content,
+        rpcId,
+        ...mentions === undefined || mentions.length === 0 ? {} : { mentions },
+      })
     }
     if (action === 'update') return backend.updateRoom(roomId, readPolicyPatch(payload))
     // Forwarded unchanged for the same reason as the invite: the server owns which member may
