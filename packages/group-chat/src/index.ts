@@ -42,7 +42,7 @@ import {
   resolveWorkspaceRoot,
   type ServerTarget,
 } from './identity.ts'
-import { shouldTriggerAgent, speakerPrefix, withSpeakerPrefix, type AgentTriggerPolicy } from './routing.ts'
+import { mentionedMemberIds, shouldTriggerAgent, speakerPrefix, textOfContent, withSpeakerPrefix, type AgentTriggerPolicy } from './routing.ts'
 import { openRoomStream } from './stream.ts'
 
 export const name = 'group-chat'
@@ -92,12 +92,14 @@ export {
 } from './identity.ts'
 export {
   isAgentReply,
+  mentionedMemberIds,
   mentionsOf,
   messageId,
   senderId,
   shouldTriggerAgent,
   type AgentTriggerPolicy,
   speakerPrefix,
+  textOfContent,
   withSpeakerPrefix,
 } from './routing.ts'
 
@@ -720,14 +722,20 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       // carries `source.roomId` (the poll path), and the backend de-duplicates on `rpcId`.
       if (!isLocalUserMessage(data)) return
       const messageId = (data as { id?: unknown }).id
+      // The member ids an `@显示名` in the text resolves to. The composer's own mention menu
+      // lists files and sessions, not the roster, so the roster is addressed in the text and
+      // resolved here — which is also where the room's members are already at hand.
+      const content = (data as { content: UserContent }).content
+      const mentions = mentionedMemberIds(textOfContent(content), runtimes.get(roomId)?.members ?? [])
       backend
         .sendMessage(roomId, {
           // The blocks travel unchanged: an attachment, an image, or an @ reference is in
           // them, and flattening to text here would silently drop everything but the words.
-          content: (data as { content: UserContent }).content,
+          content,
           rpcId: typeof messageId === 'string' && messageId.length > 0
             ? messageId
             : `local-${String(Date.now())}`,
+          ...mentions.length === 0 ? {} : { mentions },
         })
         .catch((error: unknown) => {
           log?.error?.('[group-chat] publishing the member message failed', roomId, error)

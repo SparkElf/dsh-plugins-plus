@@ -127,3 +127,63 @@ export const withSpeakerPrefix = (event: RoomEvent, prefix: string): RoomEvent =
   })
   return { ...event, data: { ...event.data, content: rewritten } }
 }
+
+/**
+ * Reads member ids out of an `@name` convention in the message text.
+ *
+ * The composer's own `@` menu offers files and sessions, not the room's roster, and the plugin
+ * cannot add a category to it. Rather than replace the composer, the roster is addressed the way
+ * people already write it: `@显示名`. The host half turns the names it can resolve into the
+ * structured `mentions` the room server stores, which is what the reply policy reads.
+ *
+ * Resolution is exact and longest-name-first. Longest first matters because `@张三丰` also
+ * contains `@张三`, and a shorter prefix would mention the wrong member. A name that matches
+ * nobody mentions nobody — guessing at a near match would let a typo summon the wrong agent.
+ *
+ * @param text - the message text, as typed.
+ * @param members - the room's roster.
+ * @returns member ids, in the order they appear, without duplicates.
+ */
+export const mentionedMemberIds = (
+  text: string,
+  members: readonly RoomMember[],
+): readonly string[] => {
+  if (text.length === 0 || members.length === 0) return []
+  // Longest first so a name that is a prefix of another cannot win by being checked earlier.
+  const ordered = [...members].sort((left, right) => right.displayName.length - left.displayName.length)
+  const placed: { at: number; userId: string }[] = []
+  const seen = new Set<string>()
+  // Spans already claimed by a longer name. Without this, `@张三丰` matches the longer member and
+  // *also* contains `@张三`, so the shorter one joins the list as a second mention of a person
+  // nobody addressed. Sorting longest-first only decides who matches first; it cannot stop the
+  // shorter name from finding its own substring inside the same characters.
+  const claimed: { start: number; end: number }[] = []
+  const overlaps = (start: number, end: number): boolean =>
+    claimed.some((span) => start < span.end && span.start < end)
+  for (const member of ordered) {
+    const name = member.displayName.trim()
+    if (name.length === 0) continue
+    const needle = `@${name}`
+    const at = text.indexOf(needle)
+    if (at < 0) continue
+    if (overlaps(at, at + needle.length)) continue
+    claimed.push({ start: at, end: at + needle.length })
+    if (seen.has(member.userId)) continue
+    seen.add(member.userId)
+    placed.push({ at, userId: member.userId })
+  }
+  // Reading order rather than roster order: the ids are stored beside the text, and a reader
+  // comparing the two expects them to line up.
+  return placed.sort((left, right) => left.at - right.at).map((entry) => entry.userId)
+}
+
+/** The plain text of a message's blocks, ignoring everything that is not text. */
+export const textOfContent = (content: unknown): string => {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block): block is { type?: unknown; text?: unknown } =>
+      typeof block === 'object' && block !== null)
+    .filter((block) => block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text as string)
+    .join('')
+}
