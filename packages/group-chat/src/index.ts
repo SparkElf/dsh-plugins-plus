@@ -26,10 +26,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
+import { randomUUID } from 'node:crypto'
 import type { Dirent } from 'node:fs'
-import { mkdir, open, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { BackendError, GroupChatBackend, type RoomEvent, type RoomMember, type RoomSummary } from './backend.ts'
 import type { GroupChatContext } from './context.ts'
 import {
@@ -871,7 +872,11 @@ const handleRoomRequest = async (
   if (filesMatch !== null && httpMethod === 'GET' && filesMatch[1] !== undefined) {
     const rooms = await backend.listRooms()
     const room = rooms.find((candidate) => candidate.id === decodeURIComponent(filesMatch[1]))
-    return listRoomFiles(decodeURIComponent(filesMatch[1]), room?.cwd)
+    return listRoomFiles(
+      decodeURIComponent(filesMatch[1]),
+      room?.cwd,
+      url.searchParams.get('path'),
+    )
   }
 
   // One file's contents. The path travels in the query rather than the route so a file
@@ -1202,6 +1207,10 @@ export interface SharedFile {
 export interface RoomFiles {
   /** The room's folder, or null when this deployment has no shared tree. */
   readonly path: string | null
+  /** Where this listing is, relative to the room folder. Empty at the top. */
+  readonly relativePath: string
+  /** One entry per level from the room folder down to here, for breadcrumbs. */
+  readonly crumbs: readonly { readonly name: string; readonly path: string }[]
   readonly files: readonly SharedFile[]
   /** Why the folder could not be read, when it could not. */
   readonly error?: string
@@ -1218,9 +1227,13 @@ export interface RoomFiles {
  * @param roomId - the room whose folder to read.
  * @returns the listing, or an empty one when no shared tree is configured.
  */
-const listRoomFiles = async (roomId: string, configured?: string | null): Promise<RoomFiles> => {
+const listRoomFiles = async (
+  roomId: string,
+  configured?: string | null,
+  subPath?: string | null,
+): Promise<RoomFiles> => {
   const root = sharedRootPath()
-  if (root === undefined) return { path: null, files: [] }
+  if (root === undefined) return { path: null, relativePath: '', crumbs: [], files: [] }
   // One segment only: this rejects `..`, separators, and anything that would leave the tree.
   if (!/^[A-Za-z0-9._-]+$/u.test(roomId) || roomId === '.' || roomId === '..') {
     throw new RouteRefusal('group-chat needs a plain room id to list its files', 400)
@@ -1230,9 +1243,25 @@ const listRoomFiles = async (roomId: string, configured?: string | null): Promis
   // its agent writes to. Everything else falls back to the per-room convention. The cwd is
   // only honoured when it resolves inside the tree, so it cannot be used to list elsewhere.
   const chosen = configured?.trim()
-  const requested = chosen === undefined || chosen.length === 0 ? join(root, roomId) : resolve(chosen)
-  const directory = withinRoot(resolve(root), requested) ? requested : join(root, roomId)
-  if (!withinRoot(root, directory)) throw new RouteRefusal('group-chat will not list outside the shared tree', 403)
+  const folder = chosen === undefined || chosen.length === 0 ? join(root, roomId) : resolve(chosen)
+  const roomFolder = withinRoot(resolve(root), folder) ? folder : join(root, roomId)
+  if (!withinRoot(root, roomFolder)) {
+    throw new RouteRefusal('group-chat will not list outside the shared tree', 403)
+  }
+  // A subfolder is resolved against the room's folder and re-checked, so `../..` in the
+  // browser's request cannot walk up out of the room even though the browser supplies it.
+  const trimmedSub = subPath?.trim() ?? ''
+  const directory = trimmedSub.length === 0 ? roomFolder : resolve(roomFolder, trimmedSub)
+  if (!withinRoot(roomFolder, directory)) {
+    throw new RouteRefusal('group-chat will not list outside the room folder', 403)
+  }
+
+  const relativePath = relative(roomFolder, directory).split(sep).join('/')
+  const crumbs: { name: string; path: string }[] = []
+  for (let index = 1; index <= (relativePath === '' ? 0 : relativePath.split('/').length); index += 1) {
+    const slice = relativePath.split('/').slice(0, index).join('/')
+    crumbs.push({ name: slice.split('/').at(-1) ?? slice, path: slice })
+  }
 
   let dirents: Dirent[]
   try {
@@ -1241,7 +1270,13 @@ const listRoomFiles = async (roomId: string, configured?: string | null): Promis
     // A room whose folder does not exist yet is not an error: the folder appears on the
     // first upload or the first thing the agent writes. Report it as empty instead.
     const missing = (error as { code?: string }).code === 'ENOENT'
-    return { path: directory, files: [], ...missing ? {} : { error: 'unreadable' } }
+    return {
+      path: directory,
+      relativePath,
+      crumbs,
+      files: [],
+      ...missing ? {} : { error: 'unreadable' },
+    }
   }
 
   const files: SharedFile[] = []
@@ -1261,7 +1296,7 @@ const listRoomFiles = async (roomId: string, configured?: string | null): Promis
     if (left.directory !== right.directory) return left.directory ? -1 : 1
     return left.name.localeCompare(right.name)
   })
-  return { path: directory, files }
+  return { path: directory, relativePath, crumbs, files }
 }
 
 /** True when `target` is `root` itself or sits underneath it. */
@@ -1335,7 +1370,29 @@ export interface SharedFileText {
   readonly truncated: boolean
   /** False for a binary file, so the preview says so instead of showing mojibake. */
   readonly textLike: boolean
+  /**
+   * Data URL for an image the panel can draw inline, when the file is a supported image.
+   *
+   * Inline bytes rather than a URL to fetch: the browser cannot reach this folder on its own
+   * (it is a container path), and a second authenticated route for one `<img>` would be more
+   * surface than the picture is worth. Images are capped far below the text preview limit —
+   * a 256 KB data URL is already a large DOM attribute.
+   */
+  readonly image?: string
 }
+
+/** Images the panel draws inline. Anything else is reported as a binary file. */
+const INLINE_IMAGE_TYPES: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+}
+
+/** Larger images are reported as files rather than inlined: a data URL this big stalls the panel. */
+const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024
 
 /** How much of a file the preview reads. A shared folder holds reports, not datasets. */
 const MAX_PREVIEW_BYTES = 256 * 1024
@@ -1389,6 +1446,26 @@ const readRoomFile = async (
     const length = Math.min(info.size, MAX_PREVIEW_BYTES)
     const buffer = Buffer.alloc(length)
     await handle.read(buffer, 0, length, 0)
+    // An image is recognised by extension, not content sniffing: the panel only needs to know
+    // whether it can draw the bytes, and a wrong guess there costs a broken `<img>` while a
+    // wrong guess here costs the same. The whole file is read only when it is small enough to
+    // inline, so a large image is reported as a file without being buffered.
+    const extension = basename(realTarget).toLowerCase().slice(basename(realTarget).lastIndexOf('.'))
+    const imageType = INLINE_IMAGE_TYPES[extension]
+    if (imageType !== undefined && info.size <= MAX_INLINE_IMAGE_BYTES) {
+      const whole = info.size <= length
+        ? buffer.subarray(0, info.size)
+        : await readFile(realTarget)
+      return {
+        path: relativePath,
+        name: basename(relativePath),
+        text: '',
+        truncated: false,
+        textLike: false,
+        image: `data:${imageType};base64,${whole.toString('base64')}`,
+      }
+    }
+
     // NUL bytes in the first chunk are the cheap, reliable "this is not text" signal; a
     // stricter test would need a charset detector to say the same thing less clearly.
     const textLike = !buffer.includes(0)
@@ -1456,7 +1533,21 @@ const writeRoomFile = async (
   // The folder appears on first write. `recursive` keeps a room usable before anyone has put
   // anything in it, which is the normal state of a new room.
   await mkdir(folder, { recursive: true })
-  await writeFile(target, bytes)
+  // Written to a sibling temp file and renamed into place. `rename` is atomic within one
+  // filesystem, so a reader never sees a half-written file — which matters on the NAS mount:
+  // two members uploading the same name, or the room's agent reading while one uploads, would
+  // otherwise be able to observe a truncated document. A direct `writeFile` also leaves the
+  // previous version destroyed the moment the upload fails midway.
+  const temp = join(folder, `.upload-${String(process.pid)}-${randomUUID()}`)
+  try {
+    await writeFile(temp, bytes)
+    await rename(temp, target)
+  } catch (error) {
+    // A failed upload must not leave debris in the shared folder: the temp name is hidden
+    // from listings (leading dot) but it is still bytes on the NAS.
+    await rm(temp, { force: true }).catch(() => undefined)
+    throw error
+  }
   const info = await stat(target)
   return { path: leaf, name: leaf, size: info.size }
 }

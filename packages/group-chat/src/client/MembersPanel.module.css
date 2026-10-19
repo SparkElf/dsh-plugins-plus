@@ -281,6 +281,47 @@
   display: none;
 }
 
+/* Breadcrumbs: the trail is the way back up, so it sits above the list rather than being a
+   separate toolbar row — a member who went one level too deep looks up, not down. */
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.crumbGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.crumb {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.crumb:hover {
+  color: var(--dsw-alias-label-primary);
+  text-decoration: underline;
+}
+
+.crumbSep {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
 .refresh {
   margin-inline-start: auto;
   padding: 0 4px;
@@ -340,6 +381,16 @@
 
 .previewClose:hover {
   color: var(--dsw-alias-label-primary);
+}
+
+/* Drawn at its natural width up to the panel's width: a screenshot is more useful at full
+   size than cropped to a thumbnail, and the panel is the constraint anyway. */
+.previewImage {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--dsw-alias-border-radius-s);
+  background: var(--dsw-alias-bg-base);
 }
 
 .previewBody {

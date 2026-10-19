@@ -304,19 +304,23 @@ function SharedFiles(props: { t: (key: GroupChatKey) => string; roomId: string }
   const [uploading, setUploading] = useState(false)
   const [uploadFailure, setUploadFailure] = useState<string | undefined>(undefined)
   const [reloadKey, setReloadKey] = useState(0)
+  const [subPath, setSubPath] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     let live = true
-    void listRoomFiles(roomId)
+    void listRoomFiles(roomId, subPath)
       .then((next) => { if (live) setState(next) })
       // A failed read is not an empty folder: showing "no files" would misreport a broken
       // mount as an empty one, so the section says so plainly instead.
       .catch(() => { if (live) setState({ path: null, files: [] }) })
     return () => { live = false }
-  }, [roomId, reloadKey])
+  }, [roomId, reloadKey, subPath])
 
   if (state === undefined) return null
+  // Breadcrumbs come from the server rather than being rebuilt here: it already resolved the
+  // path, and a second resolver would disagree with it the first time either changed.
+  const crumbs = state.crumbs ?? []
   // No shared tree on this deployment: the section would only ever say "unavailable", which
   // is noise for a member who never had the feature.
   if (state.path === null) return null
@@ -385,6 +389,25 @@ function SharedFiles(props: { t: (key: GroupChatKey) => string; roomId: string }
         </>
       )}
     >
+      {crumbs.length > 0 && (
+        <nav className={styles['crumbs']} aria-label={t('membersFilesTitle')}>
+          <button type="button" className={styles['crumb']} onClick={() => { setSubPath('') }}>
+            {t('membersFilesRoot')}
+          </button>
+          {crumbs.map((crumb) => (
+            <span key={crumb.path} className={styles['crumbGroup']}>
+              <span className={styles['crumbSep']} aria-hidden="true">/</span>
+              <button
+                type="button"
+                className={styles['crumb']}
+                onClick={() => { setSubPath(crumb.path) }}
+              >
+                {crumb.name}
+              </button>
+            </span>
+          ))}
+        </nav>
+      )}
       {state.files.length === 0 ? (
         <p className={styles['hint']}>{t('membersFilesEmpty')}</p>
       ) : (
@@ -392,15 +415,20 @@ function SharedFiles(props: { t: (key: GroupChatKey) => string; roomId: string }
           {state.files.map((file) => (
             <li key={file.path} className={styles['row']}>
               {file.directory ? (
-                <>
+                <button
+                  type="button"
+                  className={styles['fileButton']}
+                  onClick={() => { setSubPath(joinPath(subPath, file.path)) }}
+                  title={file.path}
+                >
                   <span className={styles['fileIcon']} aria-hidden="true">{'\u{1F4C1}'}</span>
-                  <span className={styles['name']} title={file.path}>{file.name}</span>
-                </>
+                  <span className={styles['name']}>{file.name}</span>
+                </button>
               ) : (
                 <button
                   type="button"
                   className={styles['fileButton']}
-                  onClick={() => { openPreview(file.path) }}
+                  onClick={() => { openPreview(joinPath(subPath, file.path)) }}
                   title={file.path}
                 >
                   <span className={styles['fileIcon']} aria-hidden="true">{'\u{1F4C4}'}</span>
@@ -427,7 +455,9 @@ function SharedFiles(props: { t: (key: GroupChatKey) => string; roomId: string }
               {'\u00D7'}
             </button>
           </div>
-          {preview.textLike ? (
+          {preview.image !== undefined ? (
+            <img className={styles['previewImage']} src={preview.image} alt={preview.name} />
+          ) : preview.textLike ? (
             <>
               <pre className={styles['previewBody']}>{preview.text}</pre>
               {preview.truncated && <p className={styles['hint']}>{t('membersFileTruncated')}</p>}
@@ -440,6 +470,10 @@ function SharedFiles(props: { t: (key: GroupChatKey) => string; roomId: string }
     </CollapsibleSection>
   )
 }
+
+/** Joins a folder-relative path onto the folder currently shown. */
+const joinPath = (prefix: string, name: string): string =>
+  prefix === '' ? name : `${prefix}/${name}`
 
 /** Bytes as a short human string; the panel has one column, not a table. */
 const formatBytes = (bytes: number): string => {

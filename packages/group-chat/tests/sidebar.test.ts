@@ -230,6 +230,20 @@ describe('room context menu follows the settled entry set', () => {
     expect((panel.match(/<CollapsibleSection/gu) ?? []).length).toBeGreaterThanOrEqual(3)
   })
 
+  it('lets a member walk into a subfolder and back out', () => {
+    // A room that organises its files into folders was previously a dead end: the directory
+    // row rendered as a plain line with no way in, so everything below the first level was
+    // invisible from the panel.
+    const panel = readFileSync(new URL('../src/client/MembersPanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toContain('subPath')
+    expect(panel).toContain('crumbs')
+    expect(panel).toContain('joinPath')
+    // The path travels to the server, which resolves and re-checks it against the room folder;
+    // the browser never assembles an absolute path of its own.
+    const api = readFileSync(new URL('../src/client/api.ts', import.meta.url), 'utf8')
+    expect(api).toMatch(/listRoomFiles = \(roomId: string, path\?: string\)/u)
+  })
+
   it('uploads into the room folder through a hidden file input', () => {
     // The native dialog is the only picker that hands back a File without a second permission
     // step, and the input must stay hidden: a visible one would be a duplicate control next to

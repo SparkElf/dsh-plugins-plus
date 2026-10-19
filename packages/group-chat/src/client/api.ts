@@ -337,6 +337,10 @@ export interface SharedFile {
 /** The shared folder of one room. */
 export interface RoomFiles {
   readonly path: string | null
+  /** Where this listing is, relative to the room folder. Empty at the top. */
+  readonly relativePath?: string
+  /** One entry per level from the room folder down to here. */
+  readonly crumbs?: readonly { readonly name: string; readonly path: string }[]
   readonly files: readonly SharedFile[]
 }
 
@@ -346,8 +350,10 @@ export interface RoomFiles {
  * An empty `path` means this deployment has no shared tree, which the panel renders as
  * "not available" rather than as an empty folder — the two read differently to a member.
  */
-export const listRoomFiles = (roomId: string): Promise<RoomFiles> =>
-  call(`/rooms/${encodeURIComponent(roomId)}/files`)
+export const listRoomFiles = (roomId: string, path?: string): Promise<RoomFiles> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/files${
+    path === undefined || path.length === 0 ? '' : `?path=${encodeURIComponent(path)}`
+  }`)
 
 /** One shared file's text, as the preview shows it. */
 export interface SharedFileText {
@@ -356,6 +362,8 @@ export interface SharedFileText {
   readonly text: string
   readonly truncated: boolean
   readonly textLike: boolean
+  /** Data URL when the file is an image the panel can draw inline. */
+  readonly image?: string
 }
 
 /** Read one file out of a room's shared folder. */
