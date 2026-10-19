@@ -163,18 +163,21 @@ export const resolveRoomDirectory = (
 ): string => {
   const chosen = nonEmpty(configured ?? undefined)
   if (chosen !== undefined) return chosen
-  // The member's own workspace. A room that wants the shared tree reaches it through the
-  // symlink at the workspace root; it does not abandon its own tree to get it.
-  const workspace = nonEmpty(env[MANAGED_ENV.mountPath])
-  if (workspace !== undefined) return workspace
-  // No workspace mount (an unmanaged run): fall back to the per-room directory so a room
-  // still gets a scope of its own rather than the process cwd.
-  const sharedRoot = nonEmpty(env[MANAGED_ENV.sharedRoot])
-  if (sharedRoot !== undefined) return join(sharedRoot, roomId)
-  // A per-room directory under DSH's own home. `join` is used rather than a hardcoded
-  // separator so the derivation stays correct wherever this runs, and the home falls back
-  // to the conventional location the managed launcher sets so an unmanaged run still has a
-  // stable place to put the directories.
+  // A directory per room, under this workspace's own DSH home.
+  //
+  // Not the workspace root itself: several rooms would then share one cwd, and the sessions
+  // collide — the room opens, the message is written to its journal, and the agent never
+  // runs a turn. A room whose cwd equals another live session's cwd is not a room any more,
+  // it is a second name for the same place.
+  //
+  // Not a directory inside the shared tree either: the room's own files and the shared ones
+  // would interleave, and pointing the cwd there made a relative path like `kb/x.md` resolve
+  // against the shared tree instead of the member's workspace. The shared tree is reached
+  // through the `group-shared` symlink instead, so a room adds a place to look without
+  // moving the place every other path is measured from.
+  // `join` rather than a hardcoded separator so the derivation stays correct wherever this
+  // runs; the home falls back to the conventional location the managed launcher sets, so an
+  // unmanaged run still has a stable place to put the directories.
   const home = nonEmpty(env[MANAGED_ENV.home]) ?? '/workspace/.dataops/dsh'
   return join(home, ROOMS_DIRECTORY, roomId)
 }

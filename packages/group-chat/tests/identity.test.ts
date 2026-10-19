@@ -85,28 +85,44 @@ describe('resolveWorkspaceRoot', () => {
 })
 
 describe('resolveRoomDirectory', () => {
-  it('房间会话在自己的工作区里跑，不在共享目录里', () => {
+  it('每个房间有自己的目录，不与别的房间共用一个 cwd', () => {
+    // 共用 cwd 会让两个房间的会话撞在一起：房间打开了、消息也写进了 journal，
+    // 但 agent 的 turn 永远不跑（实测：cwd 都回退到 /workspace 之后，
+    // agentTrigger=always 的房间也收不到任何回复）。
+    const first = resolveRoomDirectory('room-1', null, {
+      [MANAGED_ENV.mountPath]: '/workspace',
+      [MANAGED_ENV.sharedRoot]: '/group-chat-data',
+      [MANAGED_ENV.home]: '/workspace/.dataops/dsh',
+    })
+    const second = resolveRoomDirectory('room-2', null, {
+      [MANAGED_ENV.mountPath]: '/workspace',
+      [MANAGED_ENV.sharedRoot]: '/group-chat-data',
+      [MANAGED_ENV.home]: '/workspace/.dataops/dsh',
+    })
+    expect(first).not.toBe(second)
+    expect(first).toBe('/workspace/.dataops/dsh/group-chat/rooms/room-1')
+  })
+
+  it('房间目录不在共享目录里', () => {
     // 共享目录是「多一个地方可看」，不是「所有路径的度量原点」。
     // 指到共享目录会让 kb/x.md 这类已有路径解析失败（实测 ENOENT）。
-    expect(resolveRoomDirectory('room-1', null, {
+    const directory = resolveRoomDirectory('room-1', null, {
       [MANAGED_ENV.mountPath]: '/workspace',
       [MANAGED_ENV.sharedRoot]: '/group-chat-data',
-    })).toBe('/workspace')
-  })
-
-  it('共享目录在场时也不改变房间的 cwd', () => {
-    const withShared = resolveRoomDirectory('room-1', null, {
-      [MANAGED_ENV.mountPath]: '/workspace',
-      [MANAGED_ENV.sharedRoot]: '/group-chat-data',
+      [MANAGED_ENV.home]: '/workspace/.dataops/dsh',
     })
-    expect(withShared).toBe('/workspace')
-    expect(withShared).not.toContain('group-chat-data')
+    expect(directory).not.toContain('group-chat-data')
+    expect(directory.startsWith('/workspace/')).toBe(true)
   })
 
-  it('没有工作区挂载时回退到共享根下的 per-room 目录', () => {
+  it('没有工作区挂载时仍然给每个房间一个独立目录', () => {
+    // 缺 mountPath 不等于要把房间放进共享盘：共享盘的目录是「大家都能看的文件」，
+    // 房间自己的 cwd 是「agent 在这里干活的地方」，两者合一会让房间的临时产物混进
+    // 共享树。
     expect(resolveRoomDirectory('room-1', null, {
       [MANAGED_ENV.sharedRoot]: '/group-chat-data',
-    })).toBe('/group-chat-data/room-1')
+      [MANAGED_ENV.home]: '/dsh-home',
+    })).toBe('/dsh-home/group-chat/rooms/room-1')
   })
 
   it('两者都没有时回退到 DSH home 下的 per-room 目录', () => {
