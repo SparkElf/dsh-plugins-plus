@@ -144,6 +144,12 @@ const DEFAULT_TIMEOUT_MS = 15_000
 export type CredentialResolver = () => Promise<string | undefined>
 
 /** Thin typed wrapper over the group-chat server protocol. */
+/** One content block on the wire: `type` plus whatever that type carries. */
+export interface ContentBlockLike {
+  readonly type: string
+  readonly [key: string]: unknown
+}
+
 export class GroupChatBackend {
   private readonly timeoutMs: number
   private readonly fetchImpl: typeof fetch
@@ -341,7 +347,18 @@ export class GroupChatBackend {
    */
   async sendMessage(
     roomId: string,
-    input: { readonly content: string; readonly rpcId: string; readonly mentions?: readonly string[] },
+    input: {
+      /**
+       * The message's content blocks, or plain text.
+       *
+       * Blocks rather than a string because a member's message can carry an image or an
+       * attachment, and flattening it here would drop them before the server ever saw them.
+       * A plain string stays accepted for the callers that only ever send words.
+       */
+      readonly content: string | readonly ContentBlockLike[]
+      readonly rpcId: string
+      readonly mentions?: readonly string[]
+    },
     signal?: AbortSignal,
   ): Promise<{ readonly id: string; readonly event: RoomEvent; readonly deduplicated: boolean }> {
     return this.request('POST', `/api/ai/chat/rooms/${encodeURIComponent(roomId)}/messages`, input, signal)

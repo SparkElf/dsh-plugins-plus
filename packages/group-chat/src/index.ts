@@ -31,7 +31,7 @@ import type { Dirent } from 'node:fs'
 import { mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { BackendError, GroupChatBackend, type RoomEvent, type RoomMember, type RoomSummary } from './backend.ts'
+import { BackendError, GroupChatBackend, type ContentBlockLike, type RoomEvent, type RoomMember, type RoomSummary } from './backend.ts'
 import type { GroupChatContext } from './context.ts'
 import {
   DEFAULT_CREDENTIAL_REF,
@@ -344,6 +344,58 @@ class RoomSessions {
  * @param message - the assistant message as the session carries it.
  * @returns the same message with only its text blocks.
  */
+/**
+ * One content block as the room server stores it.
+ *
+ * Deliberately structural rather than imported from the LLM package: this is the wire shape
+ * of a room event, and the plugin is not the owner of the block vocabulary — a block type a
+ * future DSH release adds must travel through unchanged instead of failing a closed type.
+ */
+export type UserContent = readonly ContentBlockLike[]
+
+/** True when `data` looks like a `user/message` payload this workspace composed itself. */
+/**
+ * True when a `user/message` carries runtime bookkeeping rather than something a member typed.
+ *
+ * These arrive on the same channel with the same shape, so they have to be told apart by what
+ * they say: every one of them is a wrapper the shell injects, either a `<system-reminder>`
+ * block or a snapshot opening with one of the known prefixes. Matching on the text is
+ * imperfect in principle — a member could type the same words — but the alternative is
+ * publishing the deployment's instructions into every room, which is far worse.
+ */
+const RUNTIME_INJECTED_PREFIXES = [
+  '<system-reminder>',
+  'Current runtime context',
+  'Time sampled while preparing',
+] as const
+
+export const isRuntimeInjectedData = (data: unknown): boolean => {
+  if (typeof data !== 'object' || data === null) return false
+  const content = (data as Record<string, unknown>)['content']
+  if (!Array.isArray(content)) return false
+  const text = content
+    .filter((block): block is { type?: unknown; text?: unknown } =>
+      typeof block === 'object' && block !== null)
+    .filter((block) => block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text as string)
+    .join('')
+    .trimStart()
+  return RUNTIME_INJECTED_PREFIXES.some((prefix) => text.startsWith(prefix))
+}
+
+export const isLocalUserMessage = (data: unknown): data is { id?: string; content: UserContent } => {
+  if (typeof data !== 'object' || data === null) return false
+  const record = data as Record<string, unknown>
+  const content = record['content']
+  if (!Array.isArray(content) || content.length === 0) return false
+  const source = record['source']
+  if (typeof source !== 'object' || source === null) return true
+  // A message the room poll delivered is stamped with the room it came from. Publishing it
+  // again would duplicate every line: once from the poll, once from this echo.
+  const fromRoom = (source as Record<string, unknown>)['roomId']
+  return fromRoom === undefined || fromRoom === null
+}
+
 export const publishableReply = (message: unknown): unknown => {
   if (typeof message !== 'object' || message === null) return message
   const record = message as Record<string, unknown>
@@ -653,6 +705,35 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
   const onSessionEvent = (session: Session, event: SessionEvent): void => {
     const roomId = roomIdOfSession(session)
     if (roomId === undefined) return
+    if (event.type === 'user/message') {
+      // Only what the member actually typed is published. The runtime delivers its own
+      // bookkeeping as `user/message` too — workspace instructions, reminders, the state
+      // snapshot — and forwarding those would put the deployment's plumbing into a room
+      // everyone can read.
+      const data = (event as { data?: unknown }).data
+      if (isRuntimeInjectedData(data)) return
+      // A message this workspace's own member typed. It must be published to the room, or the
+      // member sees their own words and nobody else ever does — the room would be a private
+      // chat with the agent that happens to show other people's replies.
+      //
+      // Two things keep this from echoing: an event that arrived *from* the room already
+      // carries `source.roomId` (the poll path), and the backend de-duplicates on `rpcId`.
+      if (!isLocalUserMessage(data)) return
+      const messageId = (data as { id?: unknown }).id
+      backend
+        .sendMessage(roomId, {
+          // The blocks travel unchanged: an attachment, an image, or an @ reference is in
+          // them, and flattening to text here would silently drop everything but the words.
+          content: (data as { content: UserContent }).content,
+          rpcId: typeof messageId === 'string' && messageId.length > 0
+            ? messageId
+            : `local-${String(Date.now())}`,
+        })
+        .catch((error: unknown) => {
+          log?.error?.('[group-chat] publishing the member message failed', roomId, error)
+        })
+      return
+    }
     if (event.type === 'assistant/message') {
       // DSH wraps an assistant message as `data.message` (a user message is `data`
       // itself), so the reply is published as that inner message and the backend
