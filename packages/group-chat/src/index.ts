@@ -39,6 +39,7 @@ import {
   ROOM_SHARED_LINK,
   resolveRoomDirectory,
   resolveServerTarget,
+  resolvePreferencesPath,
   resolveWorkspaceRoot,
   type ServerTarget,
 } from './identity.ts'
@@ -362,6 +363,84 @@ class RoomSessions {
  * of a room event, and the plugin is not the owner of the block vocabulary — a block type a
  * future DSH release adds must travel through unchanged instead of failing a closed type.
  */
+/**
+ * The group-chat UI preferences this workspace remembers for its user.
+ *
+ * Deliberately a small open record: it is a file the user's own workspace owns, so an older
+ * build must be able to read a file a newer one wrote. Unknown keys are dropped on read and
+ * preserved nowhere, which is fine — every key here describes a panel the current build draws.
+ */
+export interface GroupChatPreferences {
+  /**
+   * Height of the sidebar's group-chat region, in pixels.
+   *
+   * Pixels rather than a fraction of the window: what the user tuned is "about four rooms
+   * visible", and a ratio would drift to a different number of rows whenever the window
+   * changed height.
+   */
+  readonly sidebarHeightPx?: number
+}
+
+/** The height bounds the region enforces, exported so the client and host agree on them. */
+export const SIDEBAR_HEIGHT_MIN = 120
+export const SIDEBAR_HEIGHT_MAX = 1200
+
+/** Reads the preferences file, treating every failure as "nothing saved yet". */
+export const readPreferences = async (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<GroupChatPreferences> => {
+  let raw: string
+  try {
+    raw = await readFile(resolvePreferencesPath(env), 'utf8')
+  } catch {
+    // Missing is the normal state of a workspace nobody has dragged in yet; so is unreadable.
+    // Neither is worth reporting: the defaults are the answer either way.
+    return {}
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const height = (parsed as { sidebarHeightPx?: unknown }).sidebarHeightPx
+    return typeof height === 'number' && Number.isFinite(height)
+      ? { sidebarHeightPx: clampSidebarHeight(height) }
+      : {}
+  } catch {
+    // A corrupt file is replaced on the first save rather than reported: it holds one number.
+    return {}
+  }
+}
+
+/** Clamps a requested height into the range the region can actually draw. */
+export const clampSidebarHeight = (value: number): number =>
+  Math.min(SIDEBAR_HEIGHT_MAX, Math.max(SIDEBAR_HEIGHT_MIN, Math.round(value)))
+
+/**
+ * Writes the preferences file atomically.
+ *
+ * Temp file plus rename, like the room uploads: a reader must never see half a JSON document,
+ * and the file lives in the workspace volume where a crash mid-write would otherwise leave a
+ * truncated one that reads as "no preferences".
+ */
+export const writePreferences = async (
+  preferences: GroupChatPreferences,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<GroupChatPreferences> => {
+  const path = resolvePreferencesPath(env)
+  const normalised: GroupChatPreferences = preferences.sidebarHeightPx === undefined
+    ? {}
+    : { sidebarHeightPx: clampSidebarHeight(preferences.sidebarHeightPx) }
+  await mkdir(dirname(path), { recursive: true })
+  const temp = `${path}.${String(process.pid)}.tmp`
+  try {
+    await writeFile(temp, `${JSON.stringify(normalised, null, 2)}\n`, 'utf8')
+    await rename(temp, path)
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => undefined)
+    throw error
+  }
+  return normalised
+}
+
 export type UserContent = readonly ContentBlockLike[]
 
 /** True when `data` looks like a `user/message` payload this workspace composed itself. */
@@ -989,6 +1068,27 @@ const handleRoomRequest = async (
   // Who this workspace acts as, for the one client-side decision that needs it: which
   // messages are the operator's own. Read from the same account the Host already resolves
   // for routing, so the browser and the trigger rule cannot disagree about identity.
+  // This workspace's own UI preferences. Served here rather than through the room server
+  // because the file lives in this workspace's volume, which is what makes it survive a
+  // re-login; the room server has no access to that volume.
+  if (resource === 'preferences') {
+    if (httpMethod === 'GET') return readPreferences()
+    if (httpMethod === 'PATCH' || httpMethod === 'POST') {
+      const height = payload?.['sidebarHeightPx']
+      if (height !== undefined && (typeof height !== 'number' || !Number.isFinite(height))) {
+        throw new RouteRefusal('sidebarHeightPx must be a finite number', 400)
+      }
+      // A patch that names no field returns what is stored rather than writing an empty file,
+      // so a client that re-sends its current state cannot clear the other fields by omission.
+      const current = await readPreferences()
+      return writePreferences({
+        ...current,
+        ...height === undefined ? {} : { sidebarHeightPx: height },
+      })
+    }
+    throw new RouteRefusal('preferences accepts GET and PATCH', 405)
+  }
+
   if (resource === 'me' && httpMethod === 'GET') {
     const me = await backend.whoami()
     return {

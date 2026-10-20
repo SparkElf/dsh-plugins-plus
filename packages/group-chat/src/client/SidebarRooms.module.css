@@ -27,8 +27,11 @@
   min-width: 0;
   width: 100%;
   /* `footArea` does not shrink, so without a cap a long room list would grow until it
-     crowded the workspace region above it. */
+     crowded the workspace region above it. This is the height for a user who has never
+     dragged the grip; once they have, an inline style replaces both the height and this cap. */
   max-height: 46vh;
+  /* The grip is positioned against this box. */
+  position: relative;
   /* No padding-right, where the workspace region's own root carries one. That root is
      handed `regionArea`, which the shell widens 12px past the sidebar's content edge; this
      region's seat (`footerActions`) already ends at that edge, because the shell applies
@@ -36,6 +39,50 @@
      what pulled this region's rows and header actions 12px left of the workspace's.
      `.list` re-applies the inset from the outside instead, so both regions resolve their
      rows to the same edge. */
+}
+
+/* ── resize grip on the top edge ───────────────────────────────────────────────── */
+
+/* Invisible until the region is hovered or the grip itself is focused: a permanent bar would
+   cost a row of list height to advertise a control most readers never use. The hit area is
+   taller than the visible line so it can be grabbed without precision. */
+.resizer {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 1;
+  cursor: row-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.resizer::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 8px;
+  right: 8px;
+  height: 1px;
+  border-radius: 1px;
+  background: var(--dsw-alias-border-l1, var(--dsw-alias-separator-primary));
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.root:hover .resizer::after,
+.resizer:focus-visible::after {
+  opacity: 1;
+}
+
+.resizer:focus-visible {
+  outline: none;
+}
+
+.resizer:focus-visible::after {
+  background: var(--dsw-alias-brand-primary, var(--dsw-alias-label-primary));
+  height: 2px;
 }
 
 /* ── header: copied from the workspace section header ─────────────────────────── */

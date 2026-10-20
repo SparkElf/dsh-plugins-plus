@@ -335,6 +335,34 @@ export interface SharedFile {
 }
 
 /** The shared folder of one room. */
+/**
+ * The group-chat UI preferences this workspace remembers.
+ *
+ * Read from and written to a file in this workspace's own volume, so they follow the user
+ * across re-logins and browsers rather than living in one browser's storage.
+ */
+export interface GroupChatPreferences {
+  /** Height of the sidebar's group-chat region, in pixels. */
+  readonly sidebarHeightPx?: number
+}
+
+/** Reads the stored preferences. Never fails: an unreadable file reads as "nothing saved". */
+export const readPreferences = async (): Promise<GroupChatPreferences> => {
+  try {
+    return await call<GroupChatPreferences>('/preferences')
+  } catch {
+    // The panel's height is not worth surfacing an error for; the default is a fine answer.
+    return {}
+  }
+}
+
+/** Stores the preferences and returns what the host settled on, clamped. */
+export const savePreferences = (patch: GroupChatPreferences): Promise<GroupChatPreferences> =>
+  call<GroupChatPreferences>('/preferences', {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  })
+
 export interface RoomFiles {
   readonly path: string | null
   /** Where this listing is, relative to the room folder. Empty at the top. */

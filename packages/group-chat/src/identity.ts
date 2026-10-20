@@ -49,6 +49,31 @@ export const ROOMS_DIRECTORY = 'group-chat/rooms'
  */
 export const ROOM_SHARED_LINK = 'group-shared'
 
+/** Where this workspace keeps its group-chat UI preferences. */
+export const PREFERENCES_FILE = 'group-chat/preferences.json'
+
+/**
+ * The file backing a user's group-chat UI preferences, under the workspace's own DSH home.
+ *
+ * A file in the workspace volume rather than a database column: the volume is already
+ * per-user and already survives re-login, so "the same person sees the same layout" comes for
+ * free, and the backend does not need a migration for a number that describes one panel's
+ * height. It sits beside `schedule.json` and `workspace.json`, which are the same kind of
+ * state.
+ */
+export const resolvePreferencesPath = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string => join(homeDirectory(env), PREFERENCES_FILE)
+
+/**
+ * The workspace's DSH home, from the environment the managed launcher sets.
+ * @param env - environment bag; defaults to `process.env`.
+ * @returns an absolute directory path, which the caller must create before use.
+ */
+export const homeDirectory = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string => nonEmpty(env[MANAGED_ENV.home]) ?? '/workspace/.dataops/dsh'
+
 /**
  * How this plugin authenticates.
  *
@@ -178,6 +203,5 @@ export const resolveRoomDirectory = (
   // `join` rather than a hardcoded separator so the derivation stays correct wherever this
   // runs; the home falls back to the conventional location the managed launcher sets, so an
   // unmanaged run still has a stable place to put the directories.
-  const home = nonEmpty(env[MANAGED_ENV.home]) ?? '/workspace/.dataops/dsh'
-  return join(home, ROOMS_DIRECTORY, roomId)
+  return join(homeDirectory(env), ROOMS_DIRECTORY, roomId)
 }

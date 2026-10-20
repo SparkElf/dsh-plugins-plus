@@ -29,7 +29,7 @@ import {
   Modal,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { createRoom, updateRoom, type RoomSummary } from './api.ts'
+import { createRoom, readPreferences, savePreferences, updateRoom, type RoomSummary } from './api.ts'
 import { CreateRoomDialog } from './CreateRoomDialog.tsx'
 import { RoomDialogs } from './RoomDialogs.tsx'
 import { joinableRooms } from './rows.ts'
@@ -46,6 +46,21 @@ export interface SidebarRoomsInjected {
   /** The list both sidebar and page read, owned by the Client entry. */
   readonly store: RoomStore
 }
+
+/**
+ * Height bounds for the region, in pixels.
+ *
+ * The floor keeps a room row and the header visible; the ceiling keeps the region from
+ * crowding out the workspace list above it, which is the same reason the stylesheet capped it
+ * at `46vh` before this was adjustable. The host clamps to the same pair, so a stored value
+ * cannot arrive outside the range the region can draw.
+ */
+const HEIGHT_MIN = 120
+const HEIGHT_MAX = 1200
+
+/** Clamps a requested height into the range the region can draw. */
+const clampHeight = (value: number): number =>
+  Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, Math.round(value)))
 
 /** How often the list re-reads, so a peer's new room appears without a reload. */
 const REFRESH_MS = 10_000
@@ -72,12 +87,74 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
   const [archivedFilter, setArchivedFilter] = useState<ArchivedFilter>('default')
   const [joining, setJoining] = useState<string | undefined>(undefined)
   const searchInput = useRef<HTMLInputElement | null>(null)
+  /**
+   * Height of this region, in pixels, once the user has dragged it.
+   *
+   * `undefined` until either the saved value arrives or a drag happens: the region then keeps
+   * the stylesheet's `max-height` and shrinks to its content, which is what every workspace
+   * looked like before this existed. Storing a number here switches it to a fixed height.
+   */
+  const [heightPx, setHeightPx] = useState<number | undefined>(undefined)
+  /** The height being dragged to; `undefined` when no drag is in progress. */
+  const [draggingPx, setDraggingPx] = useState<number | undefined>(undefined)
+  const dragStart = useRef<{ y: number; height: number } | null>(null)
 
   useEffect(() => { void store.refresh() }, [store])
+
+  // The saved height belongs to the user, not to this browser: it lives in the workspace's own
+  // volume so signing in from another machine restores the same layout.
+  useEffect(() => {
+    let live = true
+    void readPreferences().then((saved) => {
+      if (!live || saved.sidebarHeightPx === undefined) return
+      setHeightPx(saved.sidebarHeightPx)
+    })
+    return () => { live = false }
+  }, [])
   useEffect(() => {
     const timer = setInterval(() => { void store.refresh() }, REFRESH_MS)
     return () => clearInterval(timer)
   }, [store])
+
+  /**
+   * Start a height drag from the grip on the region's top edge.
+   *
+   * The delta is inverted because the grip sits above the region: dragging up (a smaller `y`)
+   * makes the region taller, which is the same direction the right sidebar's grip works in.
+   * Listeners go on the document so the pointer may leave the 4px grip — and the window —
+   * without dropping the drag halfway.
+   */
+  const beginResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    const section = event.currentTarget.parentElement
+    if (section === null) return
+    dragStart.current = { y: event.clientY, height: section.getBoundingClientRect().height }
+    setDraggingPx(dragStart.current.height)
+
+    const onMove = (move: PointerEvent): void => {
+      const start = dragStart.current
+      if (start === null) return
+      setDraggingPx(clampHeight(start.height + (start.y - move.clientY)))
+    }
+    const onUp = (): void => {
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      document.removeEventListener('pointercancel', onUp)
+      dragStart.current = null
+      setDraggingPx((settled) => {
+        if (settled !== undefined) {
+          setHeightPx(settled)
+          // Best-effort: a failed save leaves the layout correct for this session and the
+          // stored value unchanged, which is a better outcome than blocking the drop.
+          void savePreferences({ sidebarHeightPx: settled }).catch(() => undefined)
+        }
+        return undefined
+      })
+    }
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+    document.addEventListener('pointercancel', onUp)
+  }
 
   // The search box closes on Escape and on a click outside, the same way the workspace
   // one does, so the header returns to its resting width without a second control.
@@ -143,7 +220,40 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
   }
 
   return (
-    <section className={styles.root} aria-label={t('title')}>
+    <section
+      className={styles.root}
+      aria-label={t('title')}
+      // A fixed height only once the user has chosen one; until then the stylesheet's cap lets
+      // the region shrink-wrap its rows, which is how it behaves for everyone who never drags.
+      style={heightPx === undefined && draggingPx === undefined
+        ? undefined
+        : { height: `${String(draggingPx ?? heightPx)}px`, maxHeight: 'none' }}
+    >
+      {/* The grip sits on the top edge, hidden until the region is hovered or focused: it is a
+          pointer affordance, and a permanently visible bar would take a row of vertical space
+          from the list it resizes. `onPointerDown` (not mouse) so a pen and a touch work too. */}
+      <div
+        className={styles.resizer}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label={t('resizeRegion')}
+        aria-valuenow={Math.round(draggingPx ?? heightPx ?? 0) || undefined}
+        tabIndex={0}
+        onPointerDown={beginResize}
+        onKeyDown={(event) => {
+          // Both pairs move towards the same physical edge: up/left grow the region.
+          const step = event.shiftKey ? 40 : 10
+          const grow = event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+          const shrink = event.key === 'ArrowDown' || event.key === 'ArrowRight'
+          if (!grow && !shrink) return
+          event.preventDefault()
+          const section = event.currentTarget.parentElement
+          const current = heightPx ?? section?.getBoundingClientRect().height ?? HEIGHT_MIN
+          const next = clampHeight(current + (grow ? step : -step))
+          setHeightPx(next)
+          void savePreferences({ sidebarHeightPx: next }).catch(() => undefined)
+        }}
+      />
       <div className={styles.sectionHeader}>
         {!searchExpanded && <span className={styles.sectionLabel}>{t('title')}</span>}
 
