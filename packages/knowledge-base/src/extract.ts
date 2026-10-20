@@ -52,8 +52,15 @@ export type ExtractableExtension = typeof EXTRACTABLE_EXTENSIONS[number]
 export interface ExtractResult {
   /** Markdown text, when extraction produced any. */
   markdown?: string
-  /** Which authority answered. Reported so a bad conversion can be traced. */
-  via?: 'mineru' | 'libreoffice' | 'python' | 'native'
+  /**
+   * Which authority answered. Reported so a bad conversion can be traced.
+   *
+   * `mineru-ocr` means the first pass classified the document as text and came back
+   * too thin to search, so the same parser was asked again with OCR forced. It is a
+   * separate value because the two passes can disagree, and a reader debugging a
+   * missing line needs to know which one produced the file.
+   */
+  via?: 'mineru' | 'mineru-ocr' | 'libreoffice' | 'python' | 'native'
   /** Why no markdown was produced. Present whenever {@link markdown} is absent. */
   reason?: string
 }
@@ -141,11 +148,60 @@ function withHeader(title: string, body: string, via: ExtractResult['via']): str
  * @param fileName - name to report to the service.
  * @returns the Markdown, or undefined when the service could not parse it.
  */
-async function viaMineru(baseUrl: string, fullPath: string, fileName: string): Promise<string | undefined> {
+/**
+ * Whether an extraction came back too small to be worth searching.
+ *
+ * Not a judgement about document quality: a 200-character memo is a real document,
+ * and treating it as a failure would re-run OCR over something already correct. The
+ * test targets the specific shape of a mis-classified scan -- pages of content that
+ * came back as a title and a page number -- so it counts what is left after markup
+ * rather than trusting a single threshold on the whole answer.
+ *
+ * @param markdown - what the parser returned.
+ * @returns true when the answer is short enough that a classifier mistake is likely.
+ */
+export function looksTooThinToSearch(markdown: string): boolean {
+  // Strip the constructs that survive OCR of a blank page: headings, table rules,
+  // image placeholders and comments all render without carrying words.
+  const text = markdown
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\|[^\n]*\|/g, ' ')
+    .replace(/^[#\-*\s]+/gm, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  // What separates a scanned page from a short real one is not its length but
+  // whether it contains a SENTENCE. A mis-classified scan yields a title, a page
+  // number and nothing else -- fragments. A two-clause notice is short but reads as
+  // prose, and re-running OCR over it would cost a parse for nothing.
+  //
+  // Sentence punctuation is the signal because it is what a document uses and what
+  // a page header does not. Content words alone would not do: "合同 - 1 -" is three
+  // tokens and tells the reader nothing.
+  const sentenceMarks = text.match(/[。！？；.!?;]/g)
+  if (sentenceMarks !== null && sentenceMarks.length > 0) return false
+
+  // No sentence punctuation: accept only when there is enough prose that a
+  // punctuation-free paragraph is the likelier explanation than a failed parse.
+  return text.length < 40
+}
+
+async function viaMineru(
+  baseUrl: string,
+  fullPath: string,
+  fileName: string,
+  parseMethod: 'auto' | 'ocr' = 'auto',
+): Promise<string | undefined> {
   try {
     const bytes = await readFile(fullPath)
     const form = new FormData()
     form.append('file', new Blob([new Uint8Array(bytes)]), fileName)
+    // `auto` lets the parser classify the document itself: it samples pages and
+    // switches to OCR when a page carries too little extractable text, which is what
+    // a scan looks like. Forcing `ocr` everywhere would run OCR over born-digital
+    // PDFs too -- slower, and worse on text that was already perfect.
+    form.append('parse_method', parseMethod)
     const response = await fetch(baseUrl + '/file_parse', {
       method: 'POST',
       body: form,
@@ -311,7 +367,25 @@ export async function extractDocument(fullPath: string, relPath: string, options
   // service is configured: an unreachable one must not delay every upload.
   if (prefersRemoteParser(ext) && options.mineruUrl !== undefined && options.mineruUrl !== '') {
     const remote = await viaMineru(options.mineruUrl, fullPath, title)
-    if (remote !== undefined) return { markdown: withHeader(title, tidy(remote), 'mineru'), via: 'mineru' }
+    // A scan whose first page happens to carry a header can classify as text and
+    // come back nearly empty. The answer is not "no text in this document" -- it is
+    // "the classifier guessed text and was wrong" -- so an answer that is too thin
+    // to search is retried with OCR forced, once. A real one-page text PDF loses
+    // nothing by being retried; a scanned contract stops being invisible to grep,
+    // which is the whole point of extracting it.
+    if (remote !== undefined && !looksTooThinToSearch(remote)) {
+      return { markdown: withHeader(title, tidy(remote), 'mineru'), via: 'mineru' }
+    }
+    if (remote !== undefined) {
+      attempts.push('mineru-thin')
+      const forced = await viaMineru(options.mineruUrl, fullPath, title, 'ocr')
+      if (forced !== undefined) {
+        return { markdown: withHeader(title, tidy(forced), 'mineru-ocr'), via: 'mineru' }
+      }
+      // The retry produced nothing, so the thin first answer is what exists. Keeping
+      // it beats returning nothing: whatever text it held is still searchable.
+      return { markdown: withHeader(title, tidy(remote), 'mineru'), via: 'mineru' }
+    }
     attempts.push('mineru')
   }
 

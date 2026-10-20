@@ -38,6 +38,9 @@ export const KB_API = {
   /** List the principals that can be granted, so the surface can offer a picker. */
   principals: 'principals',
   roles: 'roles',
+  trash: 'trash',
+  trashRemove: 'trash.remove',
+  trashRestore: 'trash.restore',
   /** Search the mounted tree by file name and text. */
   search: 'search',
   /** List one directory level, with each entry's modification time. */

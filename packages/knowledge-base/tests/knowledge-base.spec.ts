@@ -616,6 +616,26 @@ describe('per-user views', () => {
     } finally { await f.cleanup() }
   })
 
+    it('leaves the trash record in place, because it is a ledger rather than a document', async () => {
+      // A view directory holds one file that is not a document: the caller's trash
+      // record. Pruning it as an orphan deleted the record this sync had just read,
+      // so a removal applied once and then silently came back on the next sync.
+      const f = await fixture()
+      try {
+        const view = { actualRoot: f.actual, viewRoot: f.views, userId: 'alice' }
+        await syncView(view, [{ relPath: '2024/reports/a.md' }])
+        const viewDir = join(f.views, 'alice')
+        const record = join(viewDir, '.kb-trash.json')
+        await writeFile(record, JSON.stringify({ version: 1, entries: [] }), 'utf8')
+
+        // A second sync with a different resolved set runs the prune pass over the
+        // whole view, which is where the record used to be removed.
+        await syncView(view, [])
+        await expect(stat(record)).resolves.toBeDefined()
+      } finally { await f.cleanup() }
+    })
+
+
   it('performs no writes when the resolved set already matches', async () => {
     const f = await fixture()
     try {
@@ -1994,13 +2014,19 @@ describe('management page layout', () => {
     expect(button).toMatch(/color: var\(--dsw-alias-label-secondary\)/u)
   })
 
-  it('ships the trash surface as a shell with no deletion path', async () => {
+  it('builds the trash on the tombstone route rather than on a delete call', async () => {
     const source = await read('KnowledgeTrash.tsx')
-    // The policy is undecided, so the surface must not reach for a delete route.
-    expect(source).not.toMatch(/KB_API/u)
-    expect(source).not.toMatch(/fetch\(/u)
-    expect(source).toMatch(/trashEmpty/u)
-    expect(source).toMatch(/trashPending/u)
+    // Removal is recorded, not performed: a view is hardlinks into one shared tree,
+    // so an unlink would be indistinguishable from a revoked grant and the next sync
+    // would put the link back. The surface therefore restores through its own route
+    // and never reaches for a delete.
+    expect(source).toMatch(/KB_API\.trash/u)
+    expect(source).toMatch(/KB_API\.trashRestore/u)
+    expect(source).not.toMatch(/KB_API\.delete/u)
+    // A restore can legitimately bring back nothing when the grant went while the
+    // document was hidden, so the page has to say that rather than look broken.
+    expect(source).toMatch(/trashRestored/u)
+    expect(source).toMatch(/trashEmptyRow/u)
   })
 })
 

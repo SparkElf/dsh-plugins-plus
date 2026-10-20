@@ -81,6 +81,7 @@ import {
 import { RemoteError, originFrom, sshManagerRunner, type RemoteHost, type RemoteRunner } from './remote.ts'
 import { extractDocument, isExtractable, markdownSiblingOf, writeExtractedMarkdown } from './extract.ts'
 import { BUILT_IN_ROLES, KNOWLEDGE_ACTIONS, isKnowledgeAction, permissionToDataOpsActions } from './permissions.ts'
+import { addTombstone, readTrash, removeTombstone, writeTrash } from './trash.ts'
 
 /** Cordis plugin name. */
 export const name = 'dsh-knowledge-base'
@@ -540,7 +541,17 @@ export async function syncCallerView(
     userId: caller.userId,
     ...(caller.departmentCode === undefined ? {} : { departmentCode: caller.departmentCode }),
   }
-  const delta = await syncView(viewOptions, allowed)
+  // The caller's removals filter the view they are about to get. An unreadable
+  // record is treated as "nothing hidden" rather than as an error: failing the whole
+  // sync over a bookkeeping file would take the tree away from a caller whose
+  // documents are all still granted, which is worse than showing a removed file
+  // until the record can be repaired.
+  const trash = await readTrash(viewPathFor(viewOptions))
+  if (trash.kind === 'unreadable') {
+    host.logger?.warn?.(`knowledge-base: unusable trash record for ${caller.userId}: ${trash.reason}`)
+  }
+  const hidden = trash.kind === 'ready' ? trash.entries.map(entry => entry.relPath) : []
+  const delta = await syncView({ ...viewOptions, hidden }, allowed)
   // Retarget the browsable mount at this user's view. Without it the page would
   // browse the shared export, so a grant would change the view on disk and nothing
   // the user can see.
@@ -2260,6 +2271,106 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // is answerable without pressing anything: an unchanged set reports
               // `unchanged > 0, linked: []`, which is the zero-write case.
               ...(viewDelta === undefined ? {} : { view: viewDelta }),
+            })
+          }
+          case 'trash': {
+            // The caller's own removals. Scoped to the caller because removal is a
+            // view decision: two people sharing a document may disagree about whether
+            // it belongs in their tree, and one person's removal must not hide it
+            // from the other.
+            const who = await fetchCaller(host, config)
+            if (!isSafeUserId(who.userId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id' })
+            }
+            const viewDir = viewPathFor({
+              actualRoot: config.actualRoot,
+              viewRoot: config.viewRoot,
+              userId: who.userId,
+            })
+            const record = await readTrash(viewDir)
+            if (record.kind === 'absent') return writeJson(res, 200, { entries: [] })
+            if (record.kind === 'unreadable') {
+              // Reported rather than emptied: an unreadable record may be hiding
+              // entries, and answering "nothing removed" would offer a Restore that
+              // restores nothing while the files stay hidden.
+              return writeJson(res, 200, { entries: [], error: 'trash record unreadable: ' + record.reason })
+            }
+            return writeJson(res, 200, { entries: record.entries })
+          }
+          case 'trash.remove': {
+            // Removing records a tombstone; it does not touch the file. See trash.ts
+            // for why an unlink cannot express this on a hardlinked shared tree.
+            const body = await readJsonBody(req)
+            const relPath = typeof body.relPath === 'string' ? body.relPath.trim() : ''
+            if (relPath === '' || !isContainedRelPath(relPath)) {
+              return writeJson(res, 400, { error: 'a contained relPath is required' })
+            }
+            const who = await fetchCaller(host, config)
+            if (!isSafeUserId(who.userId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id' })
+            }
+            const viewDir = viewPathFor({
+              actualRoot: config.actualRoot,
+              viewRoot: config.viewRoot,
+              userId: who.userId,
+            })
+            const existing = await readTrash(viewDir)
+            if (existing.kind === 'unreadable') {
+              return writeJson(res, 409, { error: 'trash record unreadable: ' + existing.reason })
+            }
+            const entries = existing.kind === 'ready' ? existing.entries : []
+            const next = addTombstone(entries, {
+              relPath,
+              kind: typeof body.kind === 'string' && body.kind === 'directory' ? 'directory' : 'file',
+              removedBy: who.label,
+              removedAt: new Date().toISOString(),
+              originalPath: relPath,
+            })
+            await writeTrash(viewDir, next)
+            // Rebuild straight away: the caller just asked for this to disappear, and
+            // waiting for the next routine refresh would show it back in the listing
+            // they are looking at.
+            const after = await refreshViewIfStale(true)
+            return writeJson(res, 200, {
+              entries: next,
+              ...(after.delta === undefined ? {} : { view: after.delta }),
+            })
+          }
+          case 'trash.restore': {
+            // Restoring deletes the tombstone. It cannot restore a grant: the next sync
+            // links only what DataOps still allows, so a document whose access was
+            // withdrawn while it sat in the trash stays gone.
+            const body = await readJsonBody(req)
+            const relPath = typeof body.relPath === 'string' ? body.relPath.trim() : ''
+            if (relPath === '' || !isContainedRelPath(relPath)) {
+              return writeJson(res, 400, { error: 'a contained relPath is required' })
+            }
+            const who = await fetchCaller(host, config)
+            if (!isSafeUserId(who.userId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id' })
+            }
+            const viewDir = viewPathFor({
+              actualRoot: config.actualRoot,
+              viewRoot: config.viewRoot,
+              userId: who.userId,
+            })
+            const existing = await readTrash(viewDir)
+            if (existing.kind === 'unreadable') {
+              return writeJson(res, 409, { error: 'trash record unreadable: ' + existing.reason })
+            }
+            const entries = existing.kind === 'ready' ? existing.entries : []
+            const result = removeTombstone(entries, relPath)
+            if (!result.restored) {
+              return writeJson(res, 404, { error: 'not in the trash: ' + relPath })
+            }
+            await writeTrash(viewDir, result.entries)
+            const after = await refreshViewIfStale(true)
+            // The rebuilt view is reported too, because a restore can legitimately bring
+            // back nothing: the grant may have gone while the document was hidden, and
+            // the caller needs to see that rather than assume the tree is broken.
+            return writeJson(res, 200, {
+              entries: result.entries,
+              ...(after.delta === undefined ? {} : { view: after.delta }),
             })
           }
           case 'grants': {

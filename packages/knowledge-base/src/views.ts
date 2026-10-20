@@ -62,6 +62,15 @@ export interface ViewOptions {
    * may be read. Without it the view simply has no department bucket.
    */
   departmentCode?: string
+  /**
+   * Paths this caller has removed from their view, in view coordinates.
+   *
+   * A filter, not a permission: a hidden path keeps its grant, its inode and every
+   * other caller's link. It is checked while building the view because a view is
+   * hardlinks into one tree, so "remove" cannot mean "unlink" without also undoing
+   * a grant on the next sync.
+   */
+  hidden?: readonly string[]
 }
 
 /**
@@ -73,6 +82,14 @@ export interface ViewOptions {
  * different audiences, and mixing them puts a department document beside a
  * company-wide one with no way to tell them apart.
  */
+/**
+ * File name of a caller's trash record inside their view directory.
+ *
+ * Named here rather than imported from `trash.ts` so the view builder does not
+ * depend on the trash module: the builder only needs to know not to prune it.
+ */
+export const TRASH_RECORD_NAME = '.kb-trash.json'
+
 export const VIEW_BUCKETS = ['global', 'department', 'personal'] as const
 
 /** One bucket a view can hold. */
@@ -403,6 +420,9 @@ export async function syncView(options: ViewOptions, resolved: readonly Resolved
   // same file may be readable by a department and by one person, and the bucket is
   // what tells those two audiences apart. `placed` keeps the authoritative path
   // for the source and the view path for the link, because they are no longer equal.
+  const hidden = options.hidden === undefined || options.hidden.length === 0
+    ? undefined
+    : new Set(options.hidden)
   const wanted = new Map<string, string>()
   for (const item of resolved) {
     if (!isContainedRelPath(item.relPath)) continue
@@ -412,6 +432,9 @@ export async function syncView(options: ViewOptions, resolved: readonly Resolved
     // grant already covers the read, so this is layout: without it a caller whose
     // grants reach two departments would see both under one 「部门」 folder.
     if (placement.bucket === 'department' && !departmentPrefixMatches(item.relPath, options.departmentCode)) continue
+    // A removed path is not linked even though its grant still stands, so a sync
+    // triggered by an unrelated grant change cannot resurrect it.
+    if (hidden !== undefined && hidden.has(`${placement.bucket}/${placement.inner}`)) continue
     wanted.set(`${placement.bucket}/${placement.inner}`, join(options.actualRoot, item.relPath))
   }
 
@@ -459,6 +482,12 @@ export async function syncView(options: ViewOptions, resolved: readonly Resolved
 
   for (const [relPath, full] of present) {
     if (wanted.has(relPath)) continue
+    // A view directory holds one bookkeeping file that is not a document: the
+    // caller's trash record. Pruning it as an orphan would delete the very record
+    // this sync just read, so a removal would apply once and then silently come
+    // back on the next sync. It is named rather than pattern-matched: a hidden-dot
+    // exception would also spare a user's own `.something` file from a revoke.
+    if (relPath === TRASH_RECORD_NAME) continue
     try {
       await rm(full)
       delta.unlinked.push(relPath)

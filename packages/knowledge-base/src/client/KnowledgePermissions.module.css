@@ -382,3 +382,24 @@
   font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary);
 }
+
+/* An action that belongs to a row rather than to the page: it sits in the last
+ * cell and reads as text until hovered, so a table of rows is not a wall of
+ * buttons. */
+.linkButton {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+}
+
+.linkButton:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.linkButton:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
