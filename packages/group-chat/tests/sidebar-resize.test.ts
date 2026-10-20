@@ -93,3 +93,23 @@ describe('拖动交互', () => {
     expect(src).toContain('start.height + (start.y - move.clientY)')
   })
 })
+
+/**
+ * 默认就是最小高度。
+ *
+ * 早先没拖过时按内容自适应到 `46vh`，1080p 下约 437px：群聊区域看起来像主区域，
+ * 把工作区列表挤到侧栏上半截。默认应当只是「能看到几个房间」的高度。
+ */
+describe('默认高度', () => {
+  it('没保存过高度时用最小值，而不是内容自适应', () => {
+    const src = readFileSync(new URL('../src/client/SidebarRooms.tsx', import.meta.url), 'utf8')
+    expect(src).toMatch(/draggingPx \?\? heightPx \?\? HEIGHT_MIN/)
+  })
+
+  it('高度总是显式设置（不再回落到样式表的 46vh）', () => {
+    const src = readFileSync(new URL('../src/client/SidebarRooms.tsx', import.meta.url), 'utf8')
+    // 旧写法是「undefined 时不给 style」，正是它让区域按内容撑到 46vh。
+    expect(src).not.toContain('? undefined\n        : { height:')
+    expect(src).toContain('maxHeight: \'none\'')
+  })
+})

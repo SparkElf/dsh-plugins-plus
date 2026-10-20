@@ -223,11 +223,11 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
     <section
       className={styles.root}
       aria-label={t('title')}
-      // A fixed height only once the user has chosen one; until then the stylesheet's cap lets
-      // the region shrink-wrap its rows, which is how it behaves for everyone who never drags.
-      style={heightPx === undefined && draggingPx === undefined
-        ? undefined
-        : { height: `${String(draggingPx ?? heightPx)}px`, maxHeight: 'none' }}
+      // Always a fixed height. Without one the region shrink-wrapped its rows up to the
+      // stylesheet's `46vh`, which on a tall window pushed the workspace list far up the
+      // sidebar and made a two-room region look like the main surface. A reader who has never
+      // dragged gets the floor: a handful of rows, and the sidebar keeps its proportions.
+      style={{ height: `${String(draggingPx ?? heightPx ?? HEIGHT_MIN)}px`, maxHeight: 'none' }}
     >
       {/* The grip sits on the top edge, hidden until the region is hovered or focused: it is a
           pointer affordance, and a permanently visible bar would take a row of vertical space
@@ -248,7 +248,7 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
           if (!grow && !shrink) return
           event.preventDefault()
           const section = event.currentTarget.parentElement
-          const current = heightPx ?? section?.getBoundingClientRect().height ?? HEIGHT_MIN
+          const current = heightPx ?? HEIGHT_MIN
           const next = clampHeight(current + (grow ? step : -step))
           setHeightPx(next)
           void savePreferences({ sidebarHeightPx: next }).catch(() => undefined)

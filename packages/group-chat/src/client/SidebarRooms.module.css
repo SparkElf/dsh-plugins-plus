@@ -26,10 +26,10 @@
   flex: 1 1 auto;
   min-width: 0;
   width: 100%;
-  /* `footArea` does not shrink, so without a cap a long room list would grow until it
-     crowded the workspace region above it. This is the height for a user who has never
-     dragged the grip; once they have, an inline style replaces both the height and this cap. */
-  max-height: 46vh;
+  /* The height is set inline (defaulting to the floor) so the region never grows with its
+     rows: `footArea` does not shrink, and a dozen rooms used to push the workspace list far
+     up the sidebar. This `max-height` is only the pre-hydration placeholder. */
+  max-height: 20vh;
   /* The grip is positioned against this box. */
   position: relative;
   /* No padding-right, where the workspace region's own root carries one. That root is
