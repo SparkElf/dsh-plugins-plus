@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-group-chat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Human-agent group chat for DataOps-managed DSH workspaces: rooms broadcast to every member, and only a member's own @mention wakes that member's agent.",
   "type": "module",
   "main": "./lib/index.js",
@@ -36,6 +36,7 @@
     "lib/index.js",
     "lib/index.d.ts",
     "lib/client.js",
+    "lib/client.js.map",
     "cordis.patch.yml",
     "README.md"
   ],
