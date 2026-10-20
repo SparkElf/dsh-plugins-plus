@@ -1,0 +1,208 @@
+/*
+ * Knowledge-base Settings section. Layout only; type, ink and surfaces come from
+ * the shell's `--dsw-*` tokens so the section follows the active theme.
+ *
+ * Rewritten onto the real token set. The previous revision used six names the
+ * theme never defines -- `--dsh-text-secondary`, `--dsh-text-tertiary`,
+ * `--dsh-border`, `--dsh-surface`, `--dsh-code-surface`, `--dsh-font-mono` --
+ * each with a LIGHT-MODE rgb fallback, so in the dark theme every fallback won
+ * and the section painted dark text on a dark surface. Measured in the running
+ * shell on 2026-10-16: all six resolved to nothing.
+ */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.title {
+  margin: 0;
+  font: var(--dsw-font-base-strong-16);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.description {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  line-height: 1.6;
+}
+
+/* The product's settings groups head their block with a quiet small label, not
+   an uppercased one: the design system carries no letter-spaced caps step. */
+.groupTitle {
+  margin: 10px 0 0;
+  font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.statusLabel {
+  font: var(--dsw-font-xxs-strong-12);
+}
+
+.pairs {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: minmax(120px, 34%) 1fr;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.pair dt {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.pair dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font: var(--dsw-font-xxs-12);
+}
+
+.pair code {
+  font: var(--dsw-font-xxs-12) var(--ds-font-family-code);
+}
+
+.grants {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.grantMeta {
+  margin-left: 8px;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.detail {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* The read-only marker is a `Tag`-shaped pill in the official outline tone:
+   hairline border, tertiary ink, 999px radius. */
+.readOnly {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--dsw-alias-border-l4);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.notice {
+  margin: 0;
+  font: var(--dsw-font-xxs-12);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+/* ---- Deployment wizard ---- */
+
+.wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fieldLabel {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* The wizard's host picker follows the official settings-family input
+   (`ui-settings-models/ModelsSection.module.css` `.input`): a 32px box, a 0.5px
+   `l4` hairline, the `md` radius, the `layer-1` fill, and the 14px/22px step. */
+.select {
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--dsw-radius-md);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-14);
+  max-width: 420px;
+}
+
+.select:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.stepLabel {
+  font: var(--dsw-font-xxs-12);
+}
+
+.logBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* The run log reads as the product's own code surface: layer-2 fill, hairline
+   border, rounded, monospace, and the code type step. */
+.log {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: var(--dsw-radius-sm);
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-2);
+  font: var(--dsw-font-xxs-12) var(--ds-font-family-code);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

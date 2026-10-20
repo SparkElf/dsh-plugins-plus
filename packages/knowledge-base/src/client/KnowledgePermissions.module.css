@@ -1,0 +1,129 @@
+/*
+ * The permissions surface's own styles: the one-to-many authorization table.
+ *
+ * The shape is DataOps' permission preview
+ * (`dataops/frontend/src/modules/prototype-pages/PermissionsPrototypePage.vue`,
+ * the `.ep-tb` table at the application-detail block): a header row of small
+ * secondary-ink labels over hairline-separated rows, where one row's first cell
+ * carries a heavier name plus dimmer supporting lines, and its last cells hold
+ * tags and a multi-line list.
+ *
+ * Only the metrics come from that reference; every colour and type step is the
+ * DSH token it maps to, so the table follows the active theme. The reference's
+ * `font-size: 10.5px/12px` and `--ink-3`/`--border` therefore read here as
+ * `--dsw-font-xxxs-11`, `--dsw-font-xxs-12`, `--dsw-alias-label-*` and
+ * `--dsw-alias-border-l*`.
+ */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  /* One column per fact, with the path list taking the slack: the first three
+     are content-sized so a long path cannot squeeze the principal's name. */
+  table-layout: auto;
+}
+
+.table th {
+  text-align: left;
+  /* The reference's 10.5px header step. */
+  font: var(--dsw-font-xxxs-strong-11);
+  color: var(--dsw-alias-label-tertiary);
+  padding: 6px 10px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 7px 10px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l1);
+  font: var(--dsw-font-xxs-12);
+  vertical-align: top;
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+/* The first cell: the principal's own name, its supporting lines beneath. */
+.principalName {
+  font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The reference's `muted` supporting line (its 10.5px). */
+.principalMeta {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+/* The reference prints the identifier in its `mono muted` line. */
+.principalId {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11) var(--ds-font-family-code);
+  overflow-wrap: anywhere;
+}
+
+/* The tag column: one tag per row, wrapped so several stack rather than
+   widening the column. */
+.kinds,
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* The reference joins its targets with `<br>`; a block per path keeps the same
+   one-per-line reading while letting each row wrap. */
+.paths {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* The reference's 11px / 1.65 multi-target block. */
+  font: var(--dsw-font-xxxs-11);
+  line-height: 1.65;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.path {
+  font-family: var(--ds-font-family-code);
+  overflow-wrap: anywhere;
+}
+
+/* The trailing action column never wraps into the path list. */
+.actionCell {
+  white-space: nowrap;
+}
+
+/* The reference's centered muted empty row. */
+.emptyRow td {
+  padding: 18px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* The section heading over the table. */
+.tableHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+}
+
+.tableTitle {
+  margin: 0;
+  font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-primary);
+}
+
+.tableHint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}

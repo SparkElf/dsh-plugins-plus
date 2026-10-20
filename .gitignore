@@ -6,3 +6,11 @@ playwright-report/
 
 # Composed output; never commit. Sources are .env.base and .secrets/env.
 .env
+
+# Packed publish artifacts; lib/ is already ignored and no package tracks a tarball.
+*.tgz
+
+# Throwaway measurement probes against a running shell. Each one hardcodes absolute paths and
+# 127.0.0.1:3080, none is referenced by playwright.config.mjs or a package script, and none was
+# ever committed; they are kept on disk for the sessions still iterating on them.
+tests/system/_kbui-*.mjs

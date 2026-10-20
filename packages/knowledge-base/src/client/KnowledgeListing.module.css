@@ -1,0 +1,163 @@
+/*
+ * The knowledge listing's own styles.
+ *
+ * Copied from the file explorer in `dsh-better-sidebar`:
+ * `src/client/sidebar.module.css`, the `.explorerRow` family. That tree is the
+ * look this page is measured against -- a reader sees it in the right sidebar of
+ * the same window -- so the row metrics are the explorer's, not a second design:
+ * a 28px row on a 12px type, an 8px inset, a 6px icon gap, a 4px radius, the
+ * hover fill, and a 22px indent step. Only the rules this list needs came across;
+ * the explorer's drag targets, git tones, multi-select and inline rename are left
+ * behind because this list is read-only.
+ */
+
+/* The explorer's `.explorerBody` inset, so a row starts where the explorer's
+   rows do. Deep levels truncate their labels rather than scrolling sideways. */
+.entries,
+.entryChildren {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* One tree row: the explorer's native list rhythm (28px, radius 4, inset,
+   hover fill, 22px indent step, 12px ink) with its mount fade, so expanding a
+   directory reveals its children gently. */
+.entry {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* border-box keeps the inline indent padding (depth * 22 + 6) INSIDE the
+     row's 100% width -- without it deep rows overflow and force a horizontal
+     scrollbar on the tree body. */
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: 4px;
+  animation: kb-row-in 150ms var(--ds-ease-in-out);
+}
+
+.entry:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.entry:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+
+/* A directory name carries one weight step up, as the explorer's
+   `.explorerDir` does. */
+.entryDir {
+  font: var(--dsw-font-xxs-strong-12);
+}
+
+/* The explorer's `.explorerName`: min-width 0 lets the flex item shrink below
+   its content so the label truncates with an ellipsis instead of widening the
+   row. */
+.entryName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The leading glyph keeps the explorer's 14px box. */
+.entryGlyph {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The last-modified column, pinned to the row's far right. It carries the auto
+   margin itself so it stays there while the hover affordance is hidden; once the
+   `@` button appears it owns the right edge and the time gives the margin up
+   rather than pushing the affordance inward. Dimmed to label-tertiary -- it is
+   orientation, not content, and must not compete with the filename. Tabular
+   figures keep the column aligned down a level. */
+.entryTime {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.entry:hover .entryTime,
+.entry:focus-within .entryTime {
+  margin-left: 0;
+}
+
+/* The hover-revealed reference button at the row's far right. Its label is the
+   explorer's own `@文件` / `@file` string rather than a bare `@`, so a reader
+   sees the same affordance in both trees. Hidden rows keep the name at full
+   width; hovering or focusing the row reveals it. */
+.entryRef {
+  flex: none;
+  display: none;
+  align-items: center;
+  margin-left: auto;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-strong-11);
+  cursor: pointer;
+}
+
+.entryRef:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.entry:hover .entryRef,
+.entry:focus-within .entryRef {
+  display: inline-flex;
+}
+
+/* Mount fade for tree rows (the app's session-row reveal). */
+@keyframes kb-row-in {
+  from { opacity: 0; }
+}
+
+/* ---- The list's empty / loading / failure state ----
+
+   Follows the product's shared panel state (`ui-schedule/TaskManagerPage.module.css`
+   `.empty` + `.emptyGlyph` + `.emptyTitle`): a centered column on tertiary ink
+   with a caption-ink glyph. A bare left-aligned grey sentence read as a stray
+   paragraph rather than as "this region has nothing in it". */
+.empty {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-s-14);
+}
+
+.emptyGlyph {
+  margin-bottom: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.emptyTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-s-14);
+  line-height: 1.6;
+}

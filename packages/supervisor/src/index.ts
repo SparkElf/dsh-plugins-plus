@@ -11,7 +11,7 @@ export const name = 'plus-supervisor-recovery'
 export const inject = ['sessionController', 'webServer']
 
 const SUPERVISOR_RECOVERY_PATH = '/api/plus-supervisor/recovery'
-const SUPERVISOR_RECOVERY_PROMPT = 'Supervisor 在此会话执行期间重启了 DSH。请以持久化会话记录、当前工作区和工具结果为准，先确认已完成的操作，避免重复执行；继续完成剩余任务。若原任务已经全部完成，回复“已完成”。'
+const SUPERVISOR_RECOVERY_PROMPT = 'Supervisor 在此会话执行期间重启了 DSH。请以持久化会话记录、当前工作区和工具结果为准，先确认已完成的操作，避免重复执行；若本会话存在目标（goal），先把已暂停的目标重新设置为执行，再继续完成剩余任务。若原任务已经全部完成，回复“已完成”。'
 
 async function readRequest(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []

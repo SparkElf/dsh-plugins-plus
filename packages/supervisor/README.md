@@ -33,7 +33,7 @@ Plus profile 挂载本软件包的 Host 入口，并提供 `dsh-plus-supervisor`
 
 ### 模型体验
 
-每个被捕获的 Session 会收到一条普通用户消息，说明 Supervisor 重启了 DSH，要求模型检查持久化历史、当前 workspace 状态和工具结果，避免重复已完成的操作，完成剩余工作，并在没有剩余任务时回复“已完成”。Session Controller 通过正常的 `SessionController.prompt` 路径记录该消息。该固定指令会加入下一次请求并保留在后续历史中，直到 compaction 将其遮蔽；进程重启不会保留进程内缓存状态。
+每个被捕获的 Session 会收到一条普通用户消息，说明 Supervisor 重启了 DSH，要求模型检查持久化历史、当前 workspace 状态和工具结果，避免重复已完成的操作，若本会话存在目标则先把已暂停的目标重新置为执行，再完成剩余工作，并在没有剩余任务时回复“已完成”。Session Controller 通过正常的 `SessionController.prompt` 路径记录该消息。该固定指令会加入下一次请求并保留在后续历史中，直到 compaction 将其遮蔽；进程重启不会保留进程内缓存状态。
 
 ### 已知限制
 
@@ -73,7 +73,7 @@ A restart performs one ordered operation: optional build, capture the current ru
 
 ### Model Experience
 
-Each captured Session receives one ordinary user message stating that Supervisor restarted DSH, directing the model to inspect durable history, current workspace state, and tool results, avoid repeating completed operations, finish remaining work, and answer `已完成` when nothing remains. The Session Controller logs the message through its normal `SessionController.prompt` path. The fixed instruction is retained in later history until compaction shadows it; restarting the process does not preserve process-local cache state.
+Each captured Session receives one ordinary user message stating that Supervisor restarted DSH, directing the model to inspect durable history, current workspace state, and tool results, avoid repeating completed operations, re-arm a paused goal when the Session has one, finish remaining work, and answer `已完成` when nothing remains. The Session Controller logs the message through its normal `SessionController.prompt` path. The fixed instruction is retained in later history until compaction shadows it; restarting the process does not preserve process-local cache state.
 
 ### Known Limitations
 
