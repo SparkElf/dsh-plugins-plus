@@ -47,6 +47,15 @@ import { openRoomStream } from './stream.ts'
 
 export const name = 'group-chat'
 
+/**
+ * Prefix of the message a new room sends to its own agent to produce a first turn.
+ *
+ * The turn exists so the shell will open the room at all (see `warmUp`), and it must never be
+ * mistaken for something a member said — the room's history and its unread counts are read by
+ * everyone. Recognized by id because that survives the round trip through the session.
+ */
+const WARM_UP_PREFIX = 'warm-up-'
+
 /** Host services this plugin needs beyond the room runtime. */
 export const inject = ['agents', 'sessions', 'webServer', 'credentials', 'sessionController']
 
@@ -639,6 +648,13 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
     } catch (error) {
       log?.error?.('[group-chat] reading room members failed', room.id, error)
     }
+    // A session that has never run a turn is the one the shell lists as `blank`, and the
+    // conversation view refuses to bind to it: the member gets an empty pane with no composer
+    // on a room they just created. Config events and seeds are written at creation, so counting
+    // events would miss it — the marker is that no turn has ever started.
+    if (!session.snapshotEvents().some((event) => event.type === 'turn/start')) {
+      void warmUp(room.id, session)
+    }
     tracker.seedFromSession(room.id, session.snapshotEvents())
     const timer = setInterval(() => { void sync(room.id) }, POLL_INTERVAL_MS)
     timers.add(timer)
@@ -661,6 +677,47 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
    * appended is rebuilt as one — same identity, same content, same source. That
    * keeps the model's history and the inbox item describing the same message.
    */
+  /**
+   * Run one turn on a room whose session has never had one.
+   *
+   * The shell's conversation view binds through `sessions.retain`, which refuses a session the
+   * host still lists as `blank` — so a freshly created room opens to an empty pane with no
+   * composer, and the room looks broken even though everything about it is fine. A single
+   * completed turn clears that flag for good.
+   *
+   * The prompt is an instruction to the room's own agent rather than a message from a member,
+   * and its id carries {@link WARM_UP_PREFIX} so the publish path drops it: it writes the
+   * session, but a member must never find it in the room's history.
+   */
+  const warmUp = async (roomId: string, session: Session): Promise<void> => {
+    try {
+      const sessionId = roomSessionId(roomId)
+      let agent = ctx.agents.get(sessionId as never)
+      if (agent === undefined) {
+        const resolved = await ctx.sessionController.resolveAgent(sessionId as never)
+        if (!('agent' in resolved)) return
+        agent = resolved.agent
+      }
+      // Re-checked after the await: two opens racing on the same room must not both queue a
+      // turn, and a member may have sent the first message while the agent was resolving.
+      if (session.snapshotEvents().some((event) => event.type === 'turn/start')) return
+      const prompt = {
+        id: `${WARM_UP_PREFIX}${roomId}`,
+        role: 'user' as const,
+        content: [{
+          type: 'text' as const,
+          text: '这是一条初始化指令，不是成员发言：请只回复两个字「就绪」，不要执行任何操作。',
+        }],
+        source: { kind: 'user' as const },
+      }
+      if (isUserMessageData(prompt)) agent.followup(prompt)
+    } catch (error) {
+      // A warm-up that fails is not worth failing the open over: the room works, it just opens
+      // empty until someone sends the first message.
+      log?.warn?.('[group-chat] warming up a new room session failed', roomId, error)
+    }
+  }
+
   const deliverToAgent = async (roomId: string, prompt: unknown, wake: boolean): Promise<void> => {
     const sessionId = roomSessionId(roomId)
     // A room session exists but carries no agent until one is resolved onto it, so the
@@ -722,6 +779,9 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       // carries `source.roomId` (the poll path), and the backend de-duplicates on `rpcId`.
       if (!isLocalUserMessage(data)) return
       const messageId = (data as { id?: unknown }).id
+      // A warm-up reaches the session through `followup` exactly like a real message, so it is
+      // filtered here or the room's history opens with an instruction nobody wrote.
+      if (typeof messageId === 'string' && messageId.startsWith(WARM_UP_PREFIX)) return
       // The member ids an `@显示名` in the text resolves to. The composer's own mention menu
       // lists files and sessions, not the roster, so the roster is addressed in the text and
       // resolved here — which is also where the room's members are already at hand.
