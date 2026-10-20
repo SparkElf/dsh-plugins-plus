@@ -51,15 +51,13 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-session@0.1.7-rc.2'
   - '@codemirror/legacy-modes@6.5.4'
   - '@types/ssh2@1.15.6'
-# Local build of `dsh-better-sidebar` carrying the save-event extension.
+# The SparkElf fork of `dsh-better-sidebar`, which carries the save-event
+# extension upstream does not have.
 #
-# The published 0.25.0 only ships `src` we can patch; the client artifacts
-# (`lib/client-editor.js`) are what actually run, and the package's build config is
-# not part of the published files, so the artifacts cannot be rebuilt inside
-# `node_modules`. This local checkout is the v0.25.0 tag with the extension applied
-# and its own build run, so `lib/` matches `src/`.
-#
-# Pointing at the checkout also means the extension survives a reinstall: pnpm links
-# this directory instead of unpacking a tarball over it.
+# The extension lives in the fork's SOURCE and ships in its build, so this is an
+# ordinary dependency on a versioned fork rather than a checkout linked in by path:
+# the fork has a repository, a maintainer and a version, and `lib/` is reproducible
+# from `src/`. Linking a working copy would make the profile depend on whatever
+# happens to be on this machine.
 overrides:
-  dsh-better-sidebar: link:../dsh-better-sidebar-src
+  dsh-better-sidebar: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.2

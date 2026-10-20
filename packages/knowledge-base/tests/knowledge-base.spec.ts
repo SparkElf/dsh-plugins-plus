@@ -100,6 +100,14 @@ const CONFIG = {
   mineruBackend: 'onnx' as const,
   mineruPort: 8000,
   mineruMemoryMaxMiB: 4096,
+  storageMode: 'local' as const,
+  storageProtocol: 'sshfs' as const,
+  sshHost: 'storage.example',
+  sshUser: 'kb',
+  sshPort: 22,
+  sshKeyRef: 'KB_SSH_KEY',
+  sshRemotePath: '/srv/kb',
+  sshMountOptions: 'defaults',
 }
 
 /** Deployment context derived from the same config. */
@@ -3197,7 +3205,9 @@ describe('review settings and the audit trail', () => {
     try {
       await apply(ctx as never, isolatedConfig(root) as never)
       const reply = await callRoute(routes, 'settings.get', {})
-      expect(reply.settings.reviewRequired).toBe(false)
+      // The route answers `{ settings: {...} }`; the helper types its reply loosely
+      // because every route has a different body shape.
+      expect((reply.settings as { reviewRequired?: boolean }).reviewRequired).toBe(false)
     } finally {
       for (const dispose of disposers) dispose()
       await rm(root, { recursive: true, force: true })
@@ -3210,9 +3220,9 @@ describe('review settings and the audit trail', () => {
     try {
       await apply(ctx as never, isolatedConfig(root) as never)
       const written = await callRoute(routes, 'settings.set', { reviewRequired: true })
-      expect(written.settings.reviewRequired).toBe(true)
+      expect((written.settings as { reviewRequired?: boolean }).reviewRequired).toBe(true)
       const readBack = await callRoute(routes, 'settings.get', {})
-      expect(readBack.settings.reviewRequired).toBe(true)
+      expect((readBack.settings as { reviewRequired?: boolean }).reviewRequired).toBe(true)
       // Stored in the CALLER's own directory, beside the pins and the view mode.
       const stored = JSON.parse(await readFile(join(root, 'views', 'u-1', '.kb-settings.json'), 'utf8'))
       expect(stored.reviewRequired).toBe(true)
@@ -3235,7 +3245,7 @@ describe('review settings and the audit trail', () => {
       expect(String(refused.error)).toContain('grant-management access')
       // And nothing was written, so a refused attempt cannot half-apply.
       const reply = await callRoute(routes, 'settings.get', {})
-      expect(reply.settings.reviewRequired).toBe(false)
+      expect((reply.settings as { reviewRequired?: boolean }).reviewRequired).toBe(false)
     } finally {
       for (const dispose of disposers) dispose()
       await rm(root, { recursive: true, force: true })
@@ -4333,7 +4343,7 @@ describe('storage protocol', () => {
   it('defaults to nfs so an existing remote deployment is unchanged', () => {
     // A profile written before the protocol existed names nothing; it must keep driving the
     // transport it always drove rather than silently switching to SSH.
-    const parsed = Config({ mountPoint: '/workspace/kb' }) as unknown as Record<string, unknown>
+    const parsed = Config({ mountPoint: '/workspace/kb' } as never) as unknown as Record<string, unknown>
     expect(parsed.storageProtocol).toBe('nfs')
     expect(parsed.sshPort).toBe(22)
   })

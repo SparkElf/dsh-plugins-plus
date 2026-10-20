@@ -2182,12 +2182,19 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                     localCaller = undefined
                   }
                 }
+                // The mount is still classified, not asserted: local storage says
+                // where the bytes live, not whether the pointer exists. A local
+                // deployment whose mount point is missing has to report `absent` for
+                // the page to show the mount wording -- answering a fixed "local"
+                // told every state the same story and left the page with no sentence
+                // to choose, so a broken local deployment looked healthy.
+                const localMountState = await classifyMount(config)
                 return writeJson(res, 200, {
                   ...localOnly,
                   storageMode: "local",
                   storageProtocol: config.storageProtocol,
                   lastSyncAt: null,
-                  mountState: "local",
+                  mountState: localMountState,
                   canManageGrants: canManage,
                   ...(localCaller === undefined ? {} : { caller: localCaller }),
                 })
