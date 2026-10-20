@@ -32,13 +32,14 @@ import type { UploadItem } from 'dsh-better-sidebar/src/client/upload.ts'
  * Files the explorer must not list.
  *
  * The leading dot alone is not enough: the explorer shows hidden files by its own setting,
- * and these five are the plugin's state, not the reader's documents. Naming them exactly
+ * and these six are the plugin's state, not the reader's documents. Naming them exactly
  * keeps a genuine `.env` or `.gitignore` a reader put in the knowledge base visible.
  */
 const METADATA_NAMES = [
   '.kb-audit.jsonl',
   '.kb-settings.json',
   '.kb-pending',
+  '.kb-trash.json',
   '.pinned.json',
   '.view-mode.json',
 ] as const

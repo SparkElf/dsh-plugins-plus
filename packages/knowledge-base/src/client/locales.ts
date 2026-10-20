@@ -211,7 +211,7 @@ export const en = {
   trashWriteFailed: 'That did not go through.',
   trashPurge: 'Delete permanently',
   trashEmptyRow: 'Trash is empty',
-  trashDisabled: 'Restoring and deleting are not enabled yet.',
+  trashDisabled: 'Removing a document hides it from your view and keeps the file. Restore puts it back.',
 
   permissionReadable: 'You may read this',
   permissionDenied: 'Not authorized for you',
@@ -535,7 +535,7 @@ export const zh: Record<KnowledgeKey, string> = {
   trashWriteFailed: '操作没有成功。',
   trashPurge: '彻底删除',
   trashEmptyRow: '回收站是空的',
-  trashDisabled: '恢复与彻底删除功能尚未开放。',
+  trashDisabled: '移除只会从你的视图里隐藏，文件本身保留。恢复即可放回。',
 
   permissionReadable: '你有读取权限',
   permissionDenied: '你无读取权限',
