@@ -1059,6 +1059,16 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   // pinned mark, and multi-select for a batch grant.
                   <KnowledgeFileTree
                     sessionId={explorerSessionId}
+                    // The three buckets name an AUDIENCE, not a path: the folders on
+                    // disk are global/department/personal, and renaming them would
+                    // change the shared layout the view is built from. Only these
+                    // three paths carry a label; everything below is a document the
+                    // reader named.
+                    bucketLabels={{
+                      global: t('bucketGlobal'),
+                      department: t('bucketDepartment'),
+                      personal: t('bucketPersonal'),
+                    }}
                     root={kbRoot}
                     expanded={explorerExpanded}
                     revealed={[]}

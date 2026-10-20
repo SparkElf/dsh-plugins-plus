@@ -337,6 +337,12 @@ export const en = {
   savedOk: 'Saved.',
   savedRestart: 'Mount changes take effect after the workspace container restarts.',
   saveBadPort: 'Port must be a whole number between 1 and 65535.',
+  // The three buckets carry a name on disk (`global`, `department`, `personal`) because
+  // that name is also a directory the deployment shares. What the reader sees is the
+  // audience the folder is for, not that path segment.
+  bucketGlobal: 'Everyone',
+  bucketDepartment: 'Department',
+  bucketPersonal: 'Personal',
 } as const
 
 /** Stable key set shared by every knowledge-base locale. */
@@ -658,4 +664,7 @@ export const zh: Record<KnowledgeKey, string> = {
   savedOk: '已保存。',
   savedRestart: '挂载变更需重启工作区容器后生效。',
   saveBadPort: '端口必须是 1 到 65535 之间的整数。',
+  bucketGlobal: '全局',
+  bucketDepartment: '部门',
+  bucketPersonal: '个人',
 }

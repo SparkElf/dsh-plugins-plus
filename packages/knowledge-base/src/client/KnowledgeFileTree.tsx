@@ -45,6 +45,22 @@ const METADATA_NAMES = [
 ] as const
 
 /** Props for the knowledge tree. */
+/**
+ * Express an absolute tree path the way the bucket map is keyed.
+ *
+ * The explorer speaks absolute paths; the map is built from the three folder names, so
+ * the two have to meet somewhere. Stripping the root here keeps that conversion next to
+ * the only code that needs it, rather than asking every caller to pre-relativise.
+ * @param root - absolute mount point of the knowledge tree.
+ * @param absolute - absolute path of the row being labelled.
+ * @returns the path relative to `root`, unchanged when it is not under it.
+ */
+function relativeToRoot(root: string, absolute: string): string {
+  const base = root.endsWith('/') ? root.slice(0, -1) : root
+  if (absolute === base) return ''
+  return absolute.startsWith(base + '/') ? absolute.slice(base.length + 1) : absolute
+}
+
 export interface KnowledgeFileTreeProps {
   /** The conversation this tree belongs to; the explorer keys its fs requests by it. */
   sessionId: string
@@ -72,6 +88,18 @@ export interface KnowledgeFileTreeProps {
   onPathDeleted?: (path: string, isDir: boolean) => void
   /** Whether the owning surface is on screen. */
   visible?: boolean
+  /**
+   * Say the three buckets in the reader's language.
+   *
+   * `global` / `department` / `personal` are the folders' names on disk, and they have
+   * to stay that way: they are path segments the deployment shares and the caller's
+   * view is built from them. What the reader is being told by that folder is not its
+   * path but its AUDIENCE -- who may see what is inside -- so the row prints the
+   * audience and the path is left alone.
+   *
+   * Keyed by the tree-relative path, so the map can be built from copy alone.
+   */
+  bucketLabels?: Readonly<Record<string, string>>
 }
 
 /**
@@ -126,6 +154,11 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
       // Readers open one document at a time; the batch bar answers Ctrl/Shift-click
       // gestures this surface does not use, and costs a row of height when it shows.
       selectionBar={false}
+      // The three bucket folders are the only rows whose printed name is not the
+      // reader's word for it; every row below them is a document the reader named.
+      dirLabel={props.bucketLabels === undefined
+        ? undefined
+        : (path, entry) => props.bucketLabels?.[relativeToRoot(root, path)] ?? entry.name}
       onPathRenamed={props.onPathRenamed === undefined ? undefined : onRenamed}
       onPathDeleted={props.onPathDeleted}
     />

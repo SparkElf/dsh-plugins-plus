@@ -2301,6 +2301,28 @@ describe('the two empty states are told apart', () => {
     const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
     expect(panel).toMatch(/status\.mountState === 'pointer-missing'/u)
   })
+
+  it("labels the three buckets in the reader's language instead of the folder name", async () => {
+    // The folders on disk are global / department / personal and cannot be renamed:
+    // they are path segments the deployment shares, and the caller's view is built
+    // from them. What the folder means to a reader is its AUDIENCE, so the row prints
+    // that instead -- carried by a label map, so the disk layout is untouched.
+    const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    for (const key of ['bucketGlobal', 'bucketDepartment', 'bucketPersonal']) {
+      // One entry per locale: the zh table is typed against the en key set, so a key
+      // missing on either side fails the build rather than showing an untranslated row.
+      const occurrences = locales.split('\n').filter(line => line.trimStart().startsWith(key + ':')).length
+      expect(occurrences, key).toBe(2)
+    }
+
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    // The map is keyed by the on-disk names, and every one of them is covered: a bucket
+    // missing from the map would silently fall back to the raw path segment.
+    for (const bucket of ['global', 'department', 'personal']) {
+      expect(panel).toMatch(new RegExp(`${bucket}: t\\('bucket`))
+    }
+  })
+
 })
 
 describe('the first load repairs a missing pointer', () => {

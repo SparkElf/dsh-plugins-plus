@@ -60,4 +60,4 @@ minimumReleaseAgeExclude:
 # from `src/`. Linking a working copy would make the profile depend on whatever
 # happens to be on this machine.
 overrides:
-  dsh-better-sidebar: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.2
+  dsh-better-sidebar: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.3

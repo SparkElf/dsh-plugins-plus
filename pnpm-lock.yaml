@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  dsh-better-sidebar: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.2
+  dsh-better-sidebar: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.3
 
 importers:
 
@@ -428,8 +428,8 @@ importers:
         specifier: ^3.18.2
         version: 3.18.4
       dsh-better-sidebar:
-        specifier: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.2
-        version: '@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.2(0ed7e9606150ec7c68ce124e175ba749)'
+        specifier: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.3
+        version: '@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.3(0ed7e9606150ec7c68ce124e175ba749)'
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.4
@@ -1581,8 +1581,8 @@ packages:
   '@socket.io/component-emitter@3.1.2':
     resolution: {integrity: sha512-9BCxFwvbGg/RsZK9tjXd8s4UcwR0MWeFQ1XEKIQVVvAGJyINdrqKMcTRyLoK8Rse1GjzLV9cwjWV1olXRWEXVA==}
 
-  '@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.2':
-    resolution: {integrity: sha512-Lic8o6ZUNh0TUz3llDBa505h9NzmjL+TulQ9eLUy4EHJMN1Pavm3cFoI20VirThy4Rs1Nlhr0IkPgoznDOGahA==}
+  '@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.3':
+    resolution: {integrity: sha512-+QBFH1hbYWpGcOO4QA0XrBZAbRH7WlzlL0Zc+SiF3U9tRUjRtOBTX3rPhruBcxrQpW/q/b7/oka/gAYwyovjRA==}
     engines: {node: '>=20'}
     peerDependencies:
       '@deepseek-ai/cordis': ^4.0.4
@@ -4422,7 +4422,7 @@ snapshots:
 
   '@socket.io/component-emitter@3.1.2': {}
 
-  '@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.2(0ed7e9606150ec7c68ce124e175ba749)':
+  '@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.3(0ed7e9606150ec7c68ce124e175ba749)':
     dependencies:
       '@codemirror/commands': 6.11.1
       '@codemirror/lang-cpp': 6.0.3
