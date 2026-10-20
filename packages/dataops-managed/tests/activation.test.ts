@@ -76,9 +76,11 @@ describe('apply', () => {
 
     await expect(apply(context as never, CONFIG)).resolves.toBeUndefined()
     expect(routes.map((route) => route.path).sort()).toEqual([
+      '/integrations/dataops/auth-state',
       '/integrations/dataops/managed-auth',
       '/integrations/dataops/model-sync',
       '/integrations/dataops/skill-plaza',
+      '/integrations/dataops/tool-timeout',
       '/integrations/dataops/workspace-limits',
     ])
   })
@@ -87,7 +89,16 @@ describe('apply', () => {
     const { context, routes } = contextWith(false)
 
     await expect(apply(context as never, CONFIG)).resolves.toBeUndefined()
-    expect(routes).toHaveLength(4)
+    // Five surfaces plus the auth-state read the sign-in prompt polls. Asserted by name rather
+    // than only by count, so adding a route cannot silently displace one that a panel needs.
+    expect(routes.map((route) => route.path).sort()).toEqual([
+      '/integrations/dataops/auth-state',
+      '/integrations/dataops/managed-auth',
+      '/integrations/dataops/model-sync',
+      '/integrations/dataops/skill-plaza',
+      '/integrations/dataops/tool-timeout',
+      '/integrations/dataops/workspace-limits',
+    ].sort())
   })
 
   it('contributes the query skill with its document readable from the package', async () => {

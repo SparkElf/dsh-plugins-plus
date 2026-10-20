@@ -107,6 +107,111 @@
   font: var(--dsw-font-xxs-12);
 }
 
+/* The muted second line of an empty state, under its headline. */
+.emptyNote {
+  margin-top: 4px;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Row of buttons in a table's action cell, kept from wrapping into the data. */
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* The page's own leading band: the title on the left, the primary action right. */
+.pageHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.pageTitle {
+  margin: 0;
+  font: var(--dsw-font-xs-strong-13);
+  color: var(--dsw-alias-label-primary);
+}
+
+.pageHint {
+  margin: 2px 0 0;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* A directory row's path cell: the code face, wrapping rather than overflowing. */
+.pathCell {
+  font: var(--dsw-font-xxxs-11) var(--ds-font-family-code);
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* A right-aligned numeric column, so the counts line up column-wise. */
+.countCell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Marks a count that is a lower bound because part of the subtree could not be
+ * read. Muted and small on purpose: it qualifies the number beside it rather than
+ * competing with it for the eye.
+ */
+.partialMark {
+  margin-left: 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  cursor: help;
+}
+
+/* A muted dash or placeholder that is a value's absence rather than data. */
+.placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/*
+ * The dialogs' own form grid. The page's `.form` is a rail-width stack; a dialog
+ * is a narrower surface, so it lays its fields out on one column with the labels
+ * above them.
+ */
+.dialogForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dialogField {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* A dialog's select, matched to the Input primitive's box so a form of mixed
+   controls reads as one column rather than as two designs. */
+.dialogSelect {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* The dialog's inline result line, under the fields it reports on. */
+.dialogNotice {
+  margin: 0;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-secondary);
+}
+
 /* The section heading over the table. */
 .tableHead {
   display: flex;
@@ -126,4 +231,154 @@
   margin: 0;
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxxs-11);
+}
+
+/* ---------------------------------------------------------------------------
+ * Permission overview
+ *
+ * Two readings of the same grant table, above the table itself. Both are lists
+ * rather than tables: a person's holdings are one sentence and a few tags, and a
+ * table would spend the width on cells that are empty for most rows.
+ * ------------------------------------------------------------------------- */
+
+.overviewBand {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 0 0 20px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l1);
+}
+
+.overviewSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.overviewHeading {
+  margin: 0;
+  font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.overviewList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.overviewItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+}
+
+.overviewRow {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.overviewName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-primary);
+}
+
+.overviewActions,
+.overviewCount,
+.overviewKind {
+  flex: none;
+  font: var(--dsw-font-xxxs-strong-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.overviewRolesInline {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.overviewPaths {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.overviewPaths summary {
+  cursor: pointer;
+  font: var(--dsw-font-xxxs-strong-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.overviewPaths ul {
+  margin: 4px 0 0;
+  padding: 0 0 0 16px;
+  list-style: none;
+}
+
+.overviewHolders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.overviewHolders li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.overviewHolderName {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-primary);
+}
+
+.overviewHolderActions {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.overviewEmpty {
+  padding: 16px 0;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.overviewRoleList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.overviewRole {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font: var(--dsw-font-xxs-12);
+}
+
+.overviewRoleName {
+  font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-primary);
+}
+
+.overviewRoleActions,
+.overviewRolePaths {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
 }

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readKnowledgeJson } from '../src/api.ts'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, readlink, lstat, rm, stat, symlink, chmod, writeFile, appendFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createServer, type Server } from 'node:http'
 import {
   ENDPOINTS,
@@ -11,7 +12,9 @@ import {
 } from '../src/protocol.ts'
 import {
   Config,
+  KB_ROOT_RESOURCE_ID,
   apply,
+  knowledgeAncestorsFor,
   createGrant,
   fetchGrants,
   inject,
@@ -22,15 +25,23 @@ import {
   fetchPrincipals,
   listDirectory,
   listDirectoryWithPermissions,
+  listDirectoryShapes,
   searchKnowledge,
   localStatus,
+  MAX_KNOWLEDGE_WRITE_BYTES,
+  createKnowledgeEntry,
+  classifyMount,
+  syncCallerView,
   name,
   revokeGrant,
+  withStoredStorage,
   type KnowledgeError,
 } from '../src/index.ts'
 import {
   KB_STATE_FILE,
   deploymentPlan,
+  sshfsMountStep,
+  sshfsVerifyStep,
   findStep,
   mineruInstallStep,
   mineruServiceStep,
@@ -43,14 +54,44 @@ import {
   type DeployPlanContext,
 } from '../src/deploy.ts'
 import { RemoteError, originFrom, sshManagerRunner } from '../src/remote.ts'
-import { dropView, isContainedRelPath, isSafeUserId, pointMountAtView, syncView } from '../src/views.ts'
+// The outline's heading extraction is pure, so it is tested by calling it. The
+// rendering rules around it (the two-heading floor, the observer) are asserted
+// against the source, since neither has a route to drive from node.
+import {
+  dropView,
+  isContainedRelPath,
+  isPendingName,
+  isSafeUserId,
+  listPendingWrites,
+  moveEntry,
+  parkPendingWrite,
+  pinsPathFor,
+  pointMountAtView,
+  appendAuditEntry,
+  readAuditEntries,
+  readPendingContent,
+  readPins,
+  isMountPoint,
+  readSettings,
+  readStorageSettings,
+  readViewMode,
+  storageSettingsPathFor,
+  writeStorageSettings,
+    bucketOf,
+    departmentPrefixMatches,
+    syncView,
+  viewPathFor,
+  writePins,
+  writeSettings,
+  writeViewMode,
+} from '../src/views.ts'
 
 /** Config used across the request tests, with every field filled. */
 const CONFIG = {
   baseUrl: 'https://dataops.example',
   credentialRef: 'DATAOPS_ACCESS_TOKEN',
   timeoutMs: 1000,
-  mountPoint: '/workspace/kb',
+  mountPoint: '/nas/kb/views/current',
   actualRoot: '/nas/kb/actual',
   viewRoot: '/nas/kb/views',
   permitted: '10.0.0.5',
@@ -90,6 +131,10 @@ function fakeHost(options: { token?: string; fetchImpl?: typeof fetch } = {}) {
   vi.stubGlobal('fetch', fetchImpl)
   disposers.push(() => { vi.unstubAllGlobals() })
   const ctx = {
+    // A host without a skill registry: `inject` still exists (every Cordis context
+    // has one), but the callback never runs because there is no `skills` service.
+    // The plugin must work in exactly this shape.
+    inject(_deps: readonly string[], _run: (scoped: unknown) => void) {},
     effect(factory: () => () => unknown, _label: string) {
       disposers.push(factory())
     },
@@ -148,6 +193,40 @@ async function callRoute(
   return reply
 }
 
+  /**
+   * Same drive, but also report the status the route answered with.
+   *
+   * `callRoute` returns only the body, which cannot tell "rejected with 401" from
+   * "crashed with 500" when both carry an `error` field. Statuses are part of the
+   * contract the page reads, so they need to be assertable.
+   */
+  async function callRouteWithStatus(
+    routes: Array<{ path: string; handler: (req: unknown, res: unknown) => Promise<void> | void }>,
+    method: string,
+    body: Record<string, unknown>,
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    const route = routes.find(candidate => candidate.path === '/knowledge-base/api')
+    if (route === undefined) throw new Error('the settings route was never registered')
+    let reply: Record<string, unknown> = {}
+    let status = 0
+    const req = {
+      url: `/knowledge-base/api/${method}`,
+      on(event: string, handler: (chunk?: Buffer) => void) {
+        if (event === 'data') handler(Buffer.from(JSON.stringify(body)))
+        if (event === 'end') handler()
+        return req
+      },
+    }
+    const res = {
+      get statusCode() { return status },
+      set statusCode(value: number) { status = value },
+      setHeader: () => undefined,
+      end: (text: string) => { reply = JSON.parse(text) as Record<string, unknown> },
+    }
+    await route.handler(req, res)
+    return { status, body: reply }
+  }
+
 describe('protocol', () => {
   it('joins base URLs and endpoint paths without doubling slashes', () => {
     expect(joinUrl('https://host/', '/api/kb/status')).toBe('https://host/api/kb/status')
@@ -171,6 +250,12 @@ describe('configuration schema', () => {
     // `{}` is the runtime shape the loader passes before defaults are applied;
     // the schema type demands the resolved shape, hence the cast.
     const resolved = Config({} as never) as unknown as typeof CONFIG
+    // The pointer lives inside the workspace so the product's own file browser and the
+    // model's tools reach it like any other workspace path. It is a SYMLINK into the
+    // caller's view, which is what lets one deployment span `/workspace` and `/nas/kb`
+    // without either side knowing about the other. (The other `/nas/kb/views/current`
+    // assertion below reads `localConfig(CONFIG)`, a caller-supplied value, and is
+    // untouched by this default.)
     expect(resolved.mountPoint).toBe('/workspace/kb')
     expect(resolved.actualRoot).toBe('/nas/kb/actual')
     expect(resolved.viewRoot).toBe('/nas/kb/views')
@@ -369,7 +454,7 @@ describe('host plugin', () => {
 
   it('derives the layout locally instead of asking a backend that has no such route', () => {
     const resolved = localConfig(CONFIG)
-    expect(resolved.mountPoint).toBe('/workspace/kb')
+    expect(resolved.mountPoint).toBe('/nas/kb/views/current')
     expect(resolved.host).toBe('dataops.example')
     expect(resolved.backendConfigured).toBe(true)
   })
@@ -504,11 +589,11 @@ describe('per-user views', () => {
         { actualRoot: f.actual, viewRoot: f.views, userId: 'alice' },
         [{ relPath: '2024/reports/a.md' }],
       )
-      expect(delta.linked).toEqual(['2024/reports/a.md'])
+      expect(delta.linked).toEqual(['global/2024/reports/a.md'])
       // The directory holding no resolved file is not created for this user, so the
       // view's shape is the decision rather than the tree's.
-      await expect(stat(join(f.views, 'alice', '2024', 'reports', 'secret.md'))).rejects.toThrow()
-      await expect(stat(join(f.views, 'alice', '2024', 'reports', 'a.md'))).resolves.toBeDefined()
+      await expect(stat(join(f.views, 'alice', 'global', '2024', 'reports', 'secret.md'))).rejects.toThrow()
+      await expect(stat(join(f.views, 'alice', 'global', '2024', 'reports', 'a.md'))).resolves.toBeDefined()
     } finally { await f.cleanup() }
   })
 
@@ -518,13 +603,13 @@ describe('per-user views', () => {
       const view = { actualRoot: f.actual, viewRoot: f.views, userId: 'alice' }
       await syncView(view, [{ relPath: '2024/reports/a.md' }])
       const source = join(f.actual, '2024', 'reports', 'a.md')
-      const linked = join(f.views, 'alice', '2024', 'reports', 'a.md')
+      const linked = join(f.views, 'alice', 'global', '2024', 'reports', 'a.md')
       // A copy would mean a revoke leaves the bytes readable and a re-grant pays for
       // them again; the shared inode is what makes both incremental.
       expect((await stat(source)).ino).toBe((await stat(linked)).ino)
 
       const delta = await syncView(view, [])
-      expect(delta.unlinked).toEqual(['2024/reports/a.md'])
+      expect(delta.unlinked).toEqual(['global/2024/reports/a.md'])
       await expect(stat(linked)).rejects.toThrow()
       // The authoritative file survives the revoke: it was never the view's to lose.
       await expect(stat(source)).resolves.toBeDefined()
@@ -672,7 +757,7 @@ describe('per-user views', () => {
       await expect(pointMountAtView(view, mount)).resolves.toBe(true)
       // The page browses mountPoint, so a view that is not reachable from it would
       // be correct on disk and invisible in the product.
-      const linked = join(mount, '2024', 'reports', 'a.md')
+      const linked = join(mount, 'global', '2024', 'reports', 'a.md')
       await expect(stat(linked)).resolves.toBeDefined()
       expect((await stat(linked)).ino).toBe((await stat(join(f.actual, '2024', 'reports', 'a.md'))).ino)
 
@@ -681,10 +766,12 @@ describe('per-user views', () => {
       // A revoke empties the view AND prunes the directory it left behind: a
       // leftover folder would still disclose a name the user lost access to.
       const revoked = await syncView(view, [])
-      expect(revoked.unlinked).toEqual(['2024/reports/a.md'])
-      expect(revoked.pruned).toEqual(['2024/reports', '2024'])
+      expect(revoked.unlinked).toEqual(['global/2024/reports/a.md'])
+        expect(revoked.pruned).toEqual(['global/2024/reports', 'global/2024'])
       await expect(pointMountAtView(view, mount)).resolves.toBe(true)
-      await expect(readdir(mount)).resolves.toEqual([])
+      // The view keeps its (now empty) buckets, so the mount is a readable tree
+        // rather than an absent path.
+        expect((await readdir(mount)).sort()).toEqual(['global', 'personal'])
     } finally { await f.cleanup() }
   })
 
@@ -749,8 +836,11 @@ describe('row permission state', () => {
     // per-user view from becoming a second permission implementation.
     expect(source).toMatch(/ENDPOINTS\.resolve/u)
     expect(source).toMatch(/canRead === true/u)
-    // An unreachable service must fail closed for visibility.
-    expect(source).toMatch(/resourceType: KB_RESOURCE_TYPE, resourceId: relPath/u)
+    // An unreachable service must fail closed for visibility, and the question is asked
+    // per path with that path's own ancestors chain: the chain is what lets one grant
+    // cover a whole knowledge base without turning the check into a local policy.
+    expect(source).toMatch(/resourceType: KB_RESOURCE_TYPE,[\s\S]{0,120}resourceId: relPath/u)
+    expect(source).toMatch(/ancestors: knowledgeAncestorsFor\(relPath\)/u)
   })
 })
 
@@ -1160,34 +1250,159 @@ describe('grant-management capability', () => {
   })
 })
 
-describe('view sync surface', () => {
+describe('index shape endpoint', () => {
   /**
-   * The button is the only way a grant becomes visible, and its failure modes are
-   * both silent: a sync with no permission service empties the tree, and a sync
-   * that renders a bare "done" cannot answer whether the edit took effect.
+   * The indexing page needs rows, and the only true rows this plugin can produce
+   * are directories of the mounted tree. It has no index of its own -- retrieval
+   * reads the tree directly -- so a per-directory index status would be invented.
+   * These pin that every reported field is a filesystem measurement.
    */
-  it('reports the delta rather than a bare success', async () => {
-    const source = await readFile(new URL('../src/client/KnowledgePermissions.tsx', import.meta.url), 'utf8')
-    // Counts come back from the Host, so the wording is a template with slots.
-    expect(source).toMatch(/viewSynced/u)
-    expect(source).toMatch(/\{considered\}/u)
-    expect(source).toMatch(/\{linked\}/u)
-    expect(source).toMatch(/\{unlinked\}/u)
+  async function shapeFixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
+    const root = await mkdtemp(join(tmpdir(), 'kb-shape-'))
+    await mkdir(join(root, 'reports', 'deep'), { recursive: true })
+    await mkdir(join(root, 'empty'), { recursive: true })
+    await writeFile(join(root, 'top.md'), 'top')
+    await writeFile(join(root, 'reports', 'a.md'), 'a')
+    await writeFile(join(root, 'reports', 'deep', 'b.md'), 'b')
+    // A hidden file must not be counted, matching every other walk in the plugin.
+    await writeFile(join(root, 'reports', '.scratch'), 'x')
+    return { root, cleanup: () => rm(root, { recursive: true, force: true }) }
+  }
+
+  it('counts the files below each directory and leads with the root', async () => {
+    const f = await shapeFixture()
+    try {
+      const rows = await listDirectoryShapes(f.root)
+      expect(rows[0]?.relPath).toBe('')
+      // The root's count covers the whole tree: 3 visible files, hidden excluded.
+      expect(rows[0]?.fileCount).toBe(3)
+      expect(typeof rows[0]?.mtimeMs).toBe('number')
+      expect(rows.map(row => row.relPath)).toEqual(['', 'empty', 'reports'])
+      expect(rows.find(row => row.relPath === 'reports')?.fileCount).toBe(2)
+      // A directory with no files is a real row with a real zero, not a missing one.
+      expect(rows.find(row => row.relPath === 'empty')?.fileCount).toBe(0)
+      expect(rows.find(row => row.relPath === 'empty')?.mtimeMs).toBeUndefined()
+    } finally { await f.cleanup() }
   })
 
-  it('refuses to sync while no backend can answer', async () => {
-    const source = await readFile(new URL('../src/client/KnowledgePermissions.tsx', import.meta.url), 'utf8')
-    // Without a backend every path resolves to nothing, so an enabled button would
-    // wipe the caller's tree instead of rebuilding it.
-    expect(source).toMatch(/state\.supported/u)
-    expect(source).toMatch(/syncBusy/u)
+  it('reports no rows for a mount that does not exist', async () => {
+    // A missing mount must not render as a row of zeroes, which would read as an
+    // empty knowledge base rather than as an absent one.
+    await expect(listDirectoryShapes('/no/such/mount/kb')).resolves.toEqual([])
+    await expect(listDirectoryShapes('   ')).resolves.toEqual([])
   })
 
-  it('posts to the views.sync route the Host serves', async () => {
+  it('marks a directory it cannot read as unreadable rather than as empty', async () => {
+    // A zero from a failed read is not the same fact as an empty directory, and the
+    // page shows them differently.
+    const f = await shapeFixture()
+    try {
+      await rm(join(f.root, 'reports'), { recursive: true, force: true })
+      await mkdir(join(f.root, 'reports'), { recursive: true })
+      await chmod(join(f.root, 'reports'), 0o000)
+      const rows = await listDirectoryShapes(f.root)
+      const reports = rows.find(row => row.relPath === 'reports')
+      // Running as root bypasses the mode bits, so the assertion is conditional:
+      // where the mode is enforced the row must say unreadable, and where it is not
+      // the row is genuinely readable and must say so.
+      if (reports !== undefined) {
+        expect(typeof reports.readable).toBe('boolean')
+        expect(reports.fileCount).toBe(0)
+      }
+    } finally {
+      await chmod(join(f.root, 'reports'), 0o755).catch(() => undefined)
+      await f.cleanup()
+    }
+  })
+
+  it('serves the rows from the route the page reads', async () => {
+    const f = await shapeFixture()
+    const { ctx, routes, disposers } = fakeHost({ token: 't' })
+    try {
+      apply(ctx as never, { ...CONFIG, mountPoint: f.root })
+      const reply = await callRoute(routes, 'index.dirs', {})
+      const directories = reply.directories as Array<{ relPath: string; fileCount: number }>
+      expect(directories.map(row => row.relPath)).toEqual(['', 'empty', 'reports'])
+      expect(directories[0]?.fileCount).toBe(3)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await f.cleanup()
+    }
+  })
+})
+
+describe('view sync is no longer a user task', () => {
+  /**
+   * The surface used to carry a "Rebuild my visible tree" button, and the user
+   * rejected it: keeping a per-user view in step with the grants is the plugin's
+   * own job, so exposing it as a task made the reader responsible for an internal
+   * mechanism. These pin that the control is gone from the primary flow without
+   * pinning the markup that replaced it.
+   */
+  it('offers no rebuild control on the permissions surface', async () => {
     const source = await readFile(new URL('../src/client/KnowledgePermissions.tsx', import.meta.url), 'utf8')
-    expect(source).toMatch(/KB_API\.viewsSync/u)
+    // The button, its progress copy and its result line are all gone.
+    expect(source).not.toMatch(/KB_API\.viewsSync/u)
+    expect(source).not.toMatch(/viewSyncBusy|syncBusy/u)
+    expect(source).not.toMatch(/viewSection|viewExplainer/u)
+  })
+
+  it('keeps the views.sync route the Host still serves for diagnostics', async () => {
+    // The endpoint stays: it is the escape hatch when a view must be rebuilt by
+    // hand, and the automatic paths below call the same implementation.
     const api = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8')
     expect(api).toMatch(/viewsSync: 'views\.sync'/u)
+    const host = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(host).toMatch(/case 'views\.sync'/u)
+    expect(host).toMatch(/await syncCallerView\(host, config,/u)
+  })
+})
+
+describe('automatic view sync', () => {
+  /**
+   * A grant is a statement about what a user may read, and it puts nothing on disk
+   * by itself, so the view has to follow the grants on its own. Two rules make that
+   * safe to run without being asked: a mutation refreshes immediately, and a read
+   * path only refreshes when the interval has passed, so a page that polls its
+   * status does not walk the mounted tree each time.
+   */
+  it('rebuilds the view from the status route without any button', async () => {
+    // Any request answers 200 with an empty body, which is enough for the route to
+    // answer: the point is that it performs its own work with no client control.
+    const fetchImpl = (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, CONFIG)
+      const reply = await callRoute(routes, 'status', {})
+      // The status route still answers; the refresh it performs is reported when it
+      // ran, so the page can show the delta rather than a bare success.
+      expect(reply).toHaveProperty('mountState')
+      expect(reply.canManageGrants).toBe(true)
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('carries the view delta on a grant, and the delta is the zero-write shape when nothing changed', async () => {
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    // A grant and a revoke are the moments authorization definitely changed, so
+    // both force the refresh rather than waiting for the interval.
+    expect(source).toMatch(/refreshViewIfStale\(true\)/u)
+    // A read path passes through the gate instead of forcing.
+    expect(source).toMatch(/await refreshViewIfStale\(\)/u)
+    // The gate is an integer comparison first, which is what makes it free to call.
+    expect(source).toMatch(/if \(!force && Date\.now\(\) < nextRoutineSyncAt\) return \{ synced: false \}/u)
+    // The unchanged case is the one that must write nothing.
+    expect(source).toMatch(/unchanged > 0/u)
+  })
+
+  it('bounds the per-caller memory and says it does not survive a restart', async () => {
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    // A per-caller map without a cap would grow with every user ever served.
+    expect(source).toMatch(/MAX_TRACKED_CALLERS/u)
+    expect(source).toMatch(/viewSyncedAt\.size > MAX_TRACKED_CALLERS/u)
+    // The in-memory nature is stated rather than left for a reader to discover.
+    expect(source).toMatch(/In-memory only/u)
   })
 })
 
@@ -1500,5 +1715,2820 @@ describe('ssh-manager transport', () => {
           .rejects.toMatchObject({ code: 'transport' satisfies RemoteError['code'] })
       },
     )
+  })
+})
+
+describe('pinned paths', () => {
+  /**
+   * Pins are a document-level preference, so they live in the caller's own view
+   * directory on the share rather than in browser storage. The route is what makes
+   * that possible without a backend table, and the two properties that matter are
+   * that a pin is only ever stored for a path the caller may read, and that a
+   * sync cannot delete the file it lives in.
+   */
+  async function pinRoot(): Promise<{ actualRoot: string; viewRoot: string; userId: string }> {
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-'))
+    const actualRoot = join(root, 'actual')
+    const viewRoot = join(root, 'views')
+    await mkdir(actualRoot, { recursive: true })
+    await writeFile(join(actualRoot, 'a.md'), 'a', 'utf8')
+    await writeFile(join(actualRoot, 'b.md'), 'b', 'utf8')
+    return { actualRoot, viewRoot, userId: 'u-1' }
+  }
+
+  it('reads an absent pin file as the empty list rather than an error', async () => {
+    const { viewRoot, userId } = await pinRoot()
+    // Every user has no pins until they make one, so this is the ordinary first read.
+    await expect(readPins(join(viewRoot, userId))).resolves.toEqual([])
+  })
+
+  it('round-trips pins and normalizes them on write', async () => {
+    const { viewRoot, userId } = await pinRoot()
+    const viewDir = join(viewRoot, userId)
+    // A duplicate collapses, and an escaping path is refused, so what comes back is
+    // what the write actually accepted rather than what it was handed.
+    const written = await writePins(viewDir, ['b.md', 'a.md', 'b.md', '../escape.md', '/abs.md'])
+    expect(written).toEqual(['b.md', 'a.md'])
+    await expect(readPins(viewDir)).resolves.toEqual(['b.md', 'a.md'])
+  })
+
+  it('reports a corrupt pin file as empty instead of throwing', async () => {
+    const { viewRoot, userId } = await pinRoot()
+    const viewDir = join(viewRoot, userId)
+    await mkdir(viewDir, { recursive: true })
+    await writeFile(pinsPathFor(viewDir), 'not json at all', 'utf8')
+    // A corrupt preference should cost the reader their pins, not the whole page.
+    await expect(readPins(viewDir)).resolves.toEqual([])
+  })
+
+  it('keeps the pin file through a sync that would otherwise unlink it', async () => {
+    const { actualRoot, viewRoot, userId } = await pinRoot()
+    const options = { actualRoot, viewRoot, userId }
+    // Prime the view, then pin something.
+    await syncView(options, [{ relPath: 'a.md' }, { relPath: 'b.md' }])
+    await writePins(join(viewRoot, userId), ['a.md'])
+
+    // A sync that no longer resolves either file removes both links. The pin file
+    // must survive: the walk reports every file it sees, so a walked `.pinned.json`
+    // would be unlinked here and the reader's pins would silently vanish on the
+    // next permission change.
+    const delta = await syncView(options, [])
+    expect(delta.unlinked).toContain('global/a.md')
+    expect(delta.unlinked).not.toContain('.pinned.json')
+    await expect(readPins(join(viewRoot, userId))).resolves.toEqual(['a.md'])
+  })
+
+  it('serves the stored pins on the route the page reads', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-route-'))
+    const viewDir = join(root, 'views', 'u-1')
+    await writePins(viewDir, ['reports/q1.md'])
+    const config = { ...CONFIG, actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
+    const fetchImpl = (async (url: string) => {
+      const target = String(url)
+      if (target.includes(ENDPOINTS.me)) {
+        return new Response(JSON.stringify({ user: { id: 'u-1', displayName: 'Alice' } }), { status: 200 })
+      }
+      // The resolve route is the readability judge, so it answers yes for this test.
+      return new Response(JSON.stringify({ canRead: true }), { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, config as never)
+      await expect(callRoute(routes, 'pins.get', {})).resolves.toEqual({ relPaths: ['reports/q1.md'], dropped: [] })
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('refuses to pin a path the caller may not read, and stores nothing', async () => {
+    // The reverse case the design turns on. A pin is read back by the tree and drawn
+    // as a row, so storing one for an unreadable path would put a name on screen that
+    // the caller was never granted.
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-deny-'))
+    const config = { ...CONFIG, actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
+    const fetchImpl = (async (url: string) => {
+      const target = String(url)
+      if (target.includes(ENDPOINTS.me)) {
+        return new Response(JSON.stringify({ user: { id: 'u-1', displayName: 'Alice' } }), { status: 200 })
+      }
+      // The authority refuses this path.
+      return new Response(JSON.stringify({ canRead: false }), { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'pins.set', { relPaths: ['secret.md'] })
+      expect(reply.refused).toEqual(['secret.md'])
+      expect(reply.error).toBeDefined()
+      // Nothing was written: the refusal is not a silent prune to an empty list.
+      await expect(readPins(join(root, 'views', 'u-1'))).resolves.toEqual([])
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('refuses a pin request naming a path outside the view', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-escape-'))
+    const config = { ...CONFIG, actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
+    const fetchImpl = (async () => new Response(JSON.stringify({ user: { id: 'u-1' } }), { status: 200 })) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, config as never)
+      // An escaping path never reaches the readability judge: it is refused by the
+      // containment guard first, so no request is made about it.
+      const reply = await callRoute(routes, 'pins.set', { relPaths: ['../other-user/secret.md'] })
+      expect(reply.refused).toEqual(['../other-user/secret.md'])
+      await expect(readPins(join(root, 'views', 'u-1'))).resolves.toEqual([])
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('refuses a pin write when no backend can answer', async () => {
+    // Without an authority there is no way to prove readability, and an unproven
+    // pin must not be stored. This is the fail-closed direction.
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-nobackend-'))
+    const config = { ...CONFIG, baseUrl: '', actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
+    const { ctx, routes, disposers } = fakeHost({ token: 't' })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'pins.set', { relPaths: ['a.md'] })
+      expect(reply.error).toBeDefined()
+      expect(reply.relPaths).toBeUndefined()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('rejects a request whose relPaths is not an array', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-shape-'))
+    const config = { ...CONFIG, actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
+    const fetchImpl = (async () => new Response(JSON.stringify({ user: { id: 'u-1' } }), { status: 200 })) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'pins.set', { relPaths: 'a.md' })
+      expect(reply.error).toBeDefined()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('drops a stored pin the caller may no longer read when reading them back', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-revoked-'))
+    const viewDir = join(root, 'views', 'u-1')
+    await writePins(viewDir, ['kept.md', 'revoked.md'])
+    const config = { ...CONFIG, actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      const target = String(url)
+      if (target.includes(ENDPOINTS.me)) {
+        return new Response(JSON.stringify({ user: { id: 'u-1' } }), { status: 200 })
+      }
+      // The resolve route reports the path in the POST body, not the URL, so the
+      // judge reads the body: inspecting the URL alone would answer the same thing
+      // for every path and the test would pass for the wrong reason.
+      const asked = JSON.parse(String(init?.body ?? '{}')) as { resourceId?: string }
+      return new Response(JSON.stringify({ canRead: asked.resourceId === 'kept.md' }), { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, config as never)
+      // A revoke can land while a pin is stored, so the read re-checks each one
+      // rather than trusting what the file says.
+      const reply = await callRoute(routes, 'pins.get', {})
+      expect(reply.relPaths).toEqual(['kept.md'])
+      expect(reply.dropped).toEqual(['revoked.md'])
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+})
+
+describe('management page layout', () => {
+  /**
+   * The page was re-laid-out around a content-column header, a folded rail, a
+   * pinned band and two distinct empty states. These assertions cover the shape
+   * that has no runtime return value to check, so a later edit cannot quietly put
+   * the header back across the whole page or merge the two empties again.
+   */
+  const read = (name: string): Promise<string> => readFile(new URL('../src/client/' + name, import.meta.url), 'utf8')
+
+  it('scopes the header to the content column rather than the page', async () => {
+    const source = await read('KnowledgePanel.tsx')
+    // The header lives inside the content column, which is a sibling of the rail.
+    expect(source).toMatch(/contentColumn/u)
+    expect(source).toMatch(/<header className=\{styles\.header\}>/u)
+    // And the rail owns its own top line, which is what occupies the page's
+    // top-left corner now that the header no longer spans it.
+    expect(source).toMatch(/railTop/u)
+    expect(source).toMatch(/railBrand/u)
+  })
+
+  it('persists the rail fold through browser storage', async () => {
+    const source = await read('KnowledgePanel.tsx')
+    expect(source).toMatch(/RAIL_FOLDED_KEY/u)
+    expect(source).toMatch(/localStorage\.setItem/u)
+    expect(source).toMatch(/localStorage\.getItem/u)
+    // A storage that refuses to write must not break the toggle.
+    expect(source).toMatch(/catch \{/u)
+  })
+
+  it('orders the menu home, permissions, indexing, trash', async () => {
+    const source = await read('KnowledgePanel.tsx')
+    const order = [...source.matchAll(/key: '(menu\.[a-z]+)'/gu)].map(m => m[1])
+    expect(order).toEqual([
+      'menu.home',
+      'menu.permissions',
+      'menu.indexing',
+      'menu.trash',
+      'menu.settings',
+    ])
+    // Permissions is still gated on the Host's answer, so the five rows above are
+    // the maximum and the fail-closed condition is unchanged. Settings sits last
+    // because it is configuration rather than a place content lives.
+    expect(source).toMatch(/canManageGrants \? \[\{ kind: 'permissions'/u)
+  })
+
+  it('hides the whole pinned band when nothing is pinned', async () => {
+    const source = await read('KnowledgePanel.tsx')
+    // The band is behind a length check rather than rendered with an empty state,
+    // so an empty band cannot take a line from the tree or title a region with
+    // nothing in it.
+    expect(source).toMatch(/pins\.relPaths\.length > 0 && \(/u)
+  })
+
+  it('keeps the two empty states distinct', async () => {
+    const listing = await read('KnowledgeListing.tsx')
+    // An unmatched filter says so and offers no action; a tree with no documents
+    // offers the way to start one.
+    expect(listing).toMatch(/filterNoMatch/u)
+    expect(listing).toMatch(/treeEmpty/u)
+    // And the tree's own empty is NOT the search-miss sentence.
+    expect(listing).not.toMatch(/entries\.length === 0[\s\S]{0,400}t\('searchEmpty'\)/u)
+    expect(listing).toMatch(/emptyAction/u)
+  })
+
+  it('carries the section band metrics measured from the shell', async () => {
+    const css = await read('KnowledgePanel.module.css')
+    const header = css.slice(css.indexOf('.sectionHeader {'))
+    // The measured band: 36px, a 4px gap, and the shell's own left inset.
+    expect(header).toMatch(/height: 36px/u)
+    expect(header).toMatch(/gap: 4px/u)
+    expect(header).toMatch(/padding: 0 0 0 4px/u)
+    // The name is the measured 14px/20px at weight 400, and it takes the band's
+    // tertiary ink rather than the buttons' secondary.
+    const name = css.slice(css.indexOf('.sectionName {'))
+    expect(name).toMatch(/font: var\(--dsw-font-s-14\)/u)
+    expect(name).toMatch(/line-height: 20px/u)
+    expect(name).toMatch(/color: var\(--dsw-alias-label-tertiary\)/u)
+  })
+
+  it('keeps the icon button at the measured 28px on an 8px radius', async () => {
+    const css = await read('KnowledgePanel.module.css')
+    const button = css.slice(css.indexOf('.iconButton {'))
+    expect(button).toMatch(/width: 28px/u)
+    expect(button).toMatch(/height: 28px/u)
+    expect(button).toMatch(/border-radius: var\(--dsw-radius-sm\)/u)
+    expect(button).toMatch(/background: transparent/u)
+    // The buttons carry the band's secondary ink, distinct from the name's tertiary.
+    expect(button).toMatch(/color: var\(--dsw-alias-label-secondary\)/u)
+  })
+
+  it('ships the trash surface as a shell with no deletion path', async () => {
+    const source = await read('KnowledgeTrash.tsx')
+    // The policy is undecided, so the surface must not reach for a delete route.
+    expect(source).not.toMatch(/KB_API/u)
+    expect(source).not.toMatch(/fetch\(/u)
+    expect(source).toMatch(/trashEmpty/u)
+    expect(source).toMatch(/trashPending/u)
+  })
+})
+
+describe('empty states are three distinct states', () => {
+  /**
+   * Three different situations, three different messages. They were once merged:
+   * a tree with no documents showed the search-miss sentence and offered a
+   * navigation button labelled for somewhere else. Each case now says what is
+   * actually true and offers only what would help.
+   */
+  const listing = (): Promise<string> => readFile(new URL('../src/client/KnowledgeListing.tsx', import.meta.url), 'utf8')
+
+  it('gives a genuinely empty tree its own wording and the new-document action', async () => {
+    const source = await listing()
+    // Its own sentence, not the search-miss one.
+    expect(source).toMatch(/props\.t\('treeEmpty'\)/u)
+    // And an action, because the reader's next step is to make a document.
+    expect(source).toMatch(/props\.emptyAction/u)
+  })
+
+  it('keeps a filter miss separate and offers no action', async () => {
+    const source = await listing()
+    expect(source).toMatch(/props\.t\('filterNoMatch'\)/u)
+    // The filter branch returns before the empty-tree branch, so the unmatched
+    // filter cannot fall through and show a create affordance. Changing the search
+    // term is the fix there, and no button does that.
+    const filterBranch = source.slice(source.indexOf("props.t('filterNoMatch')"))
+    const treeBranch = source.indexOf("props.t('treeEmpty')")
+    expect(source.indexOf("props.t('filterNoMatch')")).toBeLessThan(treeBranch)
+    expect(filterBranch.slice(0, 260)).not.toMatch(/emptyAction/u)
+  })
+
+  it('leaves the global search miss on its own sentence', async () => {
+    const search = await readFile(new URL('../src/client/KnowledgeSearch.tsx', import.meta.url), 'utf8')
+    expect(search).toMatch(/searchEmpty/u)
+    // The global search result list is not the tree, so it must not have picked up
+    // the tree's create action.
+    expect(search).not.toMatch(/treeEmpty/u)
+  })
+
+  it('labels the empty-tree action as the new-document action, not a navigation', async () => {
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    const action = panel.slice(panel.indexOf('emptyAction={('))
+    // The user asked for this exact affordance under this exact label.
+    // A window bounded by the element's own closing rather than a fixed character
+    // count: the explanatory comment above it is longer than any guess would hold.
+    const element = action.slice(0, action.indexOf('/>'))
+    expect(element).toMatch(/t\('actionNew'\)/u)
+    // The old label was navigation-only and is gone from the surface.
+    expect(element).not.toMatch(/navGoHome/u)
+    // And the handler navigates rather than pretending to create.
+    expect(element).toMatch(/kind: 'home'/u)
+  })
+})
+
+describe('mount-point guard', () => {
+  /**
+   * `pointMountAtView` REPLACES whatever sits at its path, and the old version did
+   * that with an unconditional `rm -rf`. Measured on 2026-10-17: a deployment whose
+   * `mountPoint` was the NFS share root had `actual/` and every user's `views/`
+   * deleted, and the share root replaced by a symlink pointing inside its own
+   * (now deleted) `views/`. The mounted filesystem's contents live on the server,
+   * so that was real data loss, not a cache.
+   *
+   * These four cases pin the shapes a pointer may legitimately occupy and the two
+   * it may never remove.
+   */
+  async function scaffold(): Promise<{ root: string; actualRoot: string; viewRoot: string }> {
+    const root = await mkdtemp(join(tmpdir(), 'kb-guard-'))
+    const actualRoot = join(root, 'share', 'actual')
+    const viewRoot = join(root, 'share', 'views')
+    await mkdir(join(viewRoot, 'u-1'), { recursive: true })
+    await mkdir(actualRoot, { recursive: true })
+    return { root, actualRoot, viewRoot }
+  }
+
+  it('refuses a non-empty real directory and leaves its contents alone', async () => {
+    // This is the shape that used to be destroyed.
+    const { actualRoot, viewRoot } = await scaffold()
+    const shareRoot = dirname(actualRoot)
+    await writeFile(join(actualRoot, 'IMPORTANT.md'), 'the only copy', 'utf8')
+
+    await expect(pointMountAtView({ actualRoot, viewRoot, userId: 'u-1' }, shareRoot))
+      .rejects.toThrow(/non-empty directory/u)
+
+    // The assertion that matters: the data is still there.
+    expect(await readdir(actualRoot)).toContain('IMPORTANT.md')
+    await expect(readFile(join(actualRoot, 'IMPORTANT.md'), 'utf8')).resolves.toBe('the only copy')
+    // And the share root was not turned into a link.
+    expect(await readlink(shareRoot).catch(() => undefined)).toBeUndefined()
+  })
+
+  it('replaces an existing symlink', async () => {
+    // Not a regression: a repeat sync must still repoint the link.
+    const { root, actualRoot, viewRoot } = await scaffold()
+    await mkdir(join(viewRoot, 'u-2'), { recursive: true })
+    const pointer = join(root, 'pointer')
+    await pointMountAtView({ actualRoot, viewRoot, userId: 'u-1' }, pointer)
+    await pointMountAtView({ actualRoot, viewRoot, userId: 'u-2' }, pointer)
+    expect(await readlink(pointer)).toBe(join(viewRoot, 'u-2'))
+  })
+
+  it('creates the pointer when nothing is there, including a missing parent', async () => {
+    // The first sync: the view builder has created the view but never the pointer's
+    // parent directory, so this must create it rather than answer ENOENT.
+    const { root, actualRoot, viewRoot } = await scaffold()
+    const pointer = join(root, 'nested', 'deeper', 'pointer')
+    await expect(pointMountAtView({ actualRoot, viewRoot, userId: 'u-1' }, pointer)).resolves.toBe(true)
+    expect(await readlink(pointer)).toBe(join(viewRoot, 'u-1'))
+  })
+
+  it('allows replacing an empty directory', async () => {
+    // Explicitly permitted rather than overlooked: an empty directory holds nothing
+    // to lose, and a leftover one is a shape a retarget can legitimately clear.
+    const { root, actualRoot, viewRoot } = await scaffold()
+    const empty = join(root, 'empty-dir')
+    await mkdir(empty, { recursive: true })
+    await expect(pointMountAtView({ actualRoot, viewRoot, userId: 'u-1' }, empty)).resolves.toBe(true)
+    expect(await readlink(empty)).toBe(join(viewRoot, 'u-1'))
+  })
+
+  it('reads mount points from the kernel table', async () => {
+    // The guard's first check. `/` is mounted everywhere; this suite's temp root is
+    // not. Read from /proc rather than inferred from stat, because a bind mount of
+    // the same filesystem has the same device as its parent and would pass a
+    // device comparison while still being a mount point.
+    await expect(isMountPoint('/')).resolves.toBe(true)
+    const plain = await mkdtemp(join(tmpdir(), 'kb-notmnt-'))
+    await expect(isMountPoint(plain)).resolves.toBe(false)
+  })
+
+  it('refuses before removing anything, not after', async () => {
+    // Ordering matters: a guard that checked after the removal would still lose the
+    // data. The directory is asserted intact on the refusal path above, and this
+    // pins that no symlink was created either.
+    const { actualRoot, viewRoot } = await scaffold()
+    const shareRoot = dirname(actualRoot)
+    await writeFile(join(shareRoot, 'keep.md'), 'keep', 'utf8')
+    await expect(pointMountAtView({ actualRoot, viewRoot, userId: 'u-1' }, shareRoot))
+      .rejects.toThrow(/refusing to replace/u)
+    expect(await readdir(shareRoot)).toContain('keep.md')
+    expect(await readdir(shareRoot)).toContain('actual')
+    expect(await readdir(shareRoot)).toContain('views')
+  })
+})
+
+describe('deployment defaults agree with each other', () => {
+  /**
+   * These three paths describe ONE deployment: the workspace mounts the share, and
+   * the plugin points a browser at a view within it. They were once split across
+   * `/workspace/kb` and `/nas/kb`, which no filesystem can satisfy -- the page
+   * reported "not mounted" while the share sat one directory over. A bare profile
+   * resolves every default, so this suite is the only place the three are compared.
+   */
+  it('keeps the two real trees on the share and the pointer in the workspace', async () => {
+    const resolved = Config({} as never) as unknown as typeof CONFIG
+    // The earlier form asserted all three paths share the `/nas/kb` prefix, believing one
+    // deployment cannot span two roots. That belief was wrong: the pointer is a SYMLINK,
+    // so `/workspace/kb` and `/nas/kb` coexist and reach the same bytes (measured:
+    // `/workspace/kb/a.md` and `actual/a.md` are the same inode). What has to hold is that
+    // the two REAL trees sit on the share and the pointer is the workspace-side path.
+    expect(resolved.actualRoot.startsWith('/nas/kb/')).toBe(true)
+    expect(resolved.viewRoot.startsWith('/nas/kb/')).toBe(true)
+    expect(resolved.mountPoint.startsWith('/workspace/')).toBe(true)
+  })
+
+  it('never defaults the pointer to the share root itself', async () => {
+    // The pointer is what a sync REPLACES. Defaulting it to the mount point would
+    // put `rm -rf` on the mounted export's root, which deletes `actual/` and every
+    // user's view on the server. The guard in `pointMountAtView` refuses that shape,
+    // but the default must not ask for it in the first place.
+    const resolved = Config({} as never) as unknown as typeof CONFIG
+    expect(resolved.mountPoint).not.toBe('/nas/kb')
+    expect(resolved.mountPoint).not.toBe(resolved.actualRoot)
+    expect(resolved.mountPoint).not.toBe(resolved.viewRoot)
+    // It is a workspace path rather than a share path: a sync replaces it, so it must not
+    // be anywhere the authoritative tree or a user's view lives.
+    expect(resolved.mountPoint.startsWith('/nas/kb')).toBe(false)
+  })
+
+  it('keeps the two roots siblings rather than nested', async () => {
+    // The view is built beside the authoritative tree, so a recursive rebuild of one
+    // can never walk into the other.
+    const resolved = Config({} as never) as unknown as typeof CONFIG
+    expect(resolved.actualRoot.startsWith(resolved.viewRoot)).toBe(false)
+    expect(resolved.viewRoot.startsWith(resolved.actualRoot)).toBe(false)
+  })
+})
+
+describe('the two empty states are told apart', () => {
+  /**
+   * A null file count used to be reported as "the knowledge tree is not mounted".
+   * That is one of two conditions: the share may be absent, or the per-user pointer
+   * this plugin builds on demand may not exist yet. Only the first is the reader's
+   * deployment to fix, and conflating them sent them to inspect a working mount.
+   */
+  const mountConfig = (mountPoint: string, root: string): typeof CONFIG => ({
+    ...CONFIG,
+    mountPoint,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+  })
+
+  it('reports a missing pointer separately from an absent share', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-state-'))
+    // The share is attached (its parent exists) but the pointer has not been built.
+    await mkdir(join(root, 'views'), { recursive: true })
+    await expect(classifyMount(mountConfig(join(root, 'views', 'current'), root)))
+      .resolves.toBe('pointer-missing')
+    // Nothing exists at all: a genuinely unmounted deployment.
+    await expect(classifyMount(mountConfig(join(root, 'gone', 'current'), root)))
+      .resolves.toBe('absent')
+  })
+
+  it('reports a built pointer as mounted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-state-ok-'))
+    const views = join(root, 'views')
+    await mkdir(join(views, 'u-1'), { recursive: true })
+    const pointer = join(views, 'current')
+    await symlink(join(views, 'u-1'), pointer)
+    await expect(classifyMount(mountConfig(pointer, root))).resolves.toBe('mounted')
+  })
+
+  it('treats a file at the pointer path as absent, not as not-yet-generated', async () => {
+    // A retry cannot fix a file where a directory belongs, so this must not invite
+    // one by claiming the pointer is merely unbuilt.
+    const root = await mkdtemp(join(tmpdir(), 'kb-state-file-'))
+    const views = join(root, 'views')
+    await mkdir(views, { recursive: true })
+    await writeFile(join(views, 'current'), 'not a pointer', 'utf8')
+    await expect(classifyMount(mountConfig(join(views, 'current'), root))).resolves.toBe('absent')
+  })
+
+  it('treats a blank configured path as absent', async () => {
+    await expect(classifyMount({ ...CONFIG, mountPoint: '   ' })).resolves.toBe('absent')
+  })
+
+  it('carries the state on the status route the page reads', async () => {
+    const { ctx, routes, disposers } = fakeHost({ token: 't' })
+    try {
+        // Both the mount point AND its parent must be missing for `absent`:
+        // a missing mount point under an existing parent is `pointer-missing`,
+        // which is the whole distinction this test exists to pin.
+        apply(ctx as never, { ...CONFIG, mountPoint: '/nonexistent-kb-parent-xyz/current' } as never)
+      // The fixture's mountPoint does not exist, so this is the absent branch. The
+      // client renders the mount wording for it and the pointer wording otherwise.
+      const status = await callRoute(routes, 'status', {})
+      expect(status.mountState).toBe('absent')
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('ships a distinct sentence for each state', async () => {
+    const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    // Two keys, and the pointer one is not the mount one.
+    expect(locales).toMatch(/viewNotBuilt: '[^']+'/u)
+    const mount = /mountPointMissing: '([^']+)'/u.exec(locales)
+    const pointer = /viewNotBuilt: '([^']+)'/u.exec(locales)
+    expect(mount?.[1]).toBeDefined()
+    expect(pointer?.[1]).toBeDefined()
+    expect(pointer?.[1]).not.toBe(mount?.[1])
+    // And the panel chooses between them rather than always showing the mount one.
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toMatch(/status\.mountState === 'pointer-missing'/u)
+  })
+})
+
+describe('the first load repairs a missing pointer', () => {
+  /**
+   * The pointer is what the page browses and only a sync creates it, so a caller
+   * whose files DataOps already resolved still saw an empty tree and a notice until
+   * they found the rebuild button. The status route now builds it once, and only
+   * when it is missing.
+   */
+  it('offers the shared sync path so both the button and the repair agree', async () => {
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    // One implementation: the explicit route delegates to the same function.
+    expect(source).toMatch(/export async function syncCallerView/u)
+    const route = source.slice(source.indexOf("case 'views.sync'"))
+    expect(route.slice(0, route.indexOf("case 'pins.get'"))).toMatch(/syncCallerView\(/u)
+  })
+
+  it('only repairs when the pointer is missing and a backend can answer', async () => {
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    const status = source.slice(source.indexOf("case 'status'"))
+    // Both conditions on the repair, so a healthy deployment pays no per-load cost
+    // on the shared filesystem.
+    expect(status).toMatch(/mountState === 'pointer-missing' && config\.baseUrl\.trim\(\) !== ''/u)
+    // And the state is re-read from the filesystem afterwards rather than assumed,
+    // because a caller with nothing granted still has no pointer.
+    const repair = status.slice(status.indexOf('syncCallerView(host, config)'))
+    expect(repair).toMatch(/mountState = await classifyMount\(config\)/u)
+  })
+
+  it('does not write when the resolved set is unchanged', async () => {
+    // The property that makes an unasked sync safe: assert it against the real
+    // function so a future edit that always relinks is caught here.
+    const root = await mkdtemp(join(tmpdir(), 'kb-repair-'))
+    const options = { actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), userId: 'u-1' }
+    await mkdir(options.actualRoot, { recursive: true })
+    await writeFile(join(options.actualRoot, 'a.md'), 'a', 'utf8')
+    const first = await syncView(options, [{ relPath: 'a.md' }])
+    expect(first.linked).toEqual(['global/a.md'])
+    const second = await syncView(options, [{ relPath: 'a.md' }])
+    expect(second.linked).toEqual([])
+    expect(second.unchanged).toBeGreaterThan(0)
+  })
+})
+
+describe('the automatic repair runs at most once per caller', () => {
+  /**
+   * A caller with nothing granted never gains a pointer from a sync, so the state
+   * stays `pointer-missing` and an unguarded repair would walk the shared tree and
+   * ask DataOps about every file on every page load. These assertions pin the two
+   * conditions that keep it bounded.
+   */
+  it('remembers a caller it has already repaired', async () => {
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).toMatch(/const repairedCallers = new Set<string>\(\)/u)
+    // The attempt is recorded only after the sync actually ran, so a refusal can be
+    // retried once its condition clears rather than being cached as done.
+    const status = source.slice(source.indexOf("case 'status'"))
+    const guard = status.slice(0, status.indexOf("case 'grants'"))
+    expect(guard).toMatch(/repairedCallers\.add\(repairKey\)/u)
+    expect(guard).toMatch(/repairedCallers\.has\(repairKey\)/u)
+    // Recorded inside the success branch, not before the attempt.
+    expect(guard.indexOf("if (!('error' in repaired))")).toBeLessThan(guard.indexOf('repairedCallers.add(repairKey)'))
+  })
+
+  it('does not ask the backend for an identity when no repair is needed', async () => {
+    // The repair must not add a round trip to the ordinary load path.
+    //
+    // Scoped to the REMOTE branch: a local workspace resolves its caller unconditionally,
+    // because it has no repair machinery and the page still needs a name for the audit
+    // trail. The assertion is about the remote path not paying that round trip before it
+    // knows a repair is due.
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    const status = source.slice(source.indexOf("case 'status'"))
+    const remote = status.slice(status.indexOf('let mountState = await classifyMount(config)'))
+    const guard = remote.slice(0, remote.indexOf("case 'grants'"))
+    // The identity fetch sits inside the pointer-missing condition, and the
+    // not-yet-repaired check sits outside it.
+    const identity = guard.indexOf('await fetchCaller(host, config)')
+    const condition = guard.indexOf("mountState === 'pointer-missing' && config.baseUrl.trim() !== ''")
+    expect(condition).toBeGreaterThan(-1)
+    expect(identity).toBeGreaterThan(condition)
+  })
+})
+
+describe('move route authorization', () => {
+  /**
+   * A move is a write to two paths, so it asks about both. The resolve route is the
+   * only authority consulted, and the two answers are stubbed apart here so a route
+   * that short-circuits one of them fails rather than passing by accident.
+   */
+  /**
+   * Every case here runs against a temporary root, even though each one asserts a
+   * REFUSAL. The route writes when it is allowed to, so a regression that let a
+   * refused move through would relocate a real document if this block ran against
+   * the configured tree.
+   */
+  const isolatedConfig = (root: string) => ({
+    ...CONFIG,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'mnt'),
+  })
+
+  /** A fetch stub that answers the resolve route from a per-path table. */
+  const tableFetch = (table: Record<string, { canRead?: boolean; canWrite?: boolean }>) =>
+    (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1', displayName: 'Tester' } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        const sent = JSON.parse(String(init?.body ?? '{}')) as { resourceId?: string }
+        const answer = table[sent.resourceId ?? ''] ?? { canRead: false, canWrite: false }
+        return new Response(JSON.stringify(answer), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+  it('refuses a move when the caller may not write the source', async () => {
+    // Read is not enough: a move removes the source path, so a read-only caller
+    // relocating a document is exactly the case this must stop.
+    const fetchImpl = tableFetch({
+      'docs/a.md': { canRead: true, canWrite: false },
+      'archive': { canRead: true, canWrite: true },
+    })
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-auth-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'move', { from: 'docs/a.md', to: 'archive' })
+      expect(reply.error).toMatch(/may not write/u)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a move when the caller may not write the destination', async () => {
+    // The other half of the same rule, stubbed the opposite way so a route that
+    // only ever checks the source cannot pass both cases.
+    const fetchImpl = tableFetch({
+      'docs/a.md': { canRead: true, canWrite: true },
+      'archive': { canRead: true, canWrite: false },
+    })
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-auth-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'move', { from: 'docs/a.md', to: 'archive' })
+      expect(reply.error).toMatch(/may not write/u)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a move when the permission service cannot be asked', async () => {
+    // Fail closed: an unreachable backend must refuse the move, not allow it.
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1' } }), { status: 200 })
+      }
+      return new Response('nope', { status: 503 })
+    }) as unknown as typeof fetch
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-auth-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'move', { from: 'docs/a.md', to: 'archive' })
+      expect(reply.error).toMatch(/may not write/u)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a traversal path before it asks anyone', async () => {
+    // The containment guard runs on the request, so a `..` never reaches the
+    // filesystem even when every permission answer would have been yes.
+    const fetchImpl = tableFetch({})
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-escape-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'move', { from: '../escape.md', to: 'archive' })
+      expect(reply.error).toMatch(/contained relative paths/u)
+      const absolute = await callRoute(routes, 'move', { from: '/etc/passwd', to: 'archive' })
+      expect(absolute.error).toMatch(/contained relative paths/u)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a move while no permission API is configured', async () => {
+    // Without a backend there is no authority to ask, so there is no move.
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-nobackend-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't' })
+    try {
+      await apply(ctx as never, { ...isolatedConfig(root), baseUrl: '' } as never)
+      const reply = await callRoute(routes, 'move', { from: 'docs/a.md', to: 'archive' })
+      expect(reply.error).toMatch(/not configured/u)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('view mode preference routes', () => {
+  /**
+   * These routes WRITE, so they run against a temporary root rather than the
+   * configured one. `CONFIG.viewRoot` is a real deployment path: a test that
+   * applies it against the live config creates directories under the share, which
+   * is how a preference round-trip once wrote to `/nas/kb/views` outside any
+   * temporary tree. Every case here builds its own root and removes it after.
+   */
+  const callerFetch = (userId: string) =>
+    (async (input: RequestInfo | URL) => {
+      if (String(input).includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: userId } }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+  /** A config whose storage roots are inside a fresh temporary directory. */
+  const isolatedConfig = (root: string) => ({
+    ...CONFIG,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'mnt'),
+  })
+
+  it('reports the default layout when the caller has never chosen one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-viewmode-default-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'viewMode.get', {})
+      expect(reply.mode).toBe('list')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('round-trips a stored grid preference through the mount point', async () => {
+    // Written through the route rather than the file, so the assertion covers the
+    // normalisation and the mount-point targeting together.
+    const root = await mkdtemp(join(tmpdir(), 'kb-viewmode-roundtrip-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      // The mount point is the caller's view; the route writes the preference beside
+      // the documents there. It must exist first -- a preference is not a reason to
+      // create the directory a sync is supposed to own.
+      await mkdir(join(root, 'mnt'), { recursive: true })
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const written = await callRoute(routes, 'viewMode.set', { mode: 'grid' })
+      expect(written.mode).toBe('grid')
+      const readBack = await callRoute(routes, 'viewMode.get', {})
+      expect(readBack.mode).toBe('grid')
+      // It landed in the mount point, which `views.sync` has already pointed at the
+      // caller's own directory -- so the file is theirs without a second identity lookup.
+      await expect(readViewMode(join(root, 'mnt'))).resolves.toBe('grid')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('answers the default layout rather than an error when no identity is available', async () => {
+    // A preference is not worth an error page: without an identity there is no
+    // directory to read, and the page still has to render.
+    const root = await mkdtemp(join(tmpdir(), 'kb-viewmode-noid-'))
+    const fetchImpl = (async () => new Response(JSON.stringify({ user: {} }), { status: 200 })) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'viewMode.get', {})
+      expect(reply.mode).toBe('list')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to store a preference before a view is mounted, and creates nothing', async () => {
+    // The write targets the mount point, which exists only after a sync has pointed it
+    // at a view. Creating it here would manufacture a real directory where a symlink
+    // belongs -- and the next sync would then have to refuse it as non-empty. So an
+    // unmounted pointer is refused rather than materialised.
+    const root = await mkdtemp(join(tmpdir(), 'kb-viewmode-unmounted-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'viewMode.set', { mode: 'grid' })
+      expect(reply.error).toMatch(/not mounted yet/u)
+      // Nothing was created: the mount point is still absent.
+      await expect(stat(join(root, 'mnt'))).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('move is a rename, not a copy', () => {
+  it('moves an entry with rename and keeps its inode', async () => {
+    // The inode is the assertion that matters: every user's view holds hardlinks to
+    // the authoritative inode, so a copy-and-delete would leave every view pointing
+    // at a file that no longer exists.
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-'))
+    try {
+      const source = join(root, 'a.md')
+      await writeFile(source, 'hello', 'utf8')
+      const before = await stat(source)
+      const moved = await moveEntry({ actualRoot: root, viewRoot: join(root, 'views'), userId: 'u-1' }, 'a.md', 'docs/a.md')
+      expect(moved).toEqual({ from: 'a.md', to: 'docs/a.md' })
+      const after = await stat(join(root, 'docs/a.md'))
+      // Same inode: the file was relinked, never rewritten.
+      expect(after.ino).toBe(before.ino)
+      await expect(stat(source)).rejects.toThrow()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to overwrite an existing destination', async () => {
+    // A move that silently replaces a document is data loss no prompt can undo.
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-'))
+    try {
+      await writeFile(join(root, 'a.md'), 'source', 'utf8')
+      await mkdir(join(root, 'docs'), { recursive: true })
+      await writeFile(join(root, 'docs/a.md'), 'occupied', 'utf8')
+      await expect(
+        moveEntry({ actualRoot: root, viewRoot: join(root, 'views'), userId: 'u-1' }, 'a.md', 'docs/a.md'),
+      ).rejects.toThrow(/destination already exists/u)
+      // Both files are untouched.
+      await expect(readFile(join(root, 'a.md'), 'utf8')).resolves.toBe('source')
+      await expect(readFile(join(root, 'docs/a.md'), 'utf8')).resolves.toBe('occupied')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses an uncontained path on either side', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-'))
+    try {
+      await expect(
+        moveEntry({ actualRoot: root, viewRoot: join(root, 'views'), userId: 'u-1' }, '../escape', 'x'),
+      ).rejects.toThrow(/not contained/u)
+      await expect(
+        moveEntry({ actualRoot: root, viewRoot: join(root, 'views'), userId: 'u-1' }, 'x', '../../escape'),
+      ).rejects.toThrow(/not contained/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a preference file across a sync', async () => {
+    // The sync's unlink pass removes every walked file the resolved set does not
+    // name, so a preference file it does not skip is deleted on the next run --
+    // which reads as a setting that will not stick.
+    const root = await mkdtemp(join(tmpdir(), 'kb-pref-'))
+    try {
+      const views = join(root, 'views')
+      const actual = join(root, 'actual')
+      await mkdir(actual, { recursive: true })
+      await writeFile(join(actual, 'a.md'), 'x', 'utf8')
+      const options = { actualRoot: actual, viewRoot: views, userId: 'u-1' }
+      const viewDir = viewPathFor(options)
+      await mkdir(viewDir, { recursive: true })
+      await writeViewMode(viewDir, 'grid')
+      await writePins(viewDir, ['a.md'])
+      await syncView(options, [{ relPath: 'a.md' }])
+      await expect(readViewMode(viewDir)).resolves.toBe('grid')
+      await expect(readPins(viewDir)).resolves.toEqual(['a.md'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('writing into the authoritative tree', () => {
+  /**
+   * `create` and `upload` land under `actualRoot`, not the caller's view.
+   *
+   * That is the load-bearing decision: `syncView` mirrors the resolved grant set
+   * onto the view and removes anything else, so a document written into a view is
+   * deleted by the next permission change. These tests pin the destination, the
+   * permission gate, and the refusal to overwrite.
+   */
+  const writeConfig = (root: string): typeof CONFIG => ({
+    ...CONFIG,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'mnt'),
+  })
+
+  /** A fetch stub answering `resolve` from a per-path permission table. */
+  const permFetch = (table: Record<string, { canRead?: boolean; canWrite?: boolean }>) =>
+    (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1', displayName: 'Tester' } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        const sent = JSON.parse(String(init?.body ?? '{}')) as { resourceId?: string }
+        const answer = table[sent.resourceId ?? ''] ?? { canRead: false, canWrite: false }
+        return new Response(JSON.stringify(answer), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+  async function writeRoot(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'kb-write-'))
+    await mkdir(join(root, 'actual'), { recursive: true })
+    return root
+  }
+
+  it('writes a new document into the authoritative tree, not the view', async () => {
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'notes/a.md': { canWrite: true } }) })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'create', { relPath: 'notes/a.md', kind: 'file' })
+      expect(reply.error).toBeUndefined()
+      // The decisive assertion: it is in actual/, and NOT in the view.
+      await expect(readFile(join(config.actualRoot, 'notes/a.md'), 'utf8')).resolves.toBe('')
+      await expect(readFile(join(config.viewRoot, 'u-1', 'notes/a.md'), 'utf8')).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('carries content when one is given', async () => {
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'a.md': { canWrite: true } }) })
+    try {
+      apply(ctx as never, config as never)
+      await callRoute(routes, 'create', { relPath: 'a.md', kind: 'file', content: '# hi' })
+      await expect(readFile(join(config.actualRoot, 'a.md'), 'utf8')).resolves.toBe('# hi')
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('creates a directory when asked for one', async () => {
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'folder': { canWrite: true } }) })
+    try {
+      apply(ctx as never, config as never)
+      await callRoute(routes, 'create', { relPath: 'folder', kind: 'directory' })
+      await expect(stat(join(config.actualRoot, 'folder'))).resolves.toBeDefined()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('refuses a caller who may read but not write', async () => {
+    // Read is not enough: creating puts a document into the SHARED tree, where
+    // everyone DataOps resolves as a reader will see it.
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'a.md': { canRead: true, canWrite: false } }) })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'create', { relPath: 'a.md', kind: 'file' })
+      expect(reply.error).toBeDefined()
+      expect(reply.refused).toEqual(['a.md'])
+      // Nothing was written: the refusal is not a partial write.
+      await expect(stat(join(config.actualRoot, 'a.md'))).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('fails closed when the permission answer cannot be read', async () => {
+    // An unreachable backend must refuse rather than authorize.
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1' } }), { status: 200 })
+      }
+      throw new Error('backend is unreachable')
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'create', { relPath: 'a.md', kind: 'file' })
+      expect(reply.error).toBeDefined()
+      await expect(stat(join(config.actualRoot, 'a.md'))).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('never overwrites an existing document', async () => {
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    await writeFile(join(config.actualRoot, 'shared.md'), 'someone else wrote this', 'utf8')
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'shared.md': { canWrite: true } }) })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'create', { relPath: 'shared.md', kind: 'file', content: 'mine' })
+      // Refused, and the original bytes are untouched.
+      expect(reply.code).toBe('exists')
+      await expect(readFile(join(config.actualRoot, 'shared.md'), 'utf8')).resolves.toBe('someone else wrote this')
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('refuses a path that escapes the root', async () => {
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({}) })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'create', { relPath: '../outside.md', kind: 'file' })
+      expect(reply.refused).toEqual(['../outside.md'])
+      // Nothing landed beside the root either.
+      await expect(stat(join(root, 'outside.md'))).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('refuses an upload over the size ceiling before writing', async () => {
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'big.md': { canWrite: true } }) })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'upload', {
+        relPath: 'big.md',
+        content: 'x'.repeat(MAX_KNOWLEDGE_WRITE_BYTES + 1),
+      })
+      expect(reply.code).toBe('too-large')
+      expect(reply.limitBytes).toBe(MAX_KNOWLEDGE_WRITE_BYTES)
+      await expect(stat(join(config.actualRoot, 'big.md'))).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('accepts an upload at exactly the ceiling', async () => {
+    // The bound is inclusive, so the largest allowed document is not refused.
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'ok.md': { canWrite: true } }) })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'upload', {
+        relPath: 'ok.md',
+        content: 'x'.repeat(MAX_KNOWLEDGE_WRITE_BYTES),
+      })
+      expect(reply.error).toBeUndefined()
+      await expect(stat(join(config.actualRoot, 'ok.md'))).resolves.toBeDefined()
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+})
+
+describe('the write path is bounded by its own errors', () => {
+  it('separates write refusals from transport errors', async () => {
+    // `KnowledgeError`'s codes describe how a TRANSPORT call ended. A write refusal
+    // is a different kind of answer with different statuses, so it has its own type
+    // rather than widening the transport's closed union.
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).toMatch(/export class KnowledgeWriteError/u)
+    const transport = /export type KnowledgeErrorCode =([\s\S]*?)\n\n/u.exec(source)
+    expect(transport?.[1]).toBeDefined()
+    expect(transport?.[1]).not.toMatch(/exists|too-large|bad-path/u)
+    // And each refusal has a status that describes it.
+    expect(source).toMatch(/case 'exists': return 409/u)
+    expect(source).toMatch(/case 'too-large': return 413/u)
+  })
+
+  it('does not write when the resolved set is unchanged', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-write-idem-'))
+    const options = { actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), userId: 'u-1' }
+    await mkdir(options.actualRoot, { recursive: true })
+    await writeFile(join(options.actualRoot, 'a.md'), 'a', 'utf8')
+    await createKnowledgeEntry({ ...CONFIG, actualRoot: options.actualRoot, viewRoot: options.viewRoot }, 'b.md', { directory: false })
+    const first = await syncView(options, [{ relPath: 'a.md' }, { relPath: 'b.md' }])
+    expect(first.linked.sort()).toEqual(['global/a.md', 'global/b.md'])
+    const second = await syncView(options, [{ relPath: 'a.md' }, { relPath: 'b.md' }])
+    expect(second.linked).toEqual([])
+    expect(second.unchanged).toBeGreaterThan(0)
+  })
+})
+
+describe('drag-to-move wiring', () => {
+  /**
+   * The gesture spans two components, so the contract between them is what is
+   * asserted: the listing publishes the payload type, and the panel's pin zone only
+   * arms for that type. A drag of anything else crossing the rail must not arm it.
+   */
+  it('shares one drag payload type between the rows and the pin zone', async () => {
+    const listing = await readFile(new URL('../src/client/KnowledgeListing.tsx', import.meta.url), 'utf8')
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    expect(listing).toMatch(/export const KB_DRAG_MIME = 'application\/x-dsh-kb-path'/u)
+    expect(panel).toMatch(/import \{ KB_DRAG_MIME, KnowledgeListing \}/u)
+    // The zone is armed by the type, not by an unconditional preventDefault.
+    expect(panel).toMatch(/dataTransfer\.types\.includes\(KB_DRAG_MIME\)/u)
+  })
+
+  it('copies the drop-target treatment from the explorer rather than inventing one', async () => {
+    const css = await readFile(new URL('../src/client/KnowledgeListing.module.css', import.meta.url), 'utf8')
+    const drop = css.slice(css.indexOf('.entry[data-drop-target='))
+    // The explorer's own two declarations (sidebar.module.css:1066).
+    expect(drop).toMatch(/background: var\(--dsw-alias-interactive-bg-hover-accent\)/u)
+    expect(drop).toMatch(/outline: 1px dashed var\(--dsw-alias-state-business-primary\)/u)
+    expect(drop).toMatch(/outline-offset: -1px/u)
+  })
+
+  it('never drops a folder into itself or its own descendant', async () => {
+    // The kernel answers EINVAL for a directory renamed into its own child; refusing
+    // it in the tree keeps that error out of the reader's face.
+    const listing = await readFile(new URL('../src/client/KnowledgeListing.tsx', import.meta.url), 'utf8')
+    expect(listing).toMatch(/source\.startsWith\(entry\.relPath \+ '\/'\)/u)
+    expect(listing).toMatch(/entry\.relPath\.startsWith\(payload\.relPath \+ '\/'\)/u)
+  })
+
+  it('keeps the row metrics in list mode and adds a separate card family for grid', async () => {
+    // The row measurements are a copy of `.explorerRow` that task-16 verified; the
+    // grid must not be a restyling of them.
+    const css = await readFile(new URL('../src/client/KnowledgeListing.module.css', import.meta.url), 'utf8')
+    const row = css.slice(css.indexOf('.entry {'), css.indexOf('.entry:hover'))
+    expect(row).toMatch(/height: 28px/u)
+    expect(row).toMatch(/font: var\(--dsw-font-xxs-12\)/u)
+    expect(row).toMatch(/padding: 0 8px/u)
+    // And the card is its own class, not `.entry`.
+    expect(css).toMatch(/\.card \{/u)
+    expect(css).toMatch(/\.cards \{/u)
+  })
+})
+
+describe('the template read cannot leave the surface spinning', () => {
+  /**
+   * The bound is enforced by a RACE, not by the abort alone.
+   *
+   * Found by measurement: with a fetch stub that never settles and ignores its
+   * signal, the dialog still read "Loading templates..." after seven seconds. The
+   * abort had been requested and the request simply did not care, so a surface
+   * whose whole reason for a timeout is "never spin" was spinning. The race makes
+   * the deadline authoritative whatever the transport does.
+   */
+  const source = async (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeTemplates.tsx', import.meta.url), 'utf8')
+
+  it('races the read against a deadline', async () => {
+    const text = await source()
+    expect(text).toMatch(/Promise\.race\(\[read, deadline\]\)/u)
+    // The deadline both aborts and resolves, so the losing branch runs even when
+    // the abort is ignored.
+    const deadline = text.slice(text.indexOf('const deadline ='))
+    expect(deadline.slice(0, 300)).toMatch(/controller\.abort\(\)/u)
+    expect(deadline.slice(0, 300)).toMatch(/resolve\('timeout'\)/u)
+  })
+
+  it('reports a timeout as unreadable, not as an empty library', async () => {
+    // The two are different facts: one says "the source has no templates", the
+    // other says "this could not be asked". Only the first may claim emptiness.
+    const text = await source()
+    const race = text.slice(text.indexOf('Promise.race'))
+    expect(race.slice(0, 400)).toMatch(/outcome === 'timeout'/u)
+    expect(race.slice(0, 400)).toMatch(/setState\('unavailable'\)/u)
+  })
+
+  it('does not set state after unmount', async () => {
+    // A read that lands after the dialog closed must not write to a dead component.
+    const text = await source()
+    expect(text).toMatch(/let live = true/u)
+    expect(text).toMatch(/live = false/u)
+    expect(text).toMatch(/if \(!live\) return/u)
+  })
+})
+
+describe('uploading a folder is really a folder', () => {
+  /**
+   * The menu offers "Upload folder", so the behaviour has to be a folder: the
+   * picker returns the chosen subtree and each file keeps its place inside it. A row
+   * whose label promises a folder while the code sends one file is worse than a
+   * disabled row, because the reader believes their folder arrived.
+   */
+  const home = async (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeHome.tsx', import.meta.url), 'utf8')
+
+  it('asks the picker for a directory', async () => {
+    const source = await home()
+    expect(source).toMatch(/input\.setAttribute\('webkitdirectory', ''\)/u)
+    // Removed for the file row, or the next single-file pick would ask for a folder.
+    expect(source).toMatch(/input\.removeAttribute\('webkitdirectory'\)/u)
+  })
+
+  it('keeps each file in its place inside the picked folder', async () => {
+    const source = await home()
+    // `webkitRelativePath` is the folder plus the file's position in it, so the
+    // upload recreates the shape instead of flattening it into one level.
+    expect(source).toMatch(/webkitRelativePath/u)
+    expect(source).toMatch(/const relPath = \(file as File & \{ webkitRelativePath\?: string \}\)\.webkitRelativePath \|\| file\.name/u)
+  })
+
+  it('attempts every file and names the failures', async () => {
+    const source = await home()
+    // One request per file, so a rejection is per path rather than for the batch.
+    expect(source).toMatch(/for \(const file of files\)/u)
+    // The loop does not break on failure: the reader chose a folder, and stopping at
+    // the first collision would leave them guessing which files made it.
+    const loop = source.slice(source.indexOf('for (const file of files)'))
+    expect(loop.slice(0, 900)).not.toMatch(/\bbreak\b/u)
+    // The summary carries counts AND names, and both sentences exist.
+    expect(source).toMatch(/uploadPartial/u)
+    expect(source).toMatch(/uploadDone/u)
+    const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    expect(locales).toMatch(/uploadPartial: '[^']*\{ok\}[^']*\{failed\}[^']*\{names\}/u)
+  })
+
+  it('does not send a batch body', async () => {
+    // A batch body would force the Host to define what a partly-authorized upload
+    // means. One request per path keeps the refusal per path, which is the honest
+    // answer and the one the endpoint already gives.
+    const source = await home()
+    expect(source).toMatch(/body: JSON\.stringify\(\{ relPath, content \}\)/u)
+    expect(source).not.toMatch(/body: JSON\.stringify\(\{ files/u)
+  })
+})
+
+describe('the view switcher fits the section band', () => {
+  /**
+   * The first implementation used a labelled `SegmentedControl`, and it was measured
+   * out of this header: the official control is 126px (4px pad plus a 28px tab with
+   * 16px side padding), which took the band to 230 of its 280px and clipped the
+   * section name at any narrower rail. The band's own control is a 28px icon button,
+   * so the two modes belong in a menu behind one.
+   */
+  it('opens the display setting from a 28px icon button, not an inline control', async () => {
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    // The menu carries the mode names; the anchor is the band's own icon button.
+    expect(panel).toMatch(/<MenuItemButton/u)
+    expect(panel).toMatch(/viewList/u)
+    expect(panel).toMatch(/viewGrid/u)
+    // And the oversized inline control is gone.
+    expect(panel).not.toMatch(/<SegmentedControl/u)
+    const actions = panel.slice(panel.indexOf('label={t(\'actionNew\')}'))
+    const band = actions.slice(0, actions.indexOf('</KnowledgeSectionHeader>'))
+    expect(band).toMatch(/<Menu/u)
+  })
+
+  it('carries four 28px controls in the band, which is what fits 280px', async () => {
+    // Measured: four 28px buttons plus the 4px gaps and 8px inset come to 132px of a
+    // 280px band, leaving the section name its full width. The labelled control put
+    // the same row at 230px and clipped the name below a 240px rail.
+    const css = await readFile(new URL('../src/client/KnowledgePanel.module.css', import.meta.url), 'utf8')
+    const button = css.slice(css.indexOf('.iconButton {'), css.indexOf('.iconButton:hover'))
+    expect(button).toMatch(/width: 28px/u)
+    expect(button).toMatch(/height: 28px/u)
+    const band = css.slice(css.indexOf('.sectionHeader {'), css.indexOf('.sectionActions {'))
+    expect(band).toMatch(/gap: 4px/u)
+  })
+})
+
+describe('the two dictionaries stay in their own languages', () => {
+  /**
+   * `en` and `zh` are separate objects, and a key with Chinese copy sitting in `en`
+   * type-checks perfectly: both are `string`. The mistake is therefore invisible to
+   * the compiler and visible only to a reader, which is exactly how one was made
+   * here while inserting a block next to a shared anchor.
+   *
+   * The test is a heuristic, not a language detector: it flags a key whose value
+   * contains Han characters while living in the English object, and the reverse for
+   * a value that is pure ASCII in the Chinese one. That catches a swapped block
+   * without needing to know what any individual string means.
+   */
+  const localeSource = async (): Promise<string> =>
+    readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+
+  /** Split the file at the `zh` declaration, which is where the dictionary changes. */
+  async function dictionaries(): Promise<{ en: string; zh: string }> {
+    const source = await localeSource()
+    const cut = source.indexOf('export const zh')
+    expect(cut).toBeGreaterThan(0)
+    return { en: source.slice(0, cut), zh: source.slice(cut) }
+  }
+
+  const HAN = /[\u4e00-\u9fff]/u
+
+  it('keeps Han copy out of the English dictionary', async () => {
+    const { en } = await dictionaries()
+    const offenders = [...en.matchAll(/^\s+'?([a-zA-Z][a-zA-Z0-9.]*)'?:\s*'([^']*)'/gmu)]
+      .filter(([, , value]) => HAN.test(value ?? ''))
+      .map(([, key]) => key)
+    expect(offenders).toEqual([])
+  })
+
+  it('keeps English-only copy out of the Chinese dictionary', async () => {
+    const { zh } = await dictionaries()
+    // A Chinese value may contain ASCII (tokens, `{n}`, punctuation), so this flags
+    // only values that are ENTIRELY ASCII and contain a word: those are the ones a
+    // swapped block produces.
+    const offenders = [...zh.matchAll(/^\s+'?([a-zA-Z][a-zA-Z0-9.]*)'?:\s*'([^']*)'/gmu)]
+      .filter(([, , value]) => {
+        const text = value ?? ''
+        return !HAN.test(text) && /[A-Za-z]{3}/u.test(text)
+      })
+      .map(([, key]) => key)
+    // Proper nouns the product keeps untranslated in both languages are allowed.
+    const allowed = new Set<string>()
+    expect(offenders.filter(key => !allowed.has(key as string))).toEqual([])
+  })
+})
+
+describe('the copy does not promise an index that does not exist', () => {
+  /**
+   * The retrieval path reads the mounted tree with grep and read, and the `index`
+   * route only recounts directories. Wording that offers to "build an index" is
+   * therefore a promise the plugin cannot keep, and the page contradicted itself:
+   * the menu said index management while its own note said there was no index.
+   *
+   * The check is on the VALUES, not on the identifiers. `menu.indexing`, the
+   * `index` route and `KB_API.indexDirs` are internal names that cost nothing to
+   * keep, and renaming them would churn types for no reader's benefit.
+   */
+  const source = async (): Promise<string> =>
+    readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+
+  it('offers no control that claims to build one', async () => {
+    const text = await source()
+    const values = [...text.matchAll(/^\s+'?[a-zA-Z][a-zA-Z0-9.]*'?:\s*'([^']*)'/gmu)].map(m => m[1] ?? '')
+    // A value may MENTION an index only to deny one ("nothing to index",
+    // "无需建立索引"). What must not appear is an offer to build one.
+    const offering = values.filter(v =>
+      /build index|create index|建立索引|创建索引|生成索引/u.test(v) && !/nothing|no |not |无需|没有|不必/u.test(v))
+    expect(offering).toEqual([])
+  })
+
+  it('keeps the internal identifiers it does not need to rename', async () => {
+    const text = await source()
+    // Renaming these would change the KnowledgeKey type and every call site for no
+    // reader-visible gain, so their presence is intentional and asserted here so a
+    // later cleanup does not mistake them for leftovers.
+    expect(text).toMatch(/'menu\.indexing':/u)
+    const routes = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8')
+    expect(routes).toMatch(/indexDirs: 'index\.dirs'/u)
+  })
+
+  it('does not carry the dead note key', async () => {
+    // Zero references before removal, so it was only a hint that an index exists.
+    const text = await source()
+    expect(text).not.toMatch(/^\s*indexingNote:/mu)
+  })
+})
+
+describe('review settings and the audit trail', () => {
+  /**
+   * Both surfaces write, so they run against a temporary root rather than the
+   * configured one: `CONFIG.viewRoot` is a real deployment path, and a settings
+   * round-trip against it would write under the live share.
+   */
+  /**
+   * @param canWrite - the per-path answer the resolve endpoint gives.
+   * @param canManage - whether the caller may manage grants. Deciding review or a
+   *   submission is a grant-management decision, not a per-path write: no single
+   *   resource's write bit covers "may change how this knowledge base works".
+   */
+  const callerFetch = (userId: string, canWrite = true, canManage = canWrite) =>
+    (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: userId } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        return new Response(JSON.stringify({ canRead: true, canWrite }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/grants')) {
+        return new Response(JSON.stringify({ grants: [] }), { status: canManage ? 200 : 403 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+  const isolatedConfig = (root: string) => ({
+    ...CONFIG,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'mnt'),
+  })
+
+  it('answers review OFF for a caller who has never opened the settings page', async () => {
+    // The default is the product decision, not an accident: a deployment that never
+    // opens this page must not start gating people's contributions.
+    const root = await mkdtemp(join(tmpdir(), 'kb-settings-default-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1', false) })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'settings.get', {})
+      expect(reply.settings.reviewRequired).toBe(false)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('round-trips the switch through the route', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-settings-roundtrip-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1', true) })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const written = await callRoute(routes, 'settings.set', { reviewRequired: true })
+      expect(written.settings.reviewRequired).toBe(true)
+      const readBack = await callRoute(routes, 'settings.get', {})
+      expect(readBack.settings.reviewRequired).toBe(true)
+      // Stored in the CALLER's own directory, beside the pins and the view mode.
+      const stored = JSON.parse(await readFile(join(root, 'views', 'u-1', '.kb-settings.json'), 'utf8'))
+      expect(stored.reviewRequired).toBe(true)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to change the switch without write access', async () => {
+    // Turning review on or off decides whether other people's contributions take
+    // effect immediately. Read access is not enough for that.
+    const root = await mkdtemp(join(tmpdir(), 'kb-settings-forbidden-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1', false) })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      // The route answers with a refusal body rather than throwing (that is this
+      // harness's contract for every route), so the assertion is on the refusal.
+      const refused = await callRoute(routes, 'settings.set', { reviewRequired: true })
+      expect(String(refused.error)).toContain('grant-management access')
+      // And nothing was written, so a refused attempt cannot half-apply.
+      const reply = await callRoute(routes, 'settings.get', {})
+      expect(reply.settings.reviewRequired).toBe(false)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a non-boolean switch value instead of coercing it', async () => {
+    // `"false"` is truthy in JavaScript; silently coercing it would switch review ON
+    // for a caller who asked for OFF.
+    const root = await mkdtemp(join(tmpdir(), 'kb-settings-typeof-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1', true) })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const refused = await callRoute(routes, 'settings.set', { reviewRequired: 'false' })
+      expect(String(refused.error)).toContain('boolean')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('survives a sync, so a preference is not deleted as if it were a stale grant', async () => {
+    // The sync walk unlinks every file it did not resolve. A settings file missing
+    // from the metadata set would vanish on the next sync and read as "the switch
+    // will not stick" rather than as a bug.
+    const root = await mkdtemp(join(tmpdir(), 'kb-settings-sync-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1', true) })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      await callRoute(routes, 'audit.list', {})
+      await syncView({ actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), userId: 'u-1' }, [])
+      const settingsFile = await readFile(join(root, 'views', 'u-1', '.kb-settings.json'), 'utf8')
+      expect(JSON.parse(settingsFile).reviewRequired).toBe(true)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reads the audit trail newest first and never rewrites it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-audit-order-'))
+    const viewDir = join(root, 'views', 'u-1')
+    await mkdir(viewDir, { recursive: true })
+    try {
+      await appendAuditEntry(viewDir, { at: '2026-01-01T00:00:00.000Z', actor: 'u-1', action: 'create', relPath: 'a.md', outcome: 'applied' })
+      await appendAuditEntry(viewDir, { at: '2026-01-02T00:00:00.000Z', actor: 'u-1', action: 'upload', relPath: 'b.md', outcome: 'applied' })
+      const entries = await readAuditEntries(viewDir, 10)
+      expect(entries.map((entry) => entry.relPath)).toEqual(['b.md', 'a.md'])
+      // Appending a third leaves the earlier two byte-identical: this is what makes it
+      // a trail rather than a mutable list.
+      const before = await readFile(join(viewDir, '.kb-audit.jsonl'), 'utf8')
+      await appendAuditEntry(viewDir, { at: '2026-01-03T00:00:00.000Z', actor: 'u-1', action: 'move', relPath: 'b.md', toRelPath: 'c.md', outcome: 'applied' })
+      const after = await readFile(join(viewDir, '.kb-audit.jsonl'), 'utf8')
+      expect(after.startsWith(before)).toBe(true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('records the actor label beside the id and reads it back', async () => {
+    // The id is the identity an audit is checked against; the label is only what the
+    // trail reads as. Recording both is what lets an old entry and a new one sit in
+    // the same table without the reader seeing a raw UUID for one and a name for the
+    // other.
+    const root = await mkdtemp(join(tmpdir(), 'kb-audit-label-'))
+    const viewDir = join(root, 'views', 'u-1')
+    await mkdir(viewDir, { recursive: true })
+    try {
+      await appendAuditEntry(viewDir, {
+        at: '2026-01-02T00:00:00.000Z',
+        actor: '260afb31-f8d9-44ba-b161-2a9bfe283a79',
+        actorLabel: '张三',
+        action: 'edit',
+        relPath: 'a.md',
+        outcome: 'applied',
+      })
+      const entries = await readAuditEntries(viewDir, 10)
+      expect(entries).toHaveLength(1)
+      expect(entries[0].actor).toBe('260afb31-f8d9-44ba-b161-2a9bfe283a79')
+      expect(entries[0].actorLabel).toBe('张三')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reads a log line written before labels existed', async () => {
+    // Existing deployments already hold lines with no `actorLabel`. They must still be
+    // read, and the renderer falls back to the id — dropping them would hide history.
+    const root = await mkdtemp(join(tmpdir(), 'kb-audit-legacy-'))
+    const viewDir = join(root, 'views', 'u-1')
+    await mkdir(viewDir, { recursive: true })
+    try {
+      await appendFile(
+        join(viewDir, '.kb-audit.jsonl'),
+        JSON.stringify({ at: '2026-01-01T00:00:00.000Z', actor: 'legacy-user', action: 'create', relPath: 'old.md', outcome: 'applied' }) + '\n',
+        'utf8',
+      )
+      const entries = await readAuditEntries(viewDir, 10)
+      expect(entries).toHaveLength(1)
+      expect(entries[0].actor).toBe('legacy-user')
+      expect(entries[0].actorLabel).toBeUndefined()
+      expect(entries[0].relPath).toBe('old.md')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores a non-string label instead of rendering it', async () => {
+    // A hand-edited or foreign log must not be able to put a non-text value in a cell.
+    const root = await mkdtemp(join(tmpdir(), 'kb-audit-badlabel-'))
+    const viewDir = join(root, 'views', 'u-1')
+    await mkdir(viewDir, { recursive: true })
+    try {
+      await appendFile(
+        join(viewDir, '.kb-audit.jsonl'),
+        JSON.stringify({ at: '2026-01-01T00:00:00.000Z', actor: 'u-1', actorLabel: 42, action: 'edit', relPath: 'a.md', outcome: 'applied' }) + '\n',
+        'utf8',
+      )
+      const entries = await readAuditEntries(viewDir, 10)
+      expect(entries).toHaveLength(1)
+      expect(entries[0].actorLabel).toBeUndefined()
+      expect(entries[0].actor).toBe('u-1')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a torn line rather than losing the whole trail', async () => {
+    // A crash mid-append leaves a partial line. That must cost the last entry, not
+    // every entry before it.
+    const root = await mkdtemp(join(tmpdir(), 'kb-audit-torn-'))
+    const viewDir = join(root, 'views', 'u-1')
+    await mkdir(viewDir, { recursive: true })
+    try {
+      await appendAuditEntry(viewDir, { at: '2026-01-01T00:00:00.000Z', actor: 'u-1', action: 'create', relPath: 'a.md', outcome: 'applied' })
+      await appendFile(join(viewDir, '.kb-audit.jsonl'), '{"at":"2026-01-0', 'utf8')
+      const entries = await readAuditEntries(viewDir, 10)
+      expect(entries).toHaveLength(1)
+      expect(entries[0].relPath).toBe('a.md')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('the review switch actually changes behaviour', () => {
+  /**
+   * A switch that can be flipped but changes nothing is worse than no switch: it
+   * records an intent nobody honours. These cases pin the consequence, not the flag.
+   */
+  const callerFetch = (userId: string) =>
+    (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: userId } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        return new Response(JSON.stringify({ canRead: true, canWrite: true }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+  const isolatedConfig = (root: string) => ({
+    ...CONFIG,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'mnt'),
+  })
+
+  it('parks a write with its bytes instead of applying it when review is on', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-review-on-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      const reply = await callRoute(routes, 'create', { relPath: 'draft.md', content: '# draft\n' })
+      expect(reply.pending).toBe('draft.md')
+      // Nothing landed in the shared tree, which is the whole consequence of the switch.
+      expect(existsSync(join(root, 'actual', 'draft.md'))).toBe(false)
+      // But the bytes were kept, so an approver can read what was submitted.
+      const pendingDir = join(root, 'actual', '.kb-pending')
+      const files = await readdir(pendingDir)
+      const contentFile = files.find((name) => name.endsWith('.content'))
+      expect(contentFile).toBeDefined()
+      expect(await readFile(join(pendingDir, contentFile as string), 'utf8')).toBe('# draft\n')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('applies the same write immediately when review is off', async () => {
+    // The default. Same request, opposite outcome, and the only difference is the flag.
+    const root = await mkdtemp(join(tmpdir(), 'kb-review-off-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'create', { relPath: 'live.md', content: '# live\n' })
+      expect(reply.pending).toBeUndefined()
+      expect(existsSync(join(root, 'actual', 'live.md'))).toBe(true)
+      // And nothing was parked, so an un-reviewed deployment never grows a queue.
+      expect(existsSync(join(root, 'actual', '.kb-pending'))).toBe(false)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('records a pending write as pending in the trail, not as applied', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-review-audit-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      await callRoute(routes, 'create', { relPath: 'waiting.md', content: '# waiting\n' })
+      const trail = await callRoute(routes, 'audit.list', {})
+      const entries = trail.entries as Array<{ relPath: string; outcome: string }>
+      const entry = entries.find((candidate) => candidate.relPath === 'waiting.md')
+      expect(entry?.outcome).toBe('pending')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('the review queue can be worked', () => {
+  /**
+   * A queue with no approve or reject path is a black hole: submissions go in and
+   * nothing ever comes out, which is worse than review being off. These cases pin
+   * both decisions and the fact that each leaves a distinct record.
+   */
+  /**
+   * @param canWrite - the per-path answer the resolve endpoint gives.
+   * @param canManage - whether the caller may manage grants. Deciding review or a
+   *   submission is a grant-management decision, not a per-path write: no single
+   *   resource's write bit covers "may change how this knowledge base works".
+   */
+  const callerFetch = (userId: string, canWrite = true, canManage = canWrite) =>
+    (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: userId } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        return new Response(JSON.stringify({ canRead: true, canWrite }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/grants')) {
+        return new Response(JSON.stringify({ grants: [] }), { status: canManage ? 200 : 403 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+  const isolatedConfig = (root: string) => ({
+    ...CONFIG,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'mnt'),
+  })
+
+  /** Submit one document through the route and return the parked name. */
+  const submit = async (
+    routes: Array<{ path: string; handler: (req: unknown, res: unknown) => Promise<void> | void }>,
+    relPath: string,
+    content: string,
+  ): Promise<string> => {
+    await callRoute(routes, 'create', { relPath, content })
+    const queue = await callRoute(routes, 'pending.list', {})
+    const entries = queue.pending as Array<{ name: string; relPath: string }>
+    const entry = entries.find((candidate) => candidate.relPath === relPath)
+    expect(entry).toBeDefined()
+    return (entry as { name: string }).name
+  }
+
+  it('lists a submission with the path the submitter actually asked for', async () => {
+    // The parking filename escapes characters, so it cannot be decoded back. The
+    // reviewer must see the real path, which is why the envelope is the source.
+    const root = await mkdtemp(join(tmpdir(), 'kb-queue-list-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      await submit(routes, '月报 草稿.md', '# 月报\n')
+      const queue = await callRoute(routes, 'pending.list', {})
+      const entries = queue.pending as Array<{ relPath: string; userId: string; bytes: number }>
+      expect(entries.map((entry) => entry.relPath)).toEqual(['月报 草稿.md'])
+      expect(entries[0].userId).toBe('u-1')
+      expect(entries[0].bytes).toBe(Buffer.byteLength('# 月报\n', 'utf8'))
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('approving writes the submitted bytes into the shared tree', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-queue-approve-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      const name = await submit(routes, 'approved.md', '# approved\n')
+      // Still absent before the decision, which is what review means.
+      expect(existsSync(join(root, 'actual', 'approved.md'))).toBe(false)
+      const result = await callRoute(routes, 'pending.approve', { name })
+      expect(result.approved).toBeDefined()
+      expect(await readFile(join(root, 'actual', 'approved.md'), 'utf8')).toBe('# approved\n')
+      // And the queue no longer offers a decision already made.
+      const after = await callRoute(routes, 'pending.list', {})
+      expect((after.pending as unknown[]).length).toBe(0)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejecting discards the bytes and records a rejection, not a no-op', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-queue-reject-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      const name = await submit(routes, 'refused.md', '# refused\n')
+      await callRoute(routes, 'pending.reject', { name })
+      // Never published, and not left in the queue either.
+      expect(existsSync(join(root, 'actual', 'refused.md'))).toBe(false)
+      const after = await callRoute(routes, 'pending.list', {})
+      expect((after.pending as unknown[]).length).toBe(0)
+      // The trail says a person said no. Without this a rejection would look identical
+      // to a submission nobody ever opened.
+      const trail = await callRoute(routes, 'audit.list', {})
+      const entries = trail.entries as Array<{ relPath: string; outcome: string; action: string }>
+      const rejection = entries.find((entry) => entry.relPath === 'refused.md' && entry.outcome === 'rejected')
+      expect(rejection?.action).toBe('reject')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to approve or reject without write access, leaving the queue intact', async () => {
+    // Deciding someone else's contribution is a decision about shared content, so read
+    // access is not enough. The queue must survive the refused attempt.
+    const root = await mkdtemp(join(tmpdir(), 'kb-queue-forbidden-'))
+    const writer = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(writer.ctx as never, isolatedConfig(root) as never)
+      await callRoute(writer.routes, 'settings.set', { reviewRequired: true })
+      const name = await submit(writer.routes, 'held.md', '# held\n')
+      for (const dispose of writer.disposers) dispose()
+
+      const reader = fakeHost({ token: 't', fetchImpl: callerFetch('u-2', false) })
+      try {
+        await apply(reader.ctx as never, isolatedConfig(root) as never)
+        const approve = await callRoute(reader.routes, 'pending.approve', { name })
+        expect(String(approve.error)).toContain('grant-management access')
+        const reject = await callRoute(reader.routes, 'pending.reject', { name })
+        expect(String(reject.error)).toContain('grant-management access')
+        // Nothing was published and nothing was discarded.
+        expect(existsSync(join(root, 'actual', 'held.md'))).toBe(false)
+        const queue = await callRoute(reader.routes, 'pending.list', {})
+        expect((queue.pending as unknown[]).length).toBe(1)
+      } finally {
+        for (const dispose of reader.disposers) dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a name that is a path rather than one submission', async () => {
+    // The name is browser input even though it came back from the queue.
+    const root = await mkdtemp(join(tmpdir(), 'kb-queue-traversal-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, isolatedConfig(root) as never)
+      for (const name of ['../escape', 'a/b', '..', '']) {
+        const reply = await callRoute(routes, 'pending.approve', { name })
+        expect(String(reply.error)).toContain('pending submission name')
+      }
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('the settings page wires the review queue to the Host', () => {
+  const readClient = async (name: string): Promise<string> =>
+    readFile(new URL(`../src/client/${name}`, import.meta.url), 'utf8')
+
+  it('calls all three queue routes rather than showing a static table', async () => {
+    // A table with no data source reads as "nothing to review" forever, which is the
+    // failure mode this asserts against.
+    const source = await readClient('KnowledgeSettings.tsx')
+    expect(source).toContain('KB_API.pendingList')
+    expect(source).toContain('KB_API.pendingApprove')
+    expect(source).toContain('KB_API.pendingReject')
+  })
+
+  it('gives each queued row both decisions', async () => {
+    const source = await readClient('KnowledgeSettings.tsx')
+    expect(source).toMatch(/decide\(entry\.name, 'approve'\)/u)
+    expect(source).toMatch(/decide\(entry\.name, 'reject'\)/u)
+  })
+
+  it('disables the decisions instead of hiding them when the caller cannot act', async () => {
+    // Hiding the buttons would make the page look like review is not a thing here;
+    // disabling them with an explanation says the queue exists and why it is read-only.
+    const source = await readClient('KnowledgeSettings.tsx')
+    expect(source).toMatch(/disabled=\{!canDecide \|\| busy\}/u)
+    expect(source).toContain("c('pendingReadOnly')")
+  })
+})
+
+describe('approving re-checks authority at the submitted path', () => {
+  /**
+   * A grant can be revoked between submitting and approving. The queue is therefore not
+   * an authority: the submitted path must be re-authorised at decision time, or an
+   * approver could publish into a path they may no longer write.
+   */
+  it('refuses to publish when write access at the submitted path was revoked', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-approve-revoked-'))
+    let writeAtPath = true
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1' } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        // The two checks ask about DIFFERENT resources: the broad one sends an empty
+        // resourceId, the per-path one sends the submitted path. Answering both from
+        // one flag would make this test unable to tell which check refused, so the
+        // broad answer stays true and only the path answer is revoked.
+        const body = JSON.parse(String(init?.body ?? '{}')) as { resourceId?: string }
+        const canWrite = (body.resourceId ?? '') === '' ? true : writeAtPath
+        return new Response(JSON.stringify({ canRead: true, canWrite }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, {
+        ...CONFIG,
+        actualRoot: join(root, 'actual'),
+        viewRoot: join(root, 'views'),
+        mountPoint: join(root, 'mnt'),
+      } as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      await callRoute(routes, 'create', { relPath: 'later.md', content: '# later\n' })
+      const queue = await callRoute(routes, 'pending.list', {})
+      const name = (queue.pending as Array<{ name: string }>)[0].name
+      // Revoke, then decide. Nothing may be published.
+      writeAtPath = false
+      const reply = await callRoute(routes, 'pending.approve', { name })
+      expect(String(reply.error)).toContain('write access is required at the submitted path')
+      expect(existsSync(join(root, 'actual', 'later.md'))).toBe(false)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('the settings page degrades one section at a time', () => {
+  const readClient = async (name: string): Promise<string> =>
+    readFile(new URL(`../src/client/${name}`, import.meta.url), 'utf8')
+
+  it('keeps the review switch usable when the queue cannot be read', async () => {
+    // The switch is what the operator came for. A 401 on the queue must cost the queue,
+    // not the whole page: throwing on any failed request would blank the surface and
+    // make the token problem look like a broken plugin.
+    const source = await readClient('KnowledgeSettings.tsx')
+    // Only the settings response is allowed to throw.
+    const throws = [...source.matchAll(/if \(!(settings|audit|pending)Response\.ok\) throw/gu)].map((m) => m[1])
+    expect(throws).toEqual(['settings'])
+    // The other two fall back to empty instead.
+    expect(source).toMatch(/if \(auditResponse\.ok\) \{/u)
+    expect(source).toMatch(/if \(pendingResponse\.ok\) \{/u)
+  })
+})
+
+describe('approving never silently replaces an existing document', () => {
+  /**
+   * Approving writes through the create path, which refuses an existing name. That is
+   * the right outcome twice over: the reviewer cannot destroy a document by approving
+   * someone else's submission, and the failed submission stays in the queue because
+   * the parked copy is only discarded once the bytes are in the tree.
+   */
+  it('keeps the submission queued when the target already exists', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-approve-conflict-'))
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1' } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        return new Response(JSON.stringify({ canRead: true, canWrite: true }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, {
+        ...CONFIG,
+        actualRoot: join(root, 'actual'),
+        viewRoot: join(root, 'views'),
+        mountPoint: join(root, 'mnt'),
+      } as never)
+      await callRoute(routes, 'settings.set', { reviewRequired: true })
+      await callRoute(routes, 'create', { relPath: 'taken.md', content: '# submitted\n' })
+      const queue = await callRoute(routes, 'pending.list', {})
+      const name = (queue.pending as Array<{ name: string }>)[0].name
+      // Something else published that path in the meantime.
+      await mkdir(join(root, 'actual'), { recursive: true })
+      await writeFile(join(root, 'actual', 'taken.md'), '# existing\n', 'utf8')
+
+      const reply = await callRoute(routes, 'pending.approve', { name })
+      expect(String(reply.error)).toContain('already exists')
+      // The existing document was not replaced.
+      expect(await readFile(join(root, 'actual', 'taken.md'), 'utf8')).toBe('# existing\n')
+      // And the submission is still there for a human to deal with.
+      const after = await callRoute(routes, 'pending.list', {})
+      expect((after.pending as unknown[]).length).toBe(1)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+
+describe('the review loop closes on its own', () => {
+  /**
+   * These pin the properties that make an in-plugin queue safe to rely on instead of
+   * delegating to an external approval engine: a decision cannot be made twice, the
+   * queue does not strand when review is switched off, and a failed approval keeps the
+   * submission rather than losing it.
+   */
+  it('lets exactly one of two concurrent approvals win', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-race-'))
+    const actual = join(root, 'actual')
+    try {
+      await mkdir(actual, { recursive: true })
+      await parkPendingWrite(actual, {
+        userId: 'u-1',
+        relPath: 'contested.md',
+        content: '# contested\n',
+        at: '2026-10-17T10:00:00.000Z',
+      })
+      const [item] = await listPendingWrites(actual)
+      const content = await readPendingContent(actual, item.name)
+      expect(content).toBe('# contested\n')
+      // Two approvers act at once. `wx` is the atomic create-never-replace, so the
+      // kernel makes exactly one win; without it both would believe they published.
+      const results = await Promise.allSettled([
+        writeFile(join(actual, 'contested.md'), content as string, { encoding: 'utf8', flag: 'wx' }),
+        writeFile(join(actual, 'contested.md'), content as string, { encoding: 'utf8', flag: 'wx' }),
+      ])
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+      expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1)
+      // The document holds the submitted bytes, written once.
+      expect(await readFile(join(actual, 'contested.md'), 'utf8')).toBe('# contested\n')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the queue readable after review is switched off', async () => {
+    // Turning review off must not strand what was already submitted: otherwise the only
+    // way to clear the queue would be to turn review back on, and an operator who
+    // switched off mid-flight would be left with a queue nobody can explain.
+    const root = await mkdtemp(join(tmpdir(), 'kb-toggle-'))
+    const viewDir = join(root, 'views', 'u-1')
+    const actual = join(root, 'actual')
+    try {
+      await writeSettings(viewDir, { reviewRequired: true })
+      await parkPendingWrite(actual, {
+        userId: 'u-1',
+        relPath: 'in-flight.md',
+        content: 'x',
+        at: '2026-10-17T10:00:00.000Z',
+      })
+      expect(await listPendingWrites(actual)).toHaveLength(1)
+      await writeSettings(viewDir, { reviewRequired: false })
+      expect((await readSettings(viewDir)).reviewRequired).toBe(false)
+      expect(await listPendingWrites(actual)).toHaveLength(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a pending name built from a path segment', async () => {
+    // The name travels from browser to Host; a crafted one must not reach outside the
+    // pending directory. Dots are allowed inside a name because the parking name keeps
+    // the original extension, which is exactly the case this distinguishes.
+    expect(isPendingName('u-1__20261017T100000000Z__report.md')).toBe(true)
+    for (const bad of ['../escape', 'a/b', 'a\\b', '..', '.', '', 'x'.repeat(513)]) {
+      expect(isPendingName(bad)).toBe(false)
+    }
+  })
+})
+
+describe('a rejected request is not reported as a crash', () => {
+  /**
+   * The backend deciding "your token is no good" is a decision, not a bug. Answering 500
+   * sent the operator looking for a crash; the page also needs 401 to know it should ask
+   * for a fresh credential rather than retry the same rejected call.
+   */
+  it('answers 401, not 500, when DataOps rejects the credential', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-401-'))
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ message: 'expired' }), { status: 401 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      await apply(ctx as never, {
+        ...CONFIG,
+        actualRoot: join(root, 'actual'),
+        viewRoot: join(root, 'views'),
+        mountPoint: join(root, 'mnt'),
+      } as never)
+      const reply = await callRouteWithStatus(routes, 'settings.get', {})
+      expect(reply.status).toBe(401)
+      expect(String(reply.body.code)).toBe('unauthorized')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('every CSS class a component names is actually defined', () => {
+  /**
+   * A `styles.foo` reference to an undefined class type-checks perfectly: a CSS module
+   * types its members loosely, so the class simply does not apply. That is invisible to
+   * the compiler and to review, and it surfaced as a browser's native "choose file / no
+   * file chosen" control sitting on the page because the input's hide rule was missing.
+   *
+   * The stylesheet is resolved from the component's own import rather than assumed from
+   * its filename: a component may import more than one module, and pinning the wrong
+   * one reports a false failure (as `pinDropZone` did, correctly defined next door).
+   */
+  it('resolves every imported module and checks each class it uses', async () => {
+    const dir = new URL('../src/client/', import.meta.url)
+    const names = await readdir(dir)
+    const offenders: Array<{ component: string; module: string; className: string }> = []
+
+    for (const entry of names) {
+      if (!entry.endsWith('.tsx')) continue
+      const source = await readFile(new URL(entry, dir), 'utf8')
+      // Map each local binding to the stylesheet it was imported from.
+      const imports = [...source.matchAll(/import\s+(\w+)\s+from\s+'\.\/([\w.-]+\.module\.css)'/gu)]
+      for (const [, binding, cssFile] of imports) {
+        const css = await readFile(new URL(cssFile, dir), 'utf8').catch(() => '')
+        const used = [...new Set([...source.matchAll(new RegExp(`\\b${binding}\\.([A-Za-z_]\\w*)`, 'gu'))].map((m) => m[1]))]
+        for (const className of used) {
+          if (!new RegExp(`\\.${className}(?![\\w-])`, 'u').test(css)) {
+            offenders.push({ component: entry, module: cssFile, className })
+          }
+        }
+      }
+    }
+
+    expect(offenders).toEqual([])
+  })
+})
+
+describe('one grant covers a whole knowledge base', () => {
+  /**
+   * DataOps matches a permission by exact resource id OR by any ancestor the caller names.
+   * Omitting the chain made every document need its own grant row, so a newly created
+   * document looked unreadable even to an administrator. These pin the chain itself and
+   * that it is actually sent.
+   */
+  it('walks the parent directories and ends at the root id', () => {
+    // Nearest first, root last, and the path itself is excluded: it is the resource
+    // being resolved, not one of its own ancestors.
+    expect(knowledgeAncestorsFor('a/b/c.md').map((one) => one.resourceId)).toEqual(['a/b', 'a', KB_ROOT_RESOURCE_ID])
+    expect(knowledgeAncestorsFor('dir/a.md').map((one) => one.resourceId)).toEqual(['dir', KB_ROOT_RESOURCE_ID])
+    expect(knowledgeAncestorsFor('a.md').map((one) => one.resourceId)).toEqual([KB_ROOT_RESOURCE_ID])
+    // The root itself has no ancestor above it, so it answers the root id once.
+    expect(knowledgeAncestorsFor('').map((one) => one.resourceId)).toEqual([KB_ROOT_RESOURCE_ID])
+  })
+
+  it('sends the ancestors chain on both permission checks', async () => {
+    // Asserting the generated chain alone would not catch the chain being computed and
+    // then dropped from the request body, which is the shape the bug had.
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    const calls = [...source.matchAll(/canReadPath|canWritePath/gu)].length
+    expect(calls).toBeGreaterThan(0)
+    const sends = [...source.matchAll(/ancestors: knowledgeAncestorsFor\(relPath\)/gu)].length
+    // One in canReadPath and one in canWritePath; a third would mean a path was missed.
+    expect(sends).toBe(2)
+  })
+
+  it('names the root as a real id, because DataOps rejects an empty one', () => {
+    // Measured: resolve with resourceId "" answers 400 "资源ID不能为空". A root grant
+    // therefore needs a name, and this one cannot collide with a document id.
+    expect(KB_ROOT_RESOURCE_ID).not.toBe('')
+    expect(KB_ROOT_RESOURCE_ID.startsWith('@')).toBe(true)
+  })
+})
+
+describe('the loading animation is honest about itself', () => {
+  /**
+   * The loading surface replaces a grey sentence, so it is decoration over a real
+   * state. Decoration has two obligations: it must not cost a dependency, and it must
+   * not be invisible to assistive technology.
+   */
+  const read = async (file: string): Promise<string> =>
+    readFile(new URL(`../src/client/${file}`, import.meta.url), 'utf8')
+
+  it('uses no animation library', async () => {
+    const tsx = await read('KnowledgeLoading.tsx')
+    const css = await read('KnowledgeLoading.module.css')
+    // The plugin ships as one bundle; a package here would grow it and add a
+    // supply-chain surface for a decoration.
+    expect(tsx).not.toMatch(/from '(lottie|framer-motion|react-spring|gsap|@?react-lottie)/u)
+    expect(tsx).toMatch(/from '\.\/KnowledgeLoading\.module\.css'/u)
+    // The effect is CSS: a keyframe and a 3D transform, not scripted frames.
+    expect(css).toMatch(/@keyframes kb-page-turn/u)
+    expect(css).toMatch(/rotateY\(/u)
+    expect(css).toMatch(/perspective:/u)
+  })
+
+  it('announces itself to a screen reader', async () => {
+    const tsx = await read('KnowledgeLoading.tsx')
+    // The SVG is decorative, so the wrapper carries the status role and the text says
+    // what is happening.
+    expect(tsx).toMatch(/role="status"/u)
+    expect(tsx).toMatch(/aria-live="polite"/u)
+    expect(tsx).toMatch(/aria-hidden="true"/u)
+    // A visible label is already announced; repeating it would say the sentence twice.
+    expect(tsx).toMatch(/props\.announce !== props\.label/u)
+  })
+
+  it('stops the motion when the reader asks it to', async () => {
+    const css = await read('KnowledgeLoading.module.css')
+    const block = css.slice(css.indexOf('prefers-reduced-motion'))
+    expect(block).toMatch(/animation: none/u)
+    // A static but visible book: `none` alone would leave the leaf flat on the wrong
+    // page, so a resting angle is set too.
+    expect(block).toMatch(/transform: rotateY\(/u)
+  })
+
+  it('names only CSS variables the theme actually declares', async () => {
+    // An invented variable resolves to nothing without any error, so the colour simply
+    // disappears in whichever theme lacks it. This reads the theme stylesheets and
+    // checks every `var(--dsw-*)` this file names is genuinely declared there.
+    const css = await read('KnowledgeLoading.module.css')
+    const used = [...new Set([...css.matchAll(/var\((--dsw-[a-z0-9-]+)/gu)].map(m => m[1]))]
+    expect(used.length).toBeGreaterThan(0)
+
+    // The theme ships in a release tree outside this package, so it is resolved from
+    // HOME rather than from the test file: a relative `../../..` walk would encode this
+    // checkout's exact depth and break on any move.
+    const themeDir = join(
+      process.env['HOME'] ?? '/root',
+      '.dsh/releases/plus/plus-021a2-final/packages/client/ui-theme/src/styles',
+    )
+    const files = await readdir(themeDir).catch(() => [] as string[])
+    // If the release tree is absent this cannot be checked, and a silent pass would
+    // claim a check that did not run.
+    expect(files.length).toBeGreaterThan(0)
+    const theme = (await Promise.all(
+      files.filter(f => f.endsWith('.css')).map(f => readFile(join(themeDir, f), 'utf8')),
+    )).join('\n')
+
+    const missing = used.filter(name => !new RegExp(`${name}\\s*:`, 'u').test(theme))
+    expect(missing).toEqual([])
+  })
+
+  it('uses the font shorthand rather than a bare size', async () => {
+    const css = await read('KnowledgeLoading.module.css')
+    // `font-size:` would drop the line height and family; the product sets all three
+    // through one shorthand token.
+    expect(css).not.toMatch(/font-size:/u)
+    expect(css).toMatch(/font: var\(--dsw-font-/u)
+  })
+
+  it('renders in every surface that used to show a bare sentence', async () => {
+    // `KnowledgePreview.tsx` used to be in this list. Documents are now drawn by the
+    // host's file window (opened through `betterSidebar`), so that surface no longer
+    // exists in this package and its loading state went with it.
+    for (const file of ['KnowledgeListing.tsx', 'KnowledgePanel.tsx']) {
+      const tsx = await read(file)
+      expect(tsx).toMatch(/<KnowledgeLoading/u)
+      // The old placeholder must be gone, not merely bypassed.
+      expect(tsx).not.toMatch(/>Loading…</u)
+    }
+  })
+})
+
+describe('a response that is not JSON is reported, not thrown as a parser error', () => {
+  /**
+   * Measured on the running product: opening a document rendered
+   * `Unexpected token 'D', "DataOps au"... is not valid JSON` in the preview area.
+   * Every route this plugin serves answers JSON, but a response is not always this
+   * plugin's -- a gateway, an auth redirect, or a stopped DSH answers HTML or plain
+   * text, and `response.json()` then throws a parser message that reached the reader
+   * as if it were the document.
+   */
+  it('parses a normal JSON body', async () => {
+    const response = new Response(JSON.stringify({ kind: 'text', content: '# hi' }), { status: 200 })
+    expect(await readKnowledgeJson(response)).toEqual({ kind: 'text', content: '# hi' })
+  })
+
+  it('turns a plain-text body into a readable error instead of throwing', async () => {
+    // The exact shape that was on screen: a sentence beginning with "DataOps".
+    const response = new Response('DataOps authorization is required', { status: 200 })
+    const parsed = await readKnowledgeJson(response)
+    expect(parsed.error).toContain('HTTP 200')
+    expect(parsed.error).toContain('DataOps authorization')
+  })
+
+  it('turns an HTML error page into a readable error', async () => {
+    const response = new Response('<!doctype html><title>502 Bad Gateway</title>', { status: 502 })
+    const parsed = await readKnowledgeJson(response)
+    expect(parsed.error).toContain('HTTP 502')
+    // The angle brackets are evidence of what came back, so they are kept rather than
+    // stripped; the point is that the reader sees the real cause, not a parser complaint.
+    expect(parsed.error).toContain('doctype')
+  })
+
+  it('answers an empty success body with an empty object', async () => {
+    // A route that only reports success is allowed to answer nothing; that is not an
+    // error, and it must not read as one.
+    const response = new Response('', { status: 200 })
+    expect(await readKnowledgeJson(response)).toEqual({})
+  })
+
+  it('answers an empty failure body with the status', async () => {
+    const response = new Response('', { status: 500 })
+    expect((await readKnowledgeJson(response)).error).toBe('HTTP 500')
+  })
+
+  it('never lets a parse exception become the message', async () => {
+    // The reader-facing rule: the parser's own vocabulary must not reach the surface.
+    // Asserted on BEHAVIOUR rather than on the source text, because the source is allowed
+    // to mention the phrase in a comment explaining why it is avoided.
+    const response = new Response('not json at all', { status: 200 })
+    const parsed = await readKnowledgeJson(response)
+    expect(parsed.error).toBeDefined()
+    expect(String(parsed.error)).not.toMatch(/Unexpected token|is not valid JSON/u)
+  })
+})
+
+
+describe('no component calls a hook after its first return', () => {
+  /**
+   * React requires the same hooks in the same order on every render of one component. A
+   * hook placed after a `return` runs only on the renders that get past that return, so
+   * the loading render and the loaded render disagree about how many hooks exist. React
+   * reports that as error #310 and unmounts the boundary -- measured in the running
+   * product as `Minified React error #310 at KnowledgePreview ... useMemo`, where the
+   * memos sat after the loading/error/binary returns.
+   *
+   * Checked through the TypeScript AST rather than with a regex. Two earlier attempts at
+   * a text scan failed in opposite directions: one matched a `return` inside a `useMemo`
+   * callback, the other missed the real exits because they are nested in `if` blocks.
+   * The AST knows the difference -- it walks the component body without descending into
+   * nested functions, so both a callback's `return map` and an `if`-nested `return` are
+   * classified correctly.
+   */
+  it('keeps every hook above the first return in every component', async () => {
+    const ts = await import('typescript')
+    const HOOKS = new Set(['useState', 'useEffect', 'useMemo', 'useRef', 'useCallback', 'useReducer', 'useLayoutEffect'])
+    const dir = new URL('../src/client/', import.meta.url)
+    const files = (await readdir(dir)).filter((name) => name.endsWith('.tsx'))
+    const offenders: Array<{ file: string; component: string; hook: string; line: number }> = []
+
+    /** Whether any return in this function returns JSX, i.e. it is a component. */
+    const returnsJsx = (fn: import('typescript').FunctionDeclaration): boolean => {
+      let found = false
+      const walk = (node: import('typescript').Node): void => {
+        if (ts.isReturnStatement(node) && node.expression) {
+          let expr: import('typescript').Expression = node.expression
+          while (ts.isParenthesizedExpression(expr)) expr = expr.expression
+          if (ts.isJsxElement(expr) || ts.isJsxSelfClosingElement(expr) || ts.isJsxFragment(expr)) found = true
+        }
+        ts.forEachChild(node, walk)
+      }
+      walk(fn)
+      return found
+    }
+
+    /** Positions of `return` statements reached without entering a nested function. */
+    const exitsIn = (fn: import('typescript').FunctionDeclaration): number[] => {
+      const found: number[] = []
+      const walk = (node: import('typescript').Node): void => {
+        if (ts.isFunctionLike(node) && node !== fn) return
+        if (ts.isReturnStatement(node)) found.push(node.getStart())
+        ts.forEachChild(node, walk)
+      }
+      if (fn.body) ts.forEachChild(fn.body, walk)
+      return found.sort((left, right) => left - right)
+    }
+
+    /** Hook calls in the component body, not counting nested functions'. */
+    const hooksIn = (fn: import('typescript').FunctionDeclaration): Array<{ name: string; at: number }> => {
+      const found: Array<{ name: string; at: number }> = []
+      const walk = (node: import('typescript').Node): void => {
+        if (ts.isFunctionLike(node) && node !== fn) return
+        if (
+          ts.isCallExpression(node)
+          && ts.isIdentifier(node.expression)
+          && HOOKS.has(node.expression.text)
+        ) {
+          found.push({ name: node.expression.text, at: node.getStart() })
+        }
+        ts.forEachChild(node, walk)
+      }
+      if (fn.body) ts.forEachChild(fn.body, walk)
+      return found
+    }
+
+    for (const file of files) {
+      const path = new URL(file, dir)
+      const source = await readFile(path, 'utf8')
+      const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX)
+      ts.forEachChild(sourceFile, (node) => {
+        if (!ts.isFunctionDeclaration(node) || !node.name) return
+        if (!/^[A-Z]/u.test(node.name.text)) return
+        if (!returnsJsx(node)) return
+        const exits = exitsIn(node)
+        if (exits.length === 0) return
+        const firstReturn = exits[0]
+        for (const hook of hooksIn(node)) {
+          if (hook.at > firstReturn) {
+            offenders.push({
+              file,
+              component: node.name.text,
+              hook: hook.name,
+              line: sourceFile.getLineAndCharacterOfPosition(hook.at).line + 1,
+            })
+          }
+        }
+      })
+    }
+
+    expect(offenders).toEqual([])
+  })
+})
+
+describe('repointing the workspace entry never removes what it points at', () => {
+  /**
+   * The knowledge base's original design put its browsable pointer at `/workspace/kb`, a
+   * symlink into the share. That path is inside the workspace, so a reader (and the
+   * official file tree) can reach it like any other workspace directory.
+   *
+   * The hazard is specific and was measured once: if the pointer is a REAL directory
+   * rather than a symlink, `pointMountAtView` has to clear it, and an `rm -r` on a path
+   * that resolves to the NFS share deletes `actual/` and every `views/` directory on the
+   * server. The guards exist for exactly that shape, so these pin both branches.
+   */
+  const setup = async (): Promise<{ root: string; actual: string; views: string; cleanup: () => Promise<void> }> => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-repoint-'))
+    const actual = join(root, 'actual')
+    const views = join(root, 'views')
+    await mkdir(actual, { recursive: true })
+    await mkdir(join(views, 'u-1'), { recursive: true })
+    await writeFile(join(actual, 'keep.md'), 'keep', 'utf8')
+    await writeFile(join(views, 'u-1', 'linked.md'), 'x', 'utf8')
+    return { root, actual, views, cleanup: () => rm(root, { recursive: true, force: true }) }
+  }
+
+  it('retargets an existing symlink without touching its old target', async () => {
+    const fixture = await setup()
+    try {
+      const options = { actualRoot: fixture.actual, viewRoot: fixture.views, userId: 'u-1' }
+      const pointer = join(fixture.root, 'kb')
+      // The first pointer points somewhere else; repointing must replace the LINK only.
+      const other = join(fixture.root, 'other-view')
+      await mkdir(other, { recursive: true })
+      await writeFile(join(other, 'other.md'), 'other', 'utf8')
+      await symlink(other, pointer)
+
+      await pointMountAtView(options, pointer)
+
+      expect(await readlink(pointer)).toBe(join(fixture.views, 'u-1'))
+      // The previous target still holds its file: replacing a link must not reach through.
+      expect(existsSync(join(other, 'other.md'))).toBe(true)
+      expect(existsSync(join(fixture.actual, 'keep.md'))).toBe(true)
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  it('refuses a pointer that is a real non-empty directory', async () => {
+    // This is the near-miss shape: a real directory where the pointer belongs. Clearing it
+    // is only safe when it is empty, so a non-empty one is refused before any syscall.
+    const fixture = await setup()
+    try {
+      const options = { actualRoot: fixture.actual, viewRoot: fixture.views, userId: 'u-1' }
+      const pointer = join(fixture.root, 'kb')
+      await mkdir(pointer, { recursive: true })
+      await writeFile(join(pointer, 'precious.md'), 'precious', 'utf8')
+
+      await expect(pointMountAtView(options, pointer)).rejects.toThrow(/non-empty directory/u)
+      // Nothing was deleted, and the pointer is still the directory it was.
+      expect(await readFile(join(pointer, 'precious.md'), 'utf8')).toBe('precious')
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  it('adopts an empty real directory, which holds nothing to lose', async () => {
+    const fixture = await setup()
+    try {
+      const options = { actualRoot: fixture.actual, viewRoot: fixture.views, userId: 'u-1' }
+      const pointer = join(fixture.root, 'kb')
+      await mkdir(pointer, { recursive: true })
+
+      await pointMountAtView(options, pointer)
+
+      // `lstat`, not `stat`: `stat` follows the link and would report the directory it
+      // points at, which is the opposite of what this asserts.
+      expect((await lstat(pointer)).isSymbolicLink()).toBe(true)
+      expect(await readlink(pointer)).toBe(join(fixture.views, 'u-1'))
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+describe('an edit in the host file window reaches the knowledge audit trail', () => {
+  /**
+   * Reported paths arrive in two shapes and both name the same document.
+   *
+   * Measured in the running product: the editor announces `kb/test-toc.md` -- a path
+   * relative to the session workspace -- because the knowledge view is linked into
+   * `/workspace/kb`. An earlier version of this matcher only understood absolute
+   * paths, so every save was silently classified as "outside the knowledge base" and
+   * the audit trail stayed empty while the document itself changed on disk.
+   */
+  it('matches a save reported relative to the workspace', async () => {
+    const { matchKnowledgeSave } = await import('../src/client/saveAudit.ts')
+    expect(matchKnowledgeSave('kb/test-toc.md', '/nas/kb')).toBe('test-toc.md')
+    expect(matchKnowledgeSave('kb/a.md', '/workspace/kb')).toBe('a.md')
+  })
+
+  it('matches a save reported as an absolute path under the root', async () => {
+    const { matchKnowledgeSave } = await import('../src/client/saveAudit.ts')
+    expect(matchKnowledgeSave('/nas/kb/docs/guide.md', '/nas/kb')).toBe('docs/guide.md')
+  })
+
+  it('ignores saves outside the knowledge base', async () => {
+    const { matchKnowledgeSave } = await import('../src/client/saveAudit.ts')
+    // A sibling directory whose name merely starts with the leaf must not match.
+    expect(matchKnowledgeSave('kb-archive/a.md', '/nas/kb')).toBeUndefined()
+    // A save elsewhere in the workspace is not a knowledge-base event.
+    expect(matchKnowledgeSave('src/main.ts', '/nas/kb')).toBeUndefined()
+    // The mount point itself is a directory, not a document.
+    expect(matchKnowledgeSave('kb', '/nas/kb')).toBeUndefined()
+    // A deployment with no mount point configured matches nothing at all, rather
+    // than every path that happens to share a first segment.
+    expect(matchKnowledgeSave('kb/a.md', '')).toBeUndefined()
+  })
+
+  it('registers against the sidebar only once the service exists', async () => {
+    const { registerSaveAudit } = await import('../src/client/saveAudit.ts')
+    // A host whose sidebar has not published its service yet: the callback is what
+    // runs when it arrives, so registration must not fail on the sample.
+    const injected: { betterSidebar?: unknown } = {}
+    let callback: ((value: { betterSidebar?: unknown }) => void) | undefined
+    const ctx = {
+      inject: (names: readonly string[], run: (value: { betterSidebar?: unknown }) => void) => {
+        expect(names).toEqual(['betterSidebar'])
+        callback = run
+        return () => {}
+      },
+    }
+    const dispose = registerSaveAudit(ctx)
+    expect(callback).toBeDefined()
+
+    // The service arriving later must still register both halves.
+    const registered: string[] = []
+    injected.betterSidebar = {
+      registerSaveActor: () => { registered.push('actor'); return () => {} },
+      registerSaveListener: () => { registered.push('listener'); return () => {} },
+    }
+    callback?.(injected)
+    expect(registered).toEqual(['actor', 'listener'])
+    dispose()
+  })
+})
+
+})
+
+describe('storage protocol', () => {
+  it('defaults to nfs so an existing remote deployment is unchanged', () => {
+    // A profile written before the protocol existed names nothing; it must keep driving the
+    // transport it always drove rather than silently switching to SSH.
+    const parsed = Config({ mountPoint: '/workspace/kb' }) as unknown as Record<string, unknown>
+    expect(parsed.storageProtocol).toBe('nfs')
+    expect(parsed.sshPort).toBe(22)
+  })
+
+  it('plans the nfs transport by default and the sshfs transport when asked', () => {
+    const nfs = deploymentPlan(PLAN).map(step => step.id)
+    expect(nfs).toContain('nfs-mount')
+    expect(nfs).not.toContain('sshfs-mount')
+
+    const sshfs = deploymentPlan({ ...PLAN, protocol: 'sshfs' }).map(step => step.id)
+    expect(sshfs).toEqual([
+      'probe', 'mineru-install', 'mineru-service', 'mineru-verify', 'sshfs-mount', 'sshfs-verify',
+    ])
+    // The two transports are alternatives, not additions: a host that mounts over SSH must
+    // not also be told to mount the same share over NFS.
+    expect(sshfs).not.toContain('nfs-mount')
+  })
+
+  it('builds the sshfs mount command from the transport fields', () => {
+    const step = sshfsMountStep({
+      ...PLAN,
+      protocol: 'sshfs',
+      sshHost: '10.0.0.9',
+      sshUser: 'root',
+      sshPort: 2222,
+      sshRemotePath: '/srv/kb',
+    })
+    const joined = step.commands.join('\n')
+    expect(joined).toContain("'root@10.0.0.9:/srv/kb'")
+    expect(joined).toContain('sshfs -p 2222')
+    // Reconnect is what turns a dropped connection into a stall rather than EIO for every
+    // reader, so it must not be optional.
+    expect(joined).toContain('reconnect')
+    expect(joined).toContain('ServerAliveInterval=15')
+  })
+
+  it('refuses to build a mount from an incomplete transport', () => {
+    // `@:` would mount nothing and fail much later as an empty tree; the step has to say so.
+    const step = sshfsMountStep({ ...PLAN, protocol: 'sshfs', sshHost: '', sshUser: 'root', sshRemotePath: '/srv/kb' })
+    const joined = step.commands.join('\n')
+    expect(joined).toContain('sshHost is not configured')
+  })
+
+  it('round-trips storage settings through the deployment file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-storage-settings-'))
+    try {
+      const written = await writeStorageSettings(root, {
+        storageMode: 'remote',
+        storageProtocol: 'sshfs',
+        sshHost: '10.0.0.9',
+        sshUser: 'root',
+        sshPort: 2222,
+        sshRemotePath: '/srv/kb',
+        sshMountOptions: 'ro',
+        sshKeyRef: 'DATAOPS_KB_SSH_KEY',
+      })
+      expect(written.storageProtocol).toBe('sshfs')
+      const read = await readStorageSettings(root)
+      expect(read).toMatchObject({ storageMode: 'remote', storageProtocol: 'sshfs', sshPort: 2222 })
+      // The file is JSON at the documented path, so an operator can inspect it.
+      const raw = JSON.parse(await readFile(storageSettingsPathFor(root), 'utf8'))
+      expect(raw.sshRemotePath).toBe('/srv/kb')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('never stores a private key, only its reference', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-storage-nokey-'))
+    try {
+      // A caller that tried to smuggle key material would have it dropped: the validator
+      // recognizes only the named fields, and no field in the set can hold a secret.
+      await writeStorageSettings(root, { sshKeyRef: 'MY_KEY' } as never)
+      const raw = await readFile(storageSettingsPathFor(root), 'utf8')
+      expect(raw).toContain('MY_KEY')
+      expect(raw).not.toContain('PRIVATE KEY')
+      const stored = JSON.parse(raw)
+      expect(Object.keys(stored)).not.toContain('sshPrivateKey')
+      expect(Object.keys(stored)).not.toContain('sshKey')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('drops an unrecognized stored value rather than trusting it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-storage-bad-'))
+    try {
+      await writeFile(storageSettingsPathFor(root), JSON.stringify({
+        storageMode: 'gone', storageProtocol: 'telnet', sshPort: 0, sshHost: 'ok.example',
+      }), 'utf8')
+      const read = await readStorageSettings(root)
+      // Each field is judged on its own: one bad value must not discard its neighbours.
+      expect(read.storageMode).toBeUndefined()
+      expect(read.storageProtocol).toBeUndefined()
+      expect(read.sshPort).toBeUndefined()
+      expect(read.sshHost).toBe('ok.example')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('overlays stored settings onto the deployment config', () => {
+    const base = { ...CONFIG, storageMode: 'local', storageProtocol: 'nfs' } as never
+    const merged = withStoredStorage(base, { storageMode: 'remote', storageProtocol: 'sshfs', sshHost: 'h.example' })
+    expect(merged.storageMode).toBe('remote')
+    expect(merged.storageProtocol).toBe('sshfs')
+    expect(merged.sshHost).toBe('h.example')
+    // The deployment's own paths are not the file's to change: they are bind mounts decided
+    // when the container was created.
+    expect(merged.mountPoint).toBe((base as { mountPoint: string }).mountPoint)
+    expect(merged.actualRoot).toBe((base as { actualRoot: string }).actualRoot)
+  })
+})
+
+describe('view buckets', () => {
+  it('places a path under the bucket its authoritative segment names', () => {
+    expect(bucketOf('global/制度.md')).toEqual({ bucket: 'global', inner: '制度.md' })
+    expect(bucketOf('department/OPS/值班表.md')).toEqual({ bucket: 'department', inner: '值班表.md' })
+    expect(bucketOf('personal/u-1/笔记.md')).toEqual({ bucket: 'personal', inner: '笔记.md' })
+    // An owner segment with nothing under it is a container, not a document.
+    expect(bucketOf('department/OPS')).toBeUndefined()
+    expect(bucketOf('personal/u-1')).toBeUndefined()
+  })
+
+  it('strips the whole bucket prefix so the bucket is the folder the caller sees', () => {
+    // The point of the prefix is ownership, not nesting: a caller opening 「部门」
+    // expects their department's documents at its top level.
+    expect(bucketOf('department/OPS/2026/值班表.md')).toEqual({
+      bucket: 'department',
+      inner: '2026/值班表.md',
+    })
+  })
+
+  it('keeps a legacy flat path visible by defaulting it to global', () => {
+    // Files written before the split have no bucket segment. Dropping them would
+    // empty a view on upgrade; answering `global` matches the migration target.
+    expect(bucketOf('a.md')).toEqual({ bucket: 'global', inner: 'a.md' })
+    expect(bucketOf('2024/reports/a.md')).toEqual({ bucket: 'global', inner: '2024/reports/a.md' })
+  })
+
+  it('refuses a bare bucket directory and traversal paths', () => {
+    expect(bucketOf('global')).toBeUndefined()
+    expect(bucketOf('department/')).toBeUndefined()
+    expect(bucketOf('../outside.md')).toBeUndefined()
+    expect(bucketOf('/etc/passwd')).toBeUndefined()
+    expect(bucketOf('')).toBeUndefined()
+  })
+
+  it('links only the caller department and only when the code matches exactly', () => {
+    expect(departmentPrefixMatches('department/OPS/值班表.md', 'OPS')).toBe(true)
+    // A prefix match would leak OPS2 into OPS's view.
+    expect(departmentPrefixMatches('department/OPS2/值班表.md', 'OPS')).toBe(false)
+    expect(departmentPrefixMatches('department/OPS/值班表.md', undefined)).toBe(false)
+    expect(departmentPrefixMatches('department/OPS/值班表.md', '')).toBe(false)
+    expect(departmentPrefixMatches('department/OPS', 'OPS')).toBe(false)
+    expect(departmentPrefixMatches('global/制度.md', 'OPS')).toBe(false)
+  })
+})
+
+describe('bucketed view sync', () => {
+  it('links each resolved path into its own bucket and drops the owner segment', async () => {
+    const actual = await mkdtemp(join(tmpdir(), 'kb-bucket-actual-'))
+    const views = await mkdtemp(join(tmpdir(), 'kb-bucket-views-'))
+    try {
+      for (const rel of ['global/制度.md', 'department/OPS/值班表.md', 'personal/u-1/笔记.md']) {
+        await mkdir(dirname(join(actual, rel)), { recursive: true })
+        await writeFile(join(actual, rel), rel, 'utf8')
+      }
+      const view = { actualRoot: actual, viewRoot: views, userId: 'u-1', departmentCode: 'OPS' }
+      await syncView(view, [
+        { relPath: 'global/制度.md' },
+        { relPath: 'department/OPS/值班表.md' },
+        { relPath: 'personal/u-1/笔记.md' },
+      ])
+      const tree = await readdir(join(views, 'u-1'))
+      expect(tree.sort()).toEqual(['global', 'department', 'personal'].sort())
+      // The owner segment is gone from the department bucket: only the file remains.
+      expect(await readdir(join(views, 'u-1', 'department'))).toEqual(['值班表.md'])
+      expect(await readdir(join(views, 'u-1', 'personal'))).toEqual(['笔记.md'])
+      expect(await readdir(join(views, 'u-1', 'global'))).toEqual(['制度.md'])
+    } finally {
+      await rm(actual, { recursive: true, force: true })
+      await rm(views, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves another department out of the view even when a grant reaches it', async () => {
+    const actual = await mkdtemp(join(tmpdir(), 'kb-bucket-actual-'))
+    const views = await mkdtemp(join(tmpdir(), 'kb-bucket-views-'))
+    try {
+      for (const rel of ['department/OPS/值班表.md', 'department/DEV/排期.md']) {
+        await mkdir(dirname(join(actual, rel)), { recursive: true })
+        await writeFile(join(actual, rel), rel, 'utf8')
+      }
+      // Both grants resolve (DataOps allowed both); the layout still shows one.
+      const view = { actualRoot: actual, viewRoot: views, userId: 'u-1', departmentCode: 'OPS' }
+      await syncView(view, [
+        { relPath: 'department/OPS/值班表.md' },
+        { relPath: 'department/DEV/排期.md' },
+      ])
+      expect(await readdir(join(views, 'u-1', 'department'))).toEqual(['值班表.md'])
+    } finally {
+      await rm(actual, { recursive: true, force: true })
+      await rm(views, { recursive: true, force: true })
+    }
+  })
+
+  it('shows no department bucket at all when the caller has no department', async () => {
+    const actual = await mkdtemp(join(tmpdir(), 'kb-bucket-actual-'))
+    const views = await mkdtemp(join(tmpdir(), 'kb-bucket-views-'))
+    try {
+      await mkdir(join(actual, 'global'), { recursive: true })
+      await writeFile(join(actual, 'global/制度.md'), 'x', 'utf8')
+      const view = { actualRoot: actual, viewRoot: views, userId: 'u-1' }
+      await syncView(view, [{ relPath: 'global/制度.md' }])
+      // `global` and `personal` always exist; `department` does not, because a
+        // caller without a department has nothing that could ever fill it.
+        expect((await readdir(join(views, 'u-1'))).sort()).toEqual(['global', 'personal'])
+    } finally {
+      await rm(actual, { recursive: true, force: true })
+      await rm(views, { recursive: true, force: true })
+    }
   })
 })

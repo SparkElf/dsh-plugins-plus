@@ -107,11 +107,18 @@ seq23  request/header（投影已生效）
 
 ## 已知约束
 
-- **一旦会话里写过 `image/hoist`，读取该会话就必须挂载本插件。**
-  官方在 `packages/core/session/lib/index.js` 里硬性要求：
-  投影被移除时抛 `restore the session with its owning plugin`。
-  未挂载时**新会话**不受影响，因为事件带 `ignorable: true`，官方读取器
-  （`recoverable` 和 `strict` 两种模式均实测）会安全跳过。
+- **未挂载本插件时，`image/hoist` 行本身会被安全跳过**（事件带 `ignorable: true`，
+  `recoverable` 与 `strict` 两种读取模式均实测）。
+- **但「记录在该插件之下的 `image/offload`」会连带失效。** 这是一条实测出来的坑：
+  `image/offload` 按**投影后**的消息数图片下标，也就是「carrier 已经承载了 tool 图片」
+  的那个形态；不挂载本插件去折叠同一份日志，下标就解析不开，官方在
+  `offloadMessageImages` 里抛 `image/offload: image index 0 does not exist`，
+  整个会话从此读不出来。已在 `@sparkelf/dsh-patch-image-offload-hoist-replay` 里修掉：
+  日志中出现 hoist 行时，解析不到的位置改为跳过（没有 hoist 行的日志仍然是硬错误），
+  同时 `session-query` 的冷读改为按已挂载投影折叠。
+- **一条 carrier 会承载多张图片。** 两个用户轮次之间的每个带图工具结果都属于更早那轮，
+  所以投影必须按 carrier **累加**。折叠交给投影的是「本事件之前」的消息视图，
+  在那里重读 carrier 会把上一张图片覆盖掉 —— 旧版本因此静默丢弃过图片。
 - 上游兼容性无法探测。该缺陷是静默的，所以只能由**配置声明**哪些路由需要搬运。
 - 这是请求期投影，不改变上游实际计价方式。上游修好后，把 provider 从列表里移除即可。
 

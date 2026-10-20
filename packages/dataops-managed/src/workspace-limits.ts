@@ -1,6 +1,7 @@
 /** Read and write the DataOps workspace limits this deployment enforces. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { noteAccepted, noteExpired } from './auth-state.ts'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 
 /** The two byte ceilings one workspace size setting carries. */
@@ -107,7 +108,11 @@ export class WorkspaceLimits {
     const response = await fetch(new URL('/api/ai/attachment-settings', this.apiBase()), {
       headers: { authorization: `Bearer ${token}` },
     })
-    if (response.status === 401) return undefined
+    if (response.status === 401) {
+      noteExpired()
+      return undefined
+    }
+    noteAccepted()
     if (!response.ok) {
       throw new WorkspaceLimitsRejection(response.status, await rejectionMessage(response, 'Workspace limits read failed'))
     }
@@ -139,7 +144,11 @@ export class WorkspaceLimits {
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ workspaceSize: limits }),
     })
-    if (response.status === 401) return undefined
+    if (response.status === 401) {
+      noteExpired()
+      return undefined
+    }
+    noteAccepted()
     if (!response.ok) {
       throw new WorkspaceLimitsRejection(response.status, await rejectionMessage(response, 'Workspace limits write failed'))
     }

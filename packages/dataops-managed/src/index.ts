@@ -3,6 +3,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { currentAuthState } from './auth-state.ts'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -47,6 +48,9 @@ export const WORKSPACE_LIMITS_PATH = '/integrations/dataops/workspace-limits'
 
 /** Same-origin route the Settings panel uses to read and change the tool-call timeout. */
 export const TOOL_TIMEOUT_PATH = '/integrations/dataops/tool-timeout'
+
+/** Same-origin route reporting what the last DataOps answer said about the credential. */
+export const AUTH_STATE_PATH = '/integrations/dataops/auth-state'
 
 /** The ends a tool-call timeout may take, in whole seconds. */
 export const TOOL_TIMEOUT_MIN_SECONDS = 1
@@ -213,6 +217,44 @@ function bearerToken(request: IncomingMessage): string | null {
   if (!authorization.startsWith('Bearer ')) return null
   const token = authorization.slice(7).trim()
   return token === '' ? null : token
+}
+
+/**
+ * Adopt the JWT the browser gateway attached to one request.
+ *
+ * Every browser request reaches this workspace through the DataOps gateway, which resolves the
+ * caller's session and forwards a fresh `authorization: Bearer <jwt>` — so the current credential
+ * arrives continuously, without any push, handshake or refresh protocol. The routes below are
+ * the only place this plugin can see that header, and reading it here is what keeps the stored
+ * credential from going stale: the value in it was captured once, while the caller's session is
+ * renewed by DataOps for as long as they stay signed in.
+ *
+ * A request without the header is normal rather than an error (same-origin fetches from inside
+ * the workspace do carry it, but a probe or a health check may not), so this only ever improves
+ * the stored value and never rejects the request.
+ *
+ * @param request - the incoming request, whose headers the gateway filled in.
+ * @returns once the credential has been updated, or immediately when there is nothing to adopt.
+ */
+export function adoptRequestJwt(
+  ctx: Context,
+  accessRef: ReturnType<typeof credentialRef>,
+  request: IncomingMessage,
+): Promise<void> {
+  const token = bearerToken(request)
+  // Re-storing the same value would rewrite the credential document and wake its watchers on
+  // every request; comparing first keeps adoption to the moments the token actually changed.
+  if (token === null) return Promise.resolve()
+  return (async () => {
+    const current = await ctx.credentials.resolve(accessRef)
+    if (current?.value === token) return
+    await ctx.credentials.set(accessRef, token)
+  })().catch((error: unknown) => {
+    // A credential write that fails must not fail the request that carried it: the caller asked
+    // for the page, not for this housekeeping, and the next request will try again.
+    ctx.logger.warn('dataops-managed: request JWT could not be adopted')
+    ctx.logger.warn(error)
+  })
 }
 
 /** The skill this plugin contributes: how to answer a DataOps data question. */
@@ -418,6 +460,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         response.end()
         return
       }
+      // The browser cannot read its own httpOnly cookie, so it cannot put the JWT in this
+      // request's body. That is fine: the gateway already attached the same token to the header,
+      // and reading it there is what makes a bare POST (no body, no client-side token) enough to
+      // re-authenticate the workspace after the caller signs in again.
+      await adoptRequestJwt(ctx, accessRef, request)
       const token = bearerToken(request)
       if (token === null) {
         response.writeHead(401, { 'content-length': '0' })
@@ -688,6 +735,27 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'dataops-managed: tool timeout route')
+
+  /**
+   * What the last DataOps answer said about this workspace's credential.
+   *
+   * The settings surfaces need this because a 401 is handled deep inside a call that degrades to
+   * "no data", so the panel renders as if the workspace simply has nothing to show. Reading this
+   * route is how the interface learns the reason is an ended session rather than an empty one.
+   * The recorded state is an observation, never an authority: DataOps still decides.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: AUTH_STATE_PATH,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      if (request.method !== 'GET') {
+        response.writeHead(405, { allow: 'GET', 'content-length': '0' })
+        response.end()
+        return
+      }
+      writeJson(response, 200, { state: currentAuthState() })
+    },
+  }), 'dataops-managed: auth state route')
 
   await connectExisting()
 }

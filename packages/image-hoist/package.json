@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-image-hoist",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "Route-compatible tool-result image hoisting: move images returned by tools onto the preceding user message for upstreams that cannot read function_call_output images",
   "main": "./lib/index.js",

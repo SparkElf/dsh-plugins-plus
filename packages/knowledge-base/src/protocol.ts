@@ -48,6 +48,8 @@ export interface KnowledgeConfig {
   viewRoot: string
   /** Absolute path where the view tree is mounted inside the container. */
   mountPoint: string
+  /** NFS export host, when the deployment uses the NFS transport. */
+  nfsServer?: string
   /** Read-only summaries the deployment wants shown beside the connection. */
   notes?: string[]
 }
@@ -103,6 +105,8 @@ export interface KnowledgeIndexJob {
  * retrieval reads it with grep and read. A null count means the mount is absent,
  * which is an expected state before the storage host is attached.
  */
+export type { KnowledgeSshView } from './api.ts'
+
 export interface KnowledgeStatus {
   /** Files visible under the mount point, or null when nothing is mounted there. */
   visibleFiles: number | null
@@ -197,6 +201,16 @@ export const ENDPOINTS = {
   resolve: '/api/system/resource-permissions/resolve',
   /** The authenticated caller, whose id keys their view directory. */
   me: '/api/auth/me',
+  /**
+   * Templates a reader can start from, which are DataOps wiki pages carrying the
+   * `report_template` category (`resource-wiki-core.controller.ts`, `@Get('pages/templates')`).
+   *
+   * The plugin keeps no template store: the pages a team already wrote ARE the
+   * templates, and duplicating them here would create a second copy to keep in
+   * step. The endpoint answers an empty list today because no page carries that
+   * category yet.
+   */
+  templates: '/api/resources/wiki/pages/templates',
 } as const
 
 /**

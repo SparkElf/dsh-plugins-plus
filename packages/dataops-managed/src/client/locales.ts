@@ -38,6 +38,11 @@ export const en = {
   plazaLoadFailed: 'The skill plaza could not be loaded. Try again.',
   plazaActionFailed: 'The action could not be completed. Try again.',
   plazaRetry: 'Try again',
+  plazaRefresh: 'Refresh',
+  reloginTitle: 'Sign in to DataOps again',
+  reloginBody: 'This workspace can no longer reach DataOps: the sign-in for this session has ended, so settings, shared models and the skill plaza cannot load. Sign in again in the DataOps window, then reload this page.',
+  reloginAction: 'Reload',
+  reloginDismiss: 'Later',
 } as const
 
 /** Stable key set shared by every managed DataOps locale. */
@@ -83,4 +88,9 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   plazaLoadFailed: '技能广场加载失败，请重试。',
   plazaActionFailed: '操作未完成，请重试。',
   plazaRetry: '重试',
+  plazaRefresh: '刷新',
+  reloginTitle: '请重新登录 DataOps',
+  reloginBody: '该工作区已无法访问 DataOps：本次登录会话已过期，因此设置、共享模型与技能广场都无法加载。请在 DataOps 页面重新登录，然后重新加载本页。',
+  reloginAction: '重新加载',
+  reloginDismiss: '稍后再说',
 }

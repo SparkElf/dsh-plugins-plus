@@ -21,10 +21,17 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useState } from 'react'
-import { KB_API, kbApiPath } from '../api.ts'
-import { FileTypeIcon, IconFolderOpenRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
+import {
+  FileTypeIcon,
+  IconFolderOpenRegular,
+  IconPinFillRegular,
+  IconPinOutlineRegular,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './KnowledgeListing.module.css'
+import { KnowledgeLoading } from './KnowledgeLoading.tsx'
+import { KnowledgeContextMenu, type ContextTarget } from './KnowledgeContextMenu.tsx'
 
 /** One entry, as the Host returns it. */
 interface Entry {
@@ -69,6 +76,74 @@ export interface KnowledgeListingProps {
    * a reader gets the same `@` action from either tree.
    */
   onReference?: (path: string, isDir: boolean) => void
+  /**
+   * Pin or unpin one row.
+   *
+   * Omitted by a caller that has no pin store, which is how the search results list
+   * stays free of an action that would only make sense inside the tree.
+   */
+  onPin?: (path: string, pinned: boolean) => void
+  /** Whether one path is currently pinned, so the row can mark it. */
+  isPinned?: (path: string) => boolean
+  /**
+   * Called after a rename succeeded, so the page reloads the tree.
+   *
+   * The listing cannot reload itself: it reads through `refreshTick`, which the page
+   * owns, and a rename changes the paths this component is currently holding.
+   */
+  onRenamed?: () => void
+  /**
+   * Render one row's action as "unpin" rather than "pin".
+   *
+   * The pinned band lists paths that are already pinned, so every row there offers
+   * the opposite action; deriving it from a flag keeps one row shape for both bands.
+   */
+  unpinOnly?: boolean
+  /**
+   * Narrow the tree to rows whose name contains this text.
+   *
+   * Filtering happens over the rows already read, so it costs no request: the tree
+   * section header's search is the in-place narrowing, while the rail's field is the
+   * cross-directory search. A filter that matched nothing read as an empty tree, so
+   * the two empty states are kept apart.
+   */
+  filter?: string
+  /**
+   * Start with every directory expanded.
+   *
+   * Used by the pinned band, where a pinned folder is only useful if its contents
+   * are already visible.
+   */
+  expandAll?: boolean
+  /**
+   * The action offered when the tree genuinely holds no documents.
+   *
+   * Distinct from a filter that matched nothing: an empty tree wants a way to make
+   * a document, while an unmatched filter wants a different search term.
+   */
+  emptyAction?: ReactNode
+  /**
+   * Move one entry into a directory, or pin it when the target is the pin band.
+   *
+   * Omitted by a caller that must stay read-only, which is how the search results
+   * list keeps its rows free of a gesture the Host would refuse there.
+   */
+  onMove?: (from: string, toDirectory: string) => void
+  /**
+   * The layout to render. `list` is the tree; `grid` is the document cards.
+   *
+   * Defaults to the tree so a caller that does not persist a preference behaves
+   * exactly as it did before the card view existed.
+   */
+  viewMode?: 'list' | 'grid'
+  /**
+   * Enter multi-select. A callback rather than internal state because the batch
+   * bar's actions are the host's (they move and pin through the same routes a
+   * single drag uses), so the selection has to be visible to it.
+   */
+  onSelectionChange?: (paths: readonly string[]) => void
+  /** The current selection, so a batch action can act on it. */
+  selection?: readonly string[]
 }
 
 /**
@@ -103,6 +178,31 @@ function formatModifiedTitle(mtimeMs: number, locale: string): string {
 }
 
 /**
+ * The drag payload's MIME type.
+ *
+ * Exported because the drop target that pins is NOT in this component: the pin
+ * band lives in the panel, and the two have to agree on the name of the thing
+ * being carried. The native drag payload is used rather than lifted React state
+ * for exactly that reason -- it crosses the component boundary the gesture
+ * crosses, without the panel having to hold a second copy of the tree's state.
+ */
+export const KB_DRAG_MIME = 'application/x-dsh-kb-path'
+
+/** The dragged path, or null when the payload was not this list's. */
+function readDragPayload(transfer: DataTransfer | null): { relPath: string; isDir: boolean } | null {
+  if (transfer === null) return null
+  const raw = transfer.getData(KB_DRAG_MIME)
+  if (raw === '') return null
+  try {
+    const parsed = JSON.parse(raw) as { relPath?: unknown; isDir?: unknown }
+    if (typeof parsed.relPath !== 'string') return null
+    return { relPath: parsed.relPath, isDir: parsed.isDir === true }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Render the listing for the mount's top level, and one level per expanded
  * directory.
  * @param props - copy resolver and the open callback.
@@ -113,6 +213,13 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
   const [open, setOpen] = useState<readonly string[]>([])
   const [children, setChildren] = useState<Record<string, Entry[]>>({})
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
+  /** The path a drag is currently hovering, so the row can show the drop target. */
+  const [dropTarget, setDropTarget] = useState<string | undefined>(undefined)
+  // The open context menu: which row, and where the pointer was. Both are needed because
+  // the menu is positioned from the pointer, not from the row's own control.
+  const [menu, setMenu] = useState<{ target: ContextTarget; at: { x: number; y: number } } | null>(null)
+  /** The path being dragged, so a row cannot be dropped into itself. */
+  const dragSource = useRef<string | undefined>(undefined)
 
   const read = useCallback(async (path: string): Promise<Entry[]> => {
     const response = await fetch(kbApiPath(KB_API.list), {
@@ -122,7 +229,10 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
       cache: 'no-store',
     })
     if (!response.ok) throw new Error(String(response.status))
-    const body = (await response.json()) as { entries?: Entry[] }
+    // A 2xx with a non-JSON body must not surface a JSON.parse message as the reason the
+    // listing failed; the helper turns it into a readable HTTP description.
+    const body = await readKnowledgeJson<{ entries?: Entry[] }>(response)
+    if (body.error !== undefined) throw new Error(body.error)
     return body.entries ?? []
   }, [])
 
@@ -136,6 +246,40 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
     }).catch(() => { if (!cancelled) setState('error') })
     return () => { cancelled = true }
   }, [read, props.refreshTick])
+
+  // A pinned folder is only useful with its contents already showing, so the
+  // pinned band opens every directory it was handed.
+  useEffect(() => {
+    if (props.expandAll !== true) return
+    setOpen((current) => {
+      const added = entries.filter(entry => entry.isDir).map(entry => entry.relPath)
+      const next = [...current]
+      for (const path of added) if (!next.includes(path)) next.push(path)
+      return next.length === current.length ? current : next
+    })
+  }, [props.expandAll, entries])
+
+  // The grid has no collapsing: a card names its own folder, so a folder the
+  // reader never opened would only hide documents the layout can show. Every
+  // directory is therefore marked open while the grid is up, which is what makes
+  // the level effect below read them.
+  useEffect(() => {
+    if (props.viewMode !== 'grid') return
+    setOpen((current) => {
+      const all = new Set(current)
+      const sweep = (rows: Entry[]): void => {
+        for (const entry of rows) {
+          if (!entry.isDir) continue
+          all.add(entry.relPath)
+          const kids = children[entry.relPath]
+          if (kids !== undefined) sweep(kids)
+        }
+      }
+      sweep(entries)
+      const next = [...all]
+      return next.length === current.length ? current : next
+    })
+  }, [props.viewMode, entries, children])
 
   // Expanded directories keep their own children, so collapsing and reopening one
   // does not re-read it.
@@ -152,6 +296,12 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
   }, [open, children, read])
 
   const locale = props.locale ?? 'zh-CN'
+  /** Dragging is offered only where a move can actually be performed. */
+  const draggable = props.onMove !== undefined
+  /** Multi-select is offered only where a batch action exists to consume it. */
+  const selectable = props.onSelectionChange !== undefined
+  const selected = props.selection ?? []
+  const selectionOn = selected.length > 0
 
   /**
    * Toggle a directory, or open a file.
@@ -188,6 +338,52 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
       // The explorer's own indent step: 22px per level plus its 6px inset.
       style={{ paddingLeft: depth * 22 + 6 }}
       title={entry.relPath}
+      // The drop target's own class, copied from the explorer's
+      // `.explorerRowDropTarget`: a dashed outline and the accent hover fill, so a
+      // folder under the pointer reads as the destination.
+      {...(dropTarget === entry.relPath ? { 'data-drop-target': 'true' } : {})}
+      {...(draggable ? { draggable: true } : {})}
+      onDragStart={draggable ? (event) => {
+        dragSource.current = entry.relPath
+        event.dataTransfer.effectAllowed = 'move'
+        // Both a custom type and text/plain: the custom one is what the pin band
+        // and the rows read, and the plain one keeps the drag legible to anything
+        // else on the page that accepts a drop.
+        event.dataTransfer.setData(KB_DRAG_MIME, JSON.stringify({ relPath: entry.relPath, isDir: entry.isDir }))
+        event.dataTransfer.setData('text/plain', entry.relPath)
+      } : undefined}
+      onDragEnd={draggable ? () => {
+        dragSource.current = undefined
+        setDropTarget(undefined)
+      } : undefined}
+      onDragOver={entry.isDir && draggable ? (event) => {
+        const source = dragSource.current
+        // A folder cannot be dropped into itself, and dropping a path back into
+        // its own parent is a no-op that would still cost a round trip.
+        if (source === undefined || source === entry.relPath) return
+        if (source.startsWith(entry.relPath + '/')) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'move'
+        if (dropTarget !== entry.relPath) setDropTarget(entry.relPath)
+      } : undefined}
+      onDragLeave={entry.isDir && draggable ? () => {
+        // Only clears when this row is still the marked one: moving between a
+        // parent row and its own child fires leave-then-over, and clearing
+        // unconditionally would flicker the highlight off.
+        setDropTarget(current => (current === entry.relPath ? undefined : current))
+      } : undefined}
+      onDrop={entry.isDir && draggable ? (event) => {
+        event.preventDefault()
+        setDropTarget(undefined)
+        const payload = readDragPayload(event.dataTransfer)
+        dragSource.current = undefined
+        if (payload === null) return
+        if (payload.relPath === entry.relPath) return
+        // Refuses a folder dropped into its own descendant, which the kernel would
+        // answer with EINVAL; catching it here keeps the error out of the tree.
+        if (payload.isDir && entry.relPath.startsWith(payload.relPath + '/')) return
+        props.onMove?.(payload.relPath, entry.relPath)
+      } : undefined}
       onClick={() => { activate(entry) }}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -196,11 +392,14 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
         }
       }}
       onContextMenu={(event) => {
-        // The grant entry reaches the surface a right-click cannot: a row is
-        // where an operator already has a path in mind.
-        if (props.onGrant === undefined) return
+        // A real menu, at the pointer. It carries the permission entry the old
+        // right-click jumped straight to, plus the actions a file list is expected to
+        // offer (save, rename, pin, reference).
         event.preventDefault()
-        props.onGrant(entry.relPath)
+        setMenu({
+          target: { relPath: entry.relPath, name: entry.name, isDir: entry.isDir },
+          at: { x: event.clientX, y: event.clientY },
+        })
       }}
     >
       <span className={styles.entryGlyph} aria-hidden="true">
@@ -209,12 +408,28 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
           ? <IconFolderOpenRegular size={14} />
           : <FileTypeIcon path={entry.name} size={14} />}
       </span>
+      {/* Multi-select. Drawn only while a selection is live, so the ordinary tree
+          keeps the explorer's row metrics exactly (task-16 measured them against
+          `.explorerRow`) and gains no column a reader did not ask for. */}
+      {selectable && selectionOn && (
+        <input
+          type="checkbox"
+          className={styles.entryCheck}
+          checked={selected.includes(entry.relPath)}
+          aria-label={entry.name}
+          onChange={(event) => { event.stopPropagation(); toggleSelected(entry.relPath) }}
+          onClick={(event) => { event.stopPropagation() }}
+        />
+      )}
       <span className={styles.entryName}>{entry.name}</span>
       {entry.mtimeMs !== undefined && (
         <span className={styles.entryTime} title={formatModifiedTitle(entry.mtimeMs, locale)}>
           {formatModified(entry.mtimeMs)}
         </span>
       )}
+      {/* Native, because these appear inside a row that is itself a button: a
+          nested `Button` would add its own padding and background to a 20px
+          hover affordance and break the row's single-line height. */}
       {props.onReference !== undefined && (
         <button
           type="button"
@@ -230,7 +445,116 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
           @
         </button>
       )}
+      {props.onPin !== undefined && (
+        <button
+          type="button"
+          className={styles.entryPin}
+          aria-label={props.t(props.unpinOnly === true ? 'unpinFile' : 'pinFile')}
+          title={props.t(props.unpinOnly === true ? 'unpinFile' : 'pinFile')}
+          // The row keeps the affordance visible while the path is pinned, so the
+          // state is readable without hovering.
+          data-pinned={props.isPinned?.(entry.relPath) === true ? 'true' : undefined}
+          onClick={(event) => {
+            // Stops the row's own click: pinning must not also open the document.
+            event.stopPropagation()
+            const next = !(props.isPinned?.(entry.relPath) === true)
+            props.onPin?.(entry.relPath, next)
+          }}
+        >
+          {props.unpinOnly === true || props.isPinned?.(entry.relPath) === true
+            ? <IconPinFillRegular size={14} />
+            : <IconPinOutlineRegular size={14} />}
+        </button>
+      )}
     </div>
+  )
+
+  /**
+   * Add or remove one path from the batch selection.
+   *
+   * Owned by the caller so the batch bar can act on the same list; this only
+   * reports the next value.
+   */
+  const toggleSelected = (relPath: string): void => {
+    const next = selected.includes(relPath)
+      ? selected.filter(item => item !== relPath)
+      : [...selected, relPath]
+    props.onSelectionChange?.(next)
+  }
+
+  /**
+   * Render one document as a card for the grid layout.
+   *
+   * The grid is a separate class family rather than a re-styling of `.entry`,
+   * because the row metrics are a measured copy of the explorer's `.explorerRow`
+   * (28px high, 12px ink, an 8px inset) and a card has none of those: reusing the
+   * row class would either break that copy or force the card to inherit a height
+   * it cannot use. The card carries what the grid is for -- the glyph, the title,
+   * where the document lives, and when it changed.
+   */
+  const card = (entry: Entry) => (
+    <li key={entry.relPath} className={styles.cardItem}>
+      <div
+        role="button"
+        tabIndex={0}
+        className={entry.isDir ? styles.card + ' ' + styles.cardDir : styles.card}
+        title={entry.relPath}
+        {...(draggable ? { draggable: true } : {})}
+        onDragStart={draggable ? (event) => {
+          dragSource.current = entry.relPath
+          event.dataTransfer.effectAllowed = 'move'
+          event.dataTransfer.setData(KB_DRAG_MIME, JSON.stringify({ relPath: entry.relPath, isDir: entry.isDir }))
+          event.dataTransfer.setData('text/plain', entry.relPath)
+        } : undefined}
+        onDragEnd={draggable ? () => { dragSource.current = undefined } : undefined}
+        onDragOver={entry.isDir && draggable ? (event) => {
+          const source = dragSource.current
+          if (source === undefined || source === entry.relPath) return
+          if (source.startsWith(entry.relPath + '/')) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'move'
+          setDropTarget(entry.relPath)
+        } : undefined}
+        onDrop={entry.isDir && draggable ? (event) => {
+          event.preventDefault()
+          setDropTarget(undefined)
+          const payload = readDragPayload(event.dataTransfer)
+          dragSource.current = undefined
+          if (payload === null || payload.relPath === entry.relPath) return
+          if (payload.isDir && entry.relPath.startsWith(payload.relPath + '/')) return
+          props.onMove?.(payload.relPath, entry.relPath)
+        } : undefined}
+        onClick={() => { activate(entry) }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            activate(entry)
+          }
+        }}
+      >
+        <span className={styles.cardGlyph} aria-hidden="true">
+          {entry.isDir
+            ? <IconFolderOpenRegular size={20} />
+            : <FileTypeIcon path={entry.name} size={20} />}
+        </span>
+        <span className={styles.cardName}>{entry.name}</span>
+        {/* The location, which the flat grid loses and the tree implies: without
+            it two documents of the same name in different folders are the same
+            card. The row path already carries it, so it is derived rather than
+            fetched. */}
+        <span className={styles.cardMeta}>{entry.relPath.includes('/')
+          ? entry.relPath.slice(0, entry.relPath.lastIndexOf('/'))
+          : props.t('gridRoot')}</span>
+        {entry.mtimeMs !== undefined && (
+          <span
+            className={styles.cardTime}
+            title={formatModifiedTitle(entry.mtimeMs, locale)}
+          >
+            {formatModified(entry.mtimeMs)}
+          </span>
+        )}
+      </div>
+    </li>
   )
 
   /** One level, plus each expanded child directory's own level. */
@@ -247,13 +571,41 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
       )
     })
 
+  /**
+   * The rows a filter leaves, matched on name.
+   *
+   * A filtered directory keeps its place so the tree still shows where a match
+   * lives, and the walk is recursive so a match nested inside a collapsed folder is
+   * still found. Kept as a name match rather than a content one because this is the
+   * in-place narrowing: reading file bodies is what the rail's own search is for.
+   */
+  const needle = (props.filter ?? '').trim().toLowerCase()
+  const visible = useMemo(() => {
+    if (needle === '') return entries
+    const keep = (rows: Entry[], inPath: boolean): Entry[] => {
+      const kept: Entry[] = []
+      for (const entry of rows) {
+        const selfMatch = entry.name.toLowerCase().includes(needle)
+        // A directory is retained when it matches, and when anything under the
+        // level it owns matches, so the path to a hit stays reachable.
+        if (entry.isDir) {
+          const kids = children[entry.relPath]
+          const kidMatch = kids === undefined ? false : keep(kids, selfMatch).length > 0
+          if (selfMatch || kidMatch || inPath) kept.push(entry)
+          continue
+        }
+        if (selfMatch || inPath) kept.push(entry)
+      }
+      return kept
+    }
+    return keep(entries, false)
+  }, [entries, children, needle])
+
   // The product's shared centered panel state, not a bare grey sentence.
   if (state === 'loading') {
-    return (
-      <div className={styles.empty} role="status" aria-label={props.t('loading')}>
-        <p className={styles.emptyTitle}>{props.t('loading')}</p>
-      </div>
-    )
+    // The listing is the page's main surface, so the animation stands in for the
+    // table rather than a sentence inside it.
+    return <KnowledgeLoading label={props.t('loading')} announce={props.t('loading')} />
   }
   if (state === 'error') {
     return (
@@ -262,13 +614,72 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
       </div>
     )
   }
+  // Two different empties, deliberately not merged. An unmatched filter means the
+  // reader should change the term, so it keeps a sentence and offers no action. A
+  // tree with nothing in it means there is no document yet, so it offers the one
+  // entry point that leads to making one.
+  if (needle !== '' && visible.length === 0) {
+    return (
+      <div className={styles.empty} role="status">
+        <p className={styles.emptyTitle}>{props.t('filterNoMatch')}</p>
+      </div>
+    )
+  }
   if (entries.length === 0) {
     return (
       <div className={styles.empty} role="status">
-        <p className={styles.emptyTitle}>{props.t('searchEmpty')}</p>
+        {/* The tree's own wording, not the search-miss one: a tree that holds
+            nothing has not failed to match a term, and telling the reader no
+            document matches would send them looking for a search box. */}
+        <p className={styles.emptyTitle}>{props.t('treeEmpty')}</p>
+        {props.emptyAction !== undefined && (
+          <div className={styles.emptyAction}>{props.emptyAction}</div>
+        )}
       </div>
     )
   }
 
-  return <ul className={styles.entries}>{level(entries, 0)}</ul>
+  // The grid flattens what the tree nests. Every directory is expanded for the
+  // walk because a card names its own folder rather than sitting inside one, so a
+  // collapsed folder would simply hide documents that the layout has room to show.
+  if (props.viewMode === 'grid') {
+    const flat: Entry[] = []
+    const collect = (rows: Entry[]): void => {
+      for (const entry of rows) {
+        flat.push(entry)
+        if (entry.isDir) {
+          const kids = children[entry.relPath]
+          if (kids !== undefined) collect(kids)
+          // A directory the reader has not opened still has children on the Host;
+          // the grid reads them when the level is opened, which the panel does by
+          // marking every directory open in grid mode.
+        }
+      }
+    }
+    collect(visible)
+    return (
+      <ul className={styles.cards} data-view-mode="grid">
+        {flat.map(entry => card(entry))}
+      </ul>
+    )
+  }
+
+  return (
+    <>
+      <ul className={styles.entries} data-view-mode="list">{level(visible, 0)}</ul>
+      {/* One menu for the whole tree rather than one per row: a row is re-created on every
+          parent re-render, and an open menu owned by a row would unmount with it. */}
+      <KnowledgeContextMenu
+        target={menu?.target ?? null}
+        at={menu?.at ?? null}
+        t={props.t}
+        pinned={menu === null ? false : props.isPinned?.(menu.target.relPath) === true}
+        onClose={() => { setMenu(null) }}
+        onGrant={(path) => { props.onGrant?.(path) }}
+        onPin={(path, pinned) => { props.onPin?.(path, pinned) }}
+        onReference={(path, isDir) => { props.onReference?.(path, isDir) }}
+        onRenamed={() => { props.onRenamed?.() }}
+      />
+    </>
+  )
 }

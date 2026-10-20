@@ -35,12 +35,143 @@
   min-height: 0;
 }
 
+/* Collapsed rail: a narrow strip that keeps the logo and the menu glyphs
+   reachable. The width is the 36px logo row's own footprint plus its insets, so
+   the strip reads as the rail folded to its icons rather than as a clipped rail. */
+.bodyCollapsed {
+  grid-template-columns: 56px minmax(0, 1fr);
+}
+
 .rail {
   display: flex;
   flex-direction: column;
   min-height: 0;
   border-right: 0.5px solid var(--dsw-alias-border-l3);
   overflow: hidden;
+}
+
+/* The rail's top line: the brand at the left, the fold toggle at the right.
+   This is what now owns the page's top-left corner, because the header below
+   covers only the content column. */
+.railTop {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 6px 0 12px;
+  box-sizing: border-box;
+}
+
+.railBrand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.railBrandName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-s-strong-14);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Pushes the fold toggle to the rail's right edge without leaving the brand
+   line's own flex flow. */
+.railTopSpacer {
+  margin-left: auto;
+}
+
+/* ---- Section header (基准 A) ----
+   The metrics are the shell's own browser header, measured live on the running
+   shell on 2026-10-17 and read from
+   `ui-workspace/src/client/rows/WorkspaceBrowser.module.css`:
+   a 36px row, `gap: 4px`, `padding-left: 4px`, and a label at 14px/20px weight
+   400. The label inherits the row's ink, which that file sets to
+   `--dsw-alias-label-tertiary`; the icon buttons carry
+   `--dsw-alias-label-secondary` of their own. Measured live: label `#adb2b8`
+   is tertiary, buttons `#cfd3d6` are secondary. */
+.sectionHeader {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 0 0 4px;
+  box-sizing: border-box;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.sectionName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* `--dsw-font-s-14` is 14px/22px; the measured header line-height is 20px, so
+     the row's own step wins over the shorthand's. */
+  font: var(--dsw-font-s-14);
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The trailing glyph cluster. Its right inset is carried here rather than on
+   `.sectionHeader` so the container keeps the measured `0 0 0 4px` padding while
+   the last button still clears the rail edge by the same 8px the rows do. */
+.sectionActions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+}
+
+/* ---- The rail's icon button (基准 A) ----
+   Measured live at 28x28 with an 8px radius on a transparent ground, and read
+   from the same `WorkspaceBrowser.module.css` `.iconButton`, whose radius is
+   `--dsw-radius-sm` (8px) and whose ink is `--dsw-alias-label-secondary`. */
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.iconButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The cluster clips its own width when the search opens, so the ring is drawn
+   inside the button rather than around it. */
+.iconButton:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+
+.iconButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The scrolling half of the rail: the pinned band and the tree share one scroll
+   region under the fixed section header, so a long tree moves both together
+   while the header stays put. */
+.treeScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 8px 12px;
 }
 
 /* The rail's search field. Sits above the menu rows inside the rail's own 12px
@@ -72,6 +203,25 @@
   margin: 0 0 8px;
   padding: 0 12px;
   flex: 0 0 auto;
+}
+
+/* The folded strip keeps the same rows with their labels dropped, so a row
+   becomes an icon target. The inset shrinks to centre those icons in a 56px
+   column: a centred 36px row leaves 10px either side once the row's own 2px
+   margin is counted. */
+.menuFolded {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 0 8px;
+  flex: 0 0 auto;
+}
+
+.menuFolded .menuRow,
+.menuFolded .menuRowActive {
+  justify-content: center;
+  padding: 7px 0;
 }
 
 /* Mirrors the sidebar's `.panelRow` rule for rule. `font: inherit` is deliberate
@@ -129,19 +279,63 @@
   white-space: nowrap;
 }
 
-.treeRegion {
+/* The rail's scrolling half, below the brand line and the menu. The pinned band
+   and the tree share it, so a long tree moves both while the two section headers
+   stay put. */
+.railBody {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 4px 8px 12px;
+  padding: 0 8px 12px;
+  display: flex;
+  flex-direction: column;
 }
 
-/* The content column is a header over a scrolling body, so the header stays put
-   while a long listing or preview scrolls under it. */
-/* The content column scrolls on its own, so the page header above it stays put. */
+/* The pinned band, above the tree. Its rows carry the same 8px inset through
+   `.railBody`, so the two bands line up column for column. */
+.pinnedBand {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The tree band takes the remaining height, so its scroll region is the one that
+   grows rather than the page's. */
+.treeBand {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The tree's in-place filter field: a full-width input under the section header.
+   It narrows what is displayed and issues no request, which is what separates it
+   from the rail's own search. */
+.treeFilter {
+  flex: none;
+  padding: 0 0 8px;
+}
+
+.treeFilter > span {
+  display: flex;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* The content column owns the page header and the scrolling surface beneath it.
+   The page's grid gives this the space the rail does not take. */
+.contentColumn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The content region scrolls on its own, so the header above it stays put. */
 .content {
   min-width: 0;
   min-height: 0;
+  flex: 1 1 auto;
   overflow: auto;
   padding: 16px 24px 20px;
 }
@@ -162,11 +356,28 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
 }
 
+.headerTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* The page's primary control, drawn on the header's own line. `flex: none` keeps it
+   at its natural width while the title ellipsizes into whatever is left. */
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
 .headerTitle {
   display: flex;
   align-items: flex-end;
   min-height: 28px;
   margin: 0;
+  min-width: 0;
   font: var(--dsw-font-base-strong-16);
   color: var(--dsw-alias-label-primary);
   overflow: hidden;
@@ -265,12 +476,6 @@
 /* Supporting facts about the mount: one quiet line, not a panel of its own. */
 .factDot {
   opacity: 0.6;
-}
-
-/* Paths and identifiers read as code, in the product's own code face. */
-.mono {
-  font: var(--dsw-font-xxs-12) var(--ds-font-family-code);
-  overflow-wrap: anywhere;
 }
 
 .hits {
@@ -487,4 +692,76 @@
 .table th {
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xxs-strong-12);
+}
+
+/* The reading column and its container.
+   These two used to live in `KnowledgeOutline.module.css` beside the hand-written
+   outline. The outline is gone -- the product's own `MdToc` draws it now -- but the
+   layout it was seated in is still the shape of this surface, so it moved here with
+   the surface rather than disappearing with the component.
+
+   `min-width: 0` on the reading column is what lets a long unbroken line wrap
+   instead of pushing the column past the panel's right edge. */
+.previewLayout {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.previewColumn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+  max-width: 900px;
+  flex: 1 1 auto;
+}
+
+/* The state a document leaves behind in the knowledge page.
+
+   The document itself is drawn by the host's file window, so this column no longer
+   has a reading view to fill. It states where the document went instead of leaving
+   the column blank, which would read as a click that failed. */
+.openedElsewhere {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 240px;
+  text-align: center;
+}
+
+/* The document is drawn in the host's file window on the right. Only the rail is
+   left: the content column is not rendered at all in this state (see the panel), so
+   the grid must have exactly one track. A zero-width second track would still be a
+   column, and anything that overflows it -- a notice, a long path -- shows up as the
+   sliver of letters beside the rail. */
+.bodyDocument {
+  grid-template-columns: 280px;
+}
+
+/* Folded rail and an open document: the strip stays, and it is the only track. */
+.bodyCollapsed.bodyDocument {
+  grid-template-columns: 56px;
+}
+
+/* Settings is a stack of independent blocks, and without a boundary between them the
+   three headings read as one run-on list: "发布前审核 / 待审核 / 操作留痕" sitting a
+   few pixels apart looks like an accident rather than three separate surfaces.
+   A hairline between blocks plus room above each one makes the grouping explicit. */
+.surface + .surface {
+  margin-top: 20px;
+  padding-top: 24px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+/* A block's heading should not carry the margin its generic form does when it opens a
+   block, or the hairline and the gap below it pull in opposite directions. */
+.surface + .surface > .subhead {
+  margin-top: 0;
 }

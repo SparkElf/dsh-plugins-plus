@@ -9,6 +9,7 @@ import {
   type DeployStepView,
   type GrantView,
   type KnowledgeConfigView,
+  type KnowledgeConfigWriteResult,
   type KnowledgeStatusView,
 } from '../api.ts'
 import type { en } from './locales.ts'
@@ -43,6 +44,59 @@ async function postJson<T>(method: string, body: Record<string, unknown> = {}): 
 }
 
 /**
+ * The storage settings as the reader is editing them.
+ *
+ * Strings throughout, including the port, because these are bound to inputs: a number input
+ * still yields text, and holding a half-typed port as a number would fight the caret.
+ */
+interface StorageDraft {
+  mode: 'local' | 'remote'
+  protocol: 'nfs' | 'sshfs'
+  nfsServer: string
+  sshHost: string
+  sshUser: string
+  sshPort: string
+  sshRemotePath: string
+  sshMountOptions: string
+  sshKeyRef: string
+}
+
+const EMPTY_DRAFT: StorageDraft = {
+  mode: 'local',
+  protocol: 'nfs',
+  nfsServer: '',
+  sshHost: '',
+  sshUser: '',
+  sshPort: '22',
+  sshRemotePath: '',
+  sshMountOptions: '',
+  sshKeyRef: '',
+}
+
+/** What a save attempt ended as. */
+type SaveState =
+  | { kind: 'idle' }
+  | { kind: 'saving' }
+  | { kind: 'saved'; restartRequired: boolean; saved: string[] }
+  | { kind: 'failed'; message: string }
+
+/** Seed the draft from what the deployment reports. */
+function draftOf(config: KnowledgeConfigView, status: KnowledgeStatusView): StorageDraft {
+  const ssh = config.ssh
+  return {
+    mode: status.storageMode === 'remote' ? 'remote' : 'local',
+    protocol: status.storageProtocol ?? config.storageProtocol ?? 'nfs',
+    nfsServer: config.nfsServer ?? '',
+    sshHost: ssh?.host ?? '',
+    sshUser: ssh?.user ?? '',
+    sshPort: String(ssh?.port ?? 22),
+    sshRemotePath: ssh?.remotePath ?? '',
+    sshMountOptions: ssh?.mountOptions ?? '',
+    sshKeyRef: ssh?.keyRef ?? '',
+  }
+}
+
+/**
  * Render the knowledge-base connection, resolved paths, status, the read-only
  * authorization summary, and the deployment wizard.
  *
@@ -63,6 +117,13 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | undefined>(undefined)
+  // What the reader is editing, seeded from the server and saved by an explicit action.
+  // Deliberately NOT applied on change: the deployment's storage shape is decided when the
+  // workspace container is created, so a radio button that silently rewrote it would be
+  // claiming an effect it cannot have. The reader edits, presses save, and is told what the
+  // save means for the running deployment.
+  const [draft, setDraft] = useState<StorageDraft>(EMPTY_DRAFT)
+  const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' })
 
   const load = useCallback(async () => {
     setState({ kind: 'loading' })
@@ -71,6 +132,8 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
       const status = await postJson<KnowledgeStatusView>(KB_API.status)
       const grantsReply = await postJson<{ grants: GrantView[] }>(KB_API.grants)
       setState({ kind: 'ready', config, status, grants: grantsReply.grants })
+      setDraft(draftOf(config, status))
+      setSaveState({ kind: 'idle' })
     } catch {
       setState({ kind: 'unavailable' })
     }
@@ -91,6 +154,37 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
     }
   }, [t])
 
+  /**
+   * Persist the edited storage settings.
+   *
+   * A port that is not a number is refused here rather than sent: the server would reject it
+   * anyway, and the reader deserves the answer next to the field they typed in.
+   */
+  const saveStorage = useCallback(async () => {
+    setSaveState({ kind: 'saving' })
+    const port = Number(draft.sshPort)
+    if (draft.protocol === 'sshfs' && (!Number.isInteger(port) || port <= 0 || port > 65_535)) {
+      setSaveState({ kind: 'failed', message: t('saveBadPort') })
+      return
+    }
+    try {
+      const result = await postJson<KnowledgeConfigWriteResult>(KB_API.configSet, {
+        storageMode: draft.mode,
+        storageProtocol: draft.protocol,
+        nfsServer: draft.nfsServer,
+        sshHost: draft.sshHost,
+        sshUser: draft.sshUser,
+        sshPort: draft.protocol === 'sshfs' ? port : 22,
+        sshRemotePath: draft.sshRemotePath,
+        sshMountOptions: draft.sshMountOptions,
+        sshKeyRef: draft.sshKeyRef,
+      })
+      setSaveState({ kind: 'saved', restartRequired: result.restartRequired, saved: result.saved })
+    } catch (error) {
+      setSaveState({ kind: 'failed', message: error instanceof Error ? error.message : String(error) })
+    }
+  }, [draft, t])
+
   if (state.kind === 'loading') {
     return (
       <section className={styles.section}>
@@ -109,14 +203,11 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
           <span className={styles.statusLabel} role="alert">{t('unavailable')}</span>
         </div>
         <p className={styles.detail}>{t('unavailableDetail')}</p>
-        <div className={styles.actions}>
-          <Button variant="ghost" onClick={() => { void load() }}>{t('retry')}</Button>
-        </div>
       </section>
     )
   }
 
-  const { config, status, grants } = state
+  const { config, status } = state
 
   return (
     <section className={styles.section}>
@@ -125,7 +216,186 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
       <div className={styles.body}>
         <p className={styles.description}>{t('description')}</p>
 
-        <h3 className={styles.groupTitle}>{t('connection')}</h3>
+          {/* Storage: what decides the rest of this section. The reader edits and presses
+              save; nothing here is applied on change, because the shape is fixed when the
+              workspace container is created. */}
+          <h3 className={styles.groupTitle}>{t('storageMode')}</h3>
+          <div className={styles.modeRow} role="radiogroup" aria-label={t('storageMode')}>
+            <label className={styles.modeOption}>
+              <input
+                type="radio"
+                name="kb-storage-mode"
+                value="local"
+                checked={draft.mode === 'local'}
+                onChange={() => { setDraft(d => ({ ...d, mode: 'local' })); setSaveState({ kind: 'idle' }) }}
+              />
+              <span>{t('storageModeLocal')}</span>
+            </label>
+            <label className={styles.modeOption}>
+              <input
+                type="radio"
+                name="kb-storage-mode"
+                value="remote"
+                checked={draft.mode === 'remote'}
+                onChange={() => { setDraft(d => ({ ...d, mode: 'remote' })); setSaveState({ kind: 'idle' }) }}
+              />
+              <span>{t('storageModeRemote')}</span>
+            </label>
+          </div>
+          <p className={styles.detail}>
+            {draft.mode === 'local' ? t('storageModeLocalHint') : t('storageModeRemoteHint')}
+          </p>
+
+          {draft.mode === 'remote' && (<>
+            {/* The transport decides which fields matter, so it is asked for before them. */}
+            <h3 className={styles.groupTitle}>{t('storageProtocol')}</h3>
+            <div className={styles.modeRow} role="radiogroup" aria-label={t('storageProtocol')}>
+              <label className={styles.modeOption}>
+                <input
+                  type="radio"
+                  name="kb-storage-protocol"
+                  value="nfs"
+                  checked={draft.protocol === 'nfs'}
+                  onChange={() => { setDraft(d => ({ ...d, protocol: 'nfs' })); setSaveState({ kind: 'idle' }) }}
+                />
+                <span>{t('protocolNfs')}</span>
+              </label>
+              <label className={styles.modeOption}>
+                <input
+                  type="radio"
+                  name="kb-storage-protocol"
+                  value="sshfs"
+                  checked={draft.protocol === 'sshfs'}
+                  onChange={() => { setDraft(d => ({ ...d, protocol: 'sshfs' })); setSaveState({ kind: 'idle' }) }}
+                />
+                <span>{t('protocolSshfs')}</span>
+              </label>
+            </div>
+            <p className={styles.detail}>
+              {draft.protocol === 'nfs' ? t('protocolNfsHint') : t('protocolSshfsHint')}
+            </p>
+
+            {draft.protocol === 'nfs' ? (
+              <dl className={styles.pairs}>
+                <div className={styles.pair}>
+                  <dt>{t('nfsServer')}</dt>
+                  <dd>
+                    <input
+                      className={styles.input}
+                      type="text"
+                      value={draft.nfsServer}
+                      placeholder={t('nfsServerPlaceholder')}
+                      onChange={event => { setDraft(d => ({ ...d, nfsServer: event.target.value })); setSaveState({ kind: 'idle' }) }}
+                    />
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <dl className={styles.pairs}>
+                <div className={styles.pair}>
+                  <dt>{t('sshHost')}</dt>
+                  <dd>
+                    <input
+                      className={styles.input}
+                      type="text"
+                      value={draft.sshHost}
+                      placeholder={t('sshHostPlaceholder')}
+                      onChange={event => { setDraft(d => ({ ...d, sshHost: event.target.value })); setSaveState({ kind: 'idle' }) }}
+                    />
+                  </dd>
+                </div>
+                <div className={styles.pair}>
+                  <dt>{t('sshUser')}</dt>
+                  <dd>
+                    <input
+                      className={styles.input}
+                      type="text"
+                      value={draft.sshUser}
+                      placeholder={t('sshUserPlaceholder')}
+                      onChange={event => { setDraft(d => ({ ...d, sshUser: event.target.value })); setSaveState({ kind: 'idle' }) }}
+                    />
+                  </dd>
+                </div>
+                <div className={styles.pair}>
+                  <dt>{t('sshPort')}</dt>
+                  <dd>
+                    <input
+                      className={styles.input}
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={draft.sshPort}
+                      onChange={event => { setDraft(d => ({ ...d, sshPort: event.target.value })); setSaveState({ kind: 'idle' }) }}
+                    />
+                  </dd>
+                </div>
+                <div className={styles.pair}>
+                  <dt>{t('sshRemotePath')}</dt>
+                  <dd>
+                    <input
+                      className={styles.input}
+                      type="text"
+                      value={draft.sshRemotePath}
+                      placeholder={t('sshRemotePathPlaceholder')}
+                      onChange={event => { setDraft(d => ({ ...d, sshRemotePath: event.target.value })); setSaveState({ kind: 'idle' }) }}
+                    />
+                  </dd>
+                </div>
+                <div className={styles.pair}>
+                  <dt>{t('sshMountOptions')}</dt>
+                  <dd>
+                    <input
+                      className={styles.input}
+                      type="text"
+                      value={draft.sshMountOptions}
+                      placeholder={t('sshMountOptionsPlaceholder')}
+                      onChange={event => { setDraft(d => ({ ...d, sshMountOptions: event.target.value })); setSaveState({ kind: 'idle' }) }}
+                    />
+                  </dd>
+                </div>
+                <div className={styles.pair}>
+                  <dt>{t('sshKey')}</dt>
+                  <dd>
+                    {/* The key itself never reaches this page: the panel shows the
+                        credential's name and whether it resolves. */}
+                    <code>{draft.sshKeyRef === '' ? t('sshKeyUnset') : draft.sshKeyRef}</code>
+                    {' '}
+                    <span className={config.ssh?.keyConfigured === true ? styles.badgeOk : styles.badgeWarn}>
+                      {config.ssh?.keyConfigured === true ? t('sshKeyConfigured') : t('sshKeyMissing')}
+                    </span>
+                  </dd>
+                </div>
+              </dl>
+            )}
+
+          </>)}
+
+          {/* Outside the remote branch on purpose: switching BACK to local is equally a
+              change, and a save control that vanishes with the choice it would record
+              leaves the reader unable to return. */}
+          <div className={styles.saveRow}>
+            <Button
+              variant="primary"
+              disabled={saveState.kind === 'saving'}
+              onClick={() => { void saveStorage() }}
+            >
+              {saveState.kind === 'saving' ? t('saving') : t('save')}
+            </Button>
+            {saveState.kind === 'saved' && (
+              <p className={styles.notice} role="status">
+                {t('savedOk')}
+                {saveState.restartRequired ? ' ' + t('savedRestart') : ''}
+              </p>
+            )}
+            {saveState.kind === 'failed' && (
+              <p className={styles.error} role="alert">{saveState.message}</p>
+            )}
+          </div>
+
+          {/* Where the tree is mounted, and the resolved paths it points at: facts about
+              the running deployment rather than settings, so they read as values. */}
+          <h3 className={styles.groupTitle}>{t('connection')}</h3>
+
         <dl className={styles.pairs}>
           <div className={styles.pair}>
             <dt>{t('host')}</dt>
@@ -152,51 +422,13 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
 
         <DeploymentWizard t={t} />
 
-        <h3 className={styles.groupTitle}>{t('status')}</h3>
-        <div className={styles.statusRow}>
-          <StateDot state={status.indexing.running ? 'ongoing' : 'done'} />
-          <span className={styles.statusLabel}>
-            {status.indexing.running ? t('indexing') : t('idle')}
-          </span>
-        </div>
-        <dl className={styles.pairs}>
-          <div className={styles.pair}>
-            <dt>{t('visibleFiles')}</dt>
-            <dd>{status.visibleFiles === null ? t('unknown') : String(status.visibleFiles)}</dd>
-          </div>
-          <div className={styles.pair}>
-            <dt>{t('lastSync')}</dt>
-            <dd>{status.lastSyncAt ?? t('neverSynced')}</dd>
-          </div>
-        </dl>
-
-        <h3 className={styles.groupTitle}>{t('grants')}</h3>
-        <p className={styles.detail}>
-          {t('grantsManaged')}{' '}<span className={styles.readOnly}>{t('readOnly')}</span>
-        </p>
-        {grants.length === 0
-          ? <p className={styles.detail}>{t('grantsEmpty')}</p>
-          : (
-            <ul className={styles.grants}>
-              {grants.map(grant => (
-                <li key={grant.id}>
-                  <code>{grant.relPath}</code>
-                  <span className={styles.grantMeta}>{grant.kind} · {grant.grantedBy}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+          {/* Runtime state (idle/indexing, visible count, last sync, the read-only grant
+              list) deliberately stays off this page: a settings surface answers "what can
+              I change", while those answer "what is happening right now". They live on the
+              Home and Permissions pages, which is where a reader goes to look at them. */}
 
         {notice !== undefined && <p className={styles.notice} role="status">{notice}</p>}
 
-        <div className={styles.actions}>
-          <Button variant="primary" disabled={busy} onClick={() => { void buildIndex() }}>
-            {t('buildIndex')}
-          </Button>
-          <Button variant="ghost" disabled={busy} onClick={() => { void load() }}>
-            {t('refresh')}
-          </Button>
-        </div>
       </div>
     </section>
   )
@@ -268,6 +500,12 @@ function DeploymentWizard({ t }: { t: KnowledgeSettingsInjected['t'] }) {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel} htmlFor="kb-deploy-host">{t('deployHost')}</label>
+        {/* A native select, because the primitive library exports no Select at all
+            (checked `ui-primitives/src/index.ts`: no Select, Dropdown or Combobox).
+            What it does export -- SegmentedControl, SegmentedTabs -- renders every
+            option side by side, which suits three fixed tabs and not a list of
+            hosts that grows with the deployment. The label is bound by `htmlFor`,
+            so the keyboard and screen-reader behaviour is the platform's own. */}
         <select
           id="kb-deploy-host"
           className={styles.select}

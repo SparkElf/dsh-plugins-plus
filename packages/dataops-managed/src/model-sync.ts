@@ -1,6 +1,7 @@
 /** Adopt, publish, and stop following the model configuration another workspace offers. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { noteAccepted, noteExpired } from './auth-state.ts'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type { PublishedSection } from './settings-sync.ts'
@@ -127,7 +128,11 @@ export class ModelSync {
       method: 'POST',
       headers: { authorization: `Bearer ${token}` },
     })
-    if (response.status === 401) return undefined
+    if (response.status === 401) {
+      noteExpired()
+      return undefined
+    }
+    noteAccepted()
     if (!response.ok) throw new Error(`Shared model read failed with HTTP ${String(response.status)}`)
     const body = asRecord(await response.json())
     if (body === null) return undefined
@@ -201,7 +206,11 @@ export class ModelSync {
     const response = await fetch(new URL('/api/ai/shared-models/publication', this.apiBase()), {
       headers: { authorization: `Bearer ${token}` },
     })
-    if (response.status === 401) return null
+    if (response.status === 401) {
+      noteExpired()
+      return null
+    }
+    noteAccepted()
     if (!response.ok) throw new Error(`Shared model status read failed with HTTP ${String(response.status)}`)
     const body = asRecord(await response.json())
     return {

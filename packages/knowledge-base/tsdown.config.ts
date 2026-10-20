@@ -1,5 +1,6 @@
 /** Build the Host ESM entry and the browser module-loader bundle. */
 
+import { readdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { builtinModules } from 'node:module'
 import { basename, dirname, join, resolve as resolvePath } from 'node:path'
@@ -8,6 +9,11 @@ import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
 const PLUGIN_ID = '@sparkelf/dsh-knowledge-base'
+// This package sits two levels under the workspace root. `process.cwd()` is the package
+// directory when the build runs, and unlike `import.meta.url` it needs no module-system
+// support from the config loader.
+const WORKSPACE_ROOT = resolvePath(process.cwd(), '..', '..')
+
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 
@@ -48,6 +54,55 @@ function purityGate(): BuildPlugin {
         throw new Error('client bundle cannot import non-platform package ' + source)
       }
       return null
+    },
+  }
+}
+
+/**
+ * Point `react-icons`' two barrels at their ESM files.
+ *
+ * The borrowed file tree imports `react-icons/si` and `react-icons/vsc`. Each subpath
+ * publishes BOTH a CommonJS barrel and an ESM one, and the package's `exports` map picks by
+ * condition. A CJS barrel is one aggregate object, so a bundler must keep every icon in it;
+ * the ESM barrel declares one icon per `export function` and tree-shakes.
+ *
+ * Without this, the browser bundle measured 6,988,032 bytes -- the whole `react-icons/si`
+ * table (5.31 MB) plus `react-icons/vsc` (0.81 MB) -- against 560,755 bytes with the two
+ * barrels pinned. The tree renders seven icons, so 6.4 MB was being shipped for glyphs
+ * nobody sees.
+ *
+ * The specifiers are resolved to absolute paths BEFORE any condition is consulted, which is
+ * what `conditionNames`/`mainFields` could not do: the dependency is reached through another
+ * package's pre-built output, so this package's resolve conditions never applied to it.
+ *
+ * Paths are computed from the workspace root rather than hardcoded, because pnpm's store
+ * directory carries a content hash and a peer suffix. The directory is found by prefix scan,
+ * and a miss is reported as a build error naming the real cause instead of surfacing later
+ * as an unresolved import.
+ */
+function reactIconsEsm(): BuildPlugin {
+  /** The `react-icons` package root inside pnpm's store, or undefined when absent. */
+  const findIconsRoot = (): string | undefined => {
+    const store = resolvePath(WORKSPACE_ROOT, 'node_modules', '.pnpm')
+    // Read synchronously at config-evaluation time: this runs once, before the build, and a
+    // promise here would make `resolveId` (which must be synchronous) unable to use it.
+    const names = readdirSync(store) as string[]
+    const match = names.find(name => name.startsWith('react-icons@'))
+    return match === undefined ? undefined : resolvePath(store, match, 'node_modules', 'react-icons')
+  }
+
+  const iconsRoot = findIconsRoot()
+  if (iconsRoot === undefined) {
+    throw new Error('react-icons is missing from the pnpm store; the borrowed file tree cannot build without it')
+  }
+
+  return {
+    name: 'dsh-kb-react-icons-esm',
+    resolveId(source: string) {
+      const file = source === 'react-icons/si' ? join('si', 'index.mjs')
+        : source === 'react-icons/vsc' ? join('vsc', 'index.mjs')
+          : undefined
+      return file === undefined ? null : resolvePath(iconsRoot, file)
     },
   }
 }
@@ -130,7 +185,7 @@ const client: UserConfig = {
     },
   },
   noExternal: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
-  plugins: [purityGate(), cssModules()],
+  plugins: [purityGate(), reactIconsEsm(), cssModules()],
   outputOptions: {
     entryFileNames: 'client.js',
     banner: 'window.__ModuleLoader__.load({ id: ' + JSON.stringify(PLUGIN_ID) + ', factory: (require) => {',

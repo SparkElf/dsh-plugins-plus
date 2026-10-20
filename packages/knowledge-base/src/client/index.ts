@@ -24,15 +24,27 @@ import type { KnowledgeSettingsInjected } from './KnowledgeSettingsSection.tsx'
 import { KnowledgePanel } from './KnowledgePanel.tsx'
 import type { KnowledgePanelInjected, SessionSource } from './KnowledgePanel.tsx'
 import { KnowledgeMenuIcon } from './KnowledgeMenuIcon.tsx'
+import { registerSaveAudit, setActorResolver, setMountPointResolver } from './saveAudit.ts'
 import { en, zh, type KnowledgeKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     'settings.knowledgeBase': KnowledgeKey
+
   }
 }
 
 const NS = 'settings.knowledgeBase'
+
+/**
+ * The knowledge root, reported by the panel once it knows it.
+ *
+ * The save-audit registration lives here, before any page mounts, because it
+ * must exist even when the knowledge page is closed -- an edit in the sidebar
+ * is still a knowledge-base edit. The panel is what reads the mount point, so
+ * it publishes the value here rather than the registration fetching it twice.
+ */
+let mountPoint = ''
 
 /**
  * Panel id shared by the list entry and the `main` slot it selects.
@@ -99,5 +111,17 @@ export function apply(ctx: ClientContext): void {
       // workspace root and the draft service at click time.
       ctx,
     }),
+
   }, KnowledgePanel))
+
+    // Join the sidebar editor's save events.
+    //
+    // Documents are edited in the host's own file window, so their saves never
+    // pass through a knowledge-base route. Registering here -- once per plugin
+    // load, not per page -- is what keeps the audit trail complete without the
+    // editor knowing this plugin exists. The panel publishes both resolvers as it
+    // loads: the mount point because the page already reads it, the actor because
+    // the page's status call is what resolves the DataOps identity.
+    setMountPointResolver(() => mountPoint)
+    ctx.effect(() => registerSaveAudit(ctx), 'knowledge-base: editor save audit')
 }

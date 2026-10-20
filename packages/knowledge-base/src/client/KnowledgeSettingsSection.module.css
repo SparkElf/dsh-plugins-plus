@@ -206,3 +206,97 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* The storage-mode choice. Two options only, so they sit on one line rather than
+   stacking: the reader is comparing them, and a column would suggest a sequence. */
+.modeRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 6px;
+}
+
+.modeOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+}
+
+.modeOption:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.modeOption input {
+  margin: 0;
+  accent-color: var(--dsw-alias-state-business-primary);
+}
+
+.modeOption:has(input:checked) {
+  border-color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* A editable value inside the connection list. Sized to the row it sits in rather than
+   the column, because these are short transport facts: a host, a port, a path. */
+.input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+/* The save affordance and its answer on one line: the button is the action, the text
+   beside it is what happened, so neither has to be hunted for after a press. */
+.saveRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 4px;
+}
+
+.saveRow .notice {
+  margin: 0;
+}
+
+/* A credential's state, shown beside its name. Text carries the meaning; colour alone
+   would leave it unreadable to anyone who cannot separate these two hues. */
+.badgeOk,
+.badgeWarn {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font: var(--dsw-font-xxxs-11);
+  white-space: nowrap;
+}
+
+.badgeOk {
+  color: var(--dsw-alias-state-success-primary);
+  background: var(--dsw-alias-state-success-bg);
+}
+
+.badgeWarn {
+  color: var(--dsw-alias-state-warning-primary);
+  background: var(--dsw-alias-state-warning-bg);
+}
+
+/* A failed save, distinct from the neutral notice above. */
+.error {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xxs-12);
+}

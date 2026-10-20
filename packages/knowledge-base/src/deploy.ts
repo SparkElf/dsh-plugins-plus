@@ -63,6 +63,28 @@ export interface DeployPlanContext {
   mountPoint: string
   /** Memory ceiling in MiB for the MinerU service; clamped to half the host's RAM. */
   memoryMaxMiB?: number
+  /**
+   * How a remote deployment reaches its share.
+   *
+   * Decides which transport steps {@link deploymentPlan} emits. Absent means `nfs`, the
+   * shape this plan had before the protocol existed.
+   */
+  protocol?: 'nfs' | 'sshfs'
+  /** SSHFS: remote host. */
+  sshHost?: string
+  /** SSHFS: login user on the remote host. */
+  sshUser?: string
+  /** SSHFS: TCP port the SSH daemon listens on. */
+  sshPort?: number
+  /**
+   * SSHFS: path of the private key on the HOST, when the credential store resolves to a
+   * file. Optional: an ssh-agent-managed key needs no `-i`.
+   */
+  sshKeyPath?: string
+  /** SSHFS: absolute path of the shared directory on the remote host. */
+  sshRemotePath?: string
+  /** SSHFS: extra `-o` options, appended to the ones the step requires. */
+  sshMountOptions?: string
 }
 
 /**
@@ -434,17 +456,109 @@ export function nfsMountStep(context: DeployPlanContext): DeployStep {
   }
 }
 
+/**
+ * Mount a remote directory over SSHFS on the HOST.
+ *
+ * The same shape as {@link nfsMountStep}, for a host that cannot mount NFS: the container
+ * has no `CAP_SYS_ADMIN` and cannot mount anything itself, so this runs on the Host and the
+ * resulting directory is bound in at `mountPoint` like any other.
+ *
+ * Two details are not incidental:
+ * - `StrictHostKeyChecking=accept-new` is limited to this invocation. Accepting an unknown
+ *   host key globally would silence the one warning that catches a swapped host, so the
+ *   trust-on-first-use decision is scoped to the connection whose key the operator is
+ *   establishing.
+ * - The reconnect options are not optional here. An SSHFS mount whose connection drops
+ *   returns EIO to every reader until someone unmounts it; `reconnect` plus a keepalive is
+ *   what makes a transient network blip a stall instead of a broken knowledge base.
+ * @param context - transport and target paths from the deployment config.
+ * @returns the mount step.
+ */
+export function sshfsMountStep(context: DeployPlanContext): DeployStep {
+  const remote = `${context.sshUser ?? ''}@${context.sshHost ?? ''}:${context.sshRemotePath ?? ''}`
+  const baseOptions = [
+    'reconnect',
+    'ServerAliveInterval=15',
+    'ServerAliveCountMax=3',
+    'StrictHostKeyChecking=accept-new',
+    'BatchMode=yes',
+  ]
+  const extra = (context.sshMountOptions ?? '').trim()
+  const optionString = extra === '' ? baseOptions.join(',') : baseOptions.join(',') + ',' + extra
+  const identity = context.sshKeyPath === undefined || context.sshKeyPath === ''
+    ? []
+    : [`IDENTITY=${shquote(context.sshKeyPath)}`, 'test -r "$IDENTITY" || { echo "private key not readable at $IDENTITY"; exit 1; }']
+  const port = context.sshPort ?? 22
+  return {
+    id: 'sshfs-mount',
+    label: 'sshfsMount',
+    timeoutMs: 120_000,
+    commands: [
+      'set -e',
+      // Refuse to build a command from an incomplete set: `@:` would mount nothing and
+      // the failure would surface much later as an empty tree.
+      `[ -n ${shquote(context.sshHost ?? '')} ] || { echo "sshHost is not configured"; exit 1; }`,
+      `[ -n ${shquote(context.sshUser ?? '')} ] || { echo "sshUser is not configured"; exit 1; }`,
+      `[ -n ${shquote(context.sshRemotePath ?? '')} ] || { echo "sshRemotePath is not configured"; exit 1; }`,
+      `M=${shquote(context.mountPoint)}`,
+      `REMOTE=${shquote(remote)}`,
+      `OPTIONS=${shquote(optionString)}`,
+      'mkdir -p "$M"',
+      'if mountpoint -q "$M"; then',
+      '  echo "already mounted at $M"',
+      'else',
+      ...identity,
+      `  sshfs -p ${String(port)} ${context.sshKeyPath === undefined || context.sshKeyPath === '' ? '' : '-i "$IDENTITY" '}-o "$OPTIONS" "$REMOTE" "$M"`,
+      '  echo "mounted $REMOTE at $M over SSHFS"',
+      'fi',
+      // A mount that returns but serves nothing is worse than one that fails loudly.
+      'if ! ls "$M" >/dev/null 2>&1; then echo "mount point is not readable; check the remote path and the key"; exit 1; fi',
+      'echo "sshfs mount verified: $(ls -A "$M" | wc -l) entries visible"',
+    ],
+  }
+}
+
+/**
+ * Verify the SSHFS mount is present, readable, and actually a FUSE mount.
+ *
+ * Separate from the mount step because "the command exited 0" and "the reader will see
+ * files" are different claims: a stale empty directory satisfies the first and not the
+ * second, and the filesystem type is what tells them apart.
+ * @param context - transport and target paths from the deployment config.
+ * @returns the verification step.
+ */
+export function sshfsVerifyStep(context: DeployPlanContext): DeployStep {
+  return {
+    id: 'sshfs-verify',
+    label: 'sshfsVerify',
+    timeoutMs: 60_000,
+    commands: [
+      'set -e',
+      `M=${shquote(context.mountPoint)}`,
+      'mountpoint -q "$M" || { echo "nothing is mounted at $M"; exit 1; }',
+      'mount | grep -F " $M " | grep -q sshfs || { echo "the mount at $M is not SSHFS"; mount | grep -F " $M " || true; exit 1; }',
+      'echo "sshfs mount present at $M"',
+      'ls -A "$M" | wc -l | xargs -I{} echo "{} entries visible"',
+      'DIR=$(find "$M" -maxdepth 1 -type d ! -path "$M" | head -n 1)',
+      'if [ -n "$DIR" ]; then ls -A "$DIR" >/dev/null 2>&1 || { echo "subdirectory $DIR is not readable"; exit 1; }; echo "reads verified under $DIR"; else echo "no subdirectory to read; top level verified"; fi',
+    ],
+  }
+}
+
 /** The full ordered plan the Settings panel presents. */
 export function deploymentPlan(context: DeployPlanContext): DeployStep[] {
-  return [
+  const mineru = [
     probeStep(),
     mineruInstallStep(context),
     mineruServiceStep(context),
     mineruVerifyStep(context),
-    nfsDeployStep(context),
-    nfsVerifyStep(context),
-    nfsMountStep(context),
   ]
+  // The transport half of the plan is the only part the protocol decides; MinerU is
+  // reached over the network either way and prepares identically.
+  if ((context.protocol ?? 'nfs') === 'sshfs') {
+    return [...mineru, sshfsMountStep(context), sshfsVerifyStep(context)]
+  }
+  return [...mineru, nfsDeployStep(context), nfsVerifyStep(context), nfsMountStep(context)]
 }
 
 /** Look up one step by id. */

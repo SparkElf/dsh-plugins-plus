@@ -1,6 +1,7 @@
 /** Skills users share with each other, reached through the DataOps API. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { noteAccepted, noteExpired } from './auth-state.ts'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-skill'
@@ -112,7 +113,11 @@ export class SkillPlaza {
         ...init.headers,
       },
     })
-    if (response.status === 401) return undefined
+    if (response.status === 401) {
+      noteExpired()
+      return undefined
+    }
+    noteAccepted()
     if (!response.ok) throw new Error(`Skill plaza request failed with HTTP ${String(response.status)}`)
     return response.status === 204 ? null : await response.json()
   }

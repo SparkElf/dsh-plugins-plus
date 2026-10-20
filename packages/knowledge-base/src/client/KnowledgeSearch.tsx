@@ -22,7 +22,7 @@ import {
   IconWarningOutlineRegular,
   StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { KB_API, kbApiPath } from '../api.ts'
+import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgePanel.module.css'
 
 /** One result row, as the Host returns it. */
@@ -120,7 +120,7 @@ export function useKnowledgeSearch(mountPoint: string): KnowledgeSearchState {
         cache: 'no-store',
       })
       if (!response.ok) throw new Error(String(response.status))
-      const body = (await response.json()) as { hits?: SearchHit[] }
+      const body = await readKnowledgeJson<{ hits?: SearchHit[] }>(response)
       if (mine !== seq.current) return
       setHits(body.hits ?? [])
       setActive(0)
@@ -203,6 +203,9 @@ export function KnowledgeSearch(props: KnowledgeSearchProps) {
         </div>
       )}
 
+      {/* The results are a listbox of rows, not a stack of Buttons: the row is one
+          line of text with a selected fill, and arrow keys move the selection,
+          which is a different interaction from a button that activates on Enter. */}
       {hits.length > 0 && (
         <ul className={styles.hits}>
           {hits.map((hit, index) => (

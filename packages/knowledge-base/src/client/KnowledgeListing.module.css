@@ -129,6 +129,184 @@
   display: inline-flex;
 }
 
+/* The pin toggle at the row's trailing edge.
+   Hidden until the row is hovered or focused, like the reference button, EXCEPT
+   while the path is pinned: a pinned row keeps its glyph drawn so the state is
+   readable at a glance rather than only under the pointer. */
+.entryPin {
+  flex: none;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.entryPin:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.entry:hover .entryPin,
+.entry:focus-within .entryPin,
+.entryPin[data-pinned='true'] {
+  display: inline-flex;
+}
+
+.entryPin[data-pinned='true'] {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* ---- The grid layout ----
+
+   A separate class family, deliberately NOT a restyling of `.entry`. The row
+   metrics above are a measured copy of the explorer's `.explorerRow` (28px, 12px
+   ink, 8px inset, 4px radius) and a card has none of them; sharing the class
+   would either break that copy or force every card to inherit a height it cannot
+   use. Measured against the product's own tile rhythm: a 120px minimum so three
+   cards fit the panel's narrowest content width, a 12px gap, and the card's own
+   layer fill. */
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.cardItem {
+  min-width: 0;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 96px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  text-align: left;
+}
+
+.card:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.card:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+
+/* A directory card is titled like the tree's directory row: one weight step up. */
+.cardDir {
+  font: var(--dsw-font-xxs-strong-12);
+}
+
+.cardGlyph {
+  display: inline-flex;
+  align-items: center;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* Two lines at most: a card is a fixed tile, and an unbounded name would make one
+   document's card taller than its neighbours'. */
+.cardName {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+/* Where the document lives. Tertiary, because in the grid this is orientation
+   rather than content -- the same role `.entryTime` plays in a row. */
+.cardMeta {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+/* The card's timestamp, pushed to the tile's bottom edge. */
+.cardTime {
+  margin-top: auto;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Drag and drop ----
+
+   Copied from the explorer's `.explorerRowDropTarget` (sidebar.module.css:1066):
+   the same accent hover fill and the same 1px dashed business outline, drawn
+   inside the row so the tree does not shift by a pixel while a drag passes over
+   it. The explorer's own values, not a second design. */
+.entry[data-drop-target='true'],
+.card[data-drop-target='true'] {
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+  outline: 1px dashed var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+}
+
+/* The batch-selection checkbox. It appears only while a selection is live, so the
+   ordinary row keeps the explorer's metrics and gains no column; a fixed 14px box
+   that does not change the row's 28px height. */
+.entryCheck {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+}
+
+/* The pin drop zone, shown only while a row is being dragged.
+   It borrows the explorer's own drop-target treatment -- the accent hover fill and
+   the 1px dashed business outline -- because it makes the same promise a folder row
+   under the pointer makes: let go and the thing you are carrying lands here. The
+   resting rail never shows it, because the band it belongs to is hidden when
+   nothing is pinned. */
+.pinDropZone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 28px;
+  margin-bottom: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+  outline: 1px dashed var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-strong-12);
+}
+
+/* The empty state's action, offered only when there is genuinely no document to
+   show. It sits below the line with the product's own spacing. */
+.emptyAction {
+  margin-top: 16px;
+}
+
 /* Mount fade for tree rows (the app's session-row reveal). */
 @keyframes kb-row-in {
   from { opacity: 0; }

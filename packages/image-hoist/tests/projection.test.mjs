@@ -170,5 +170,27 @@ console.log('\n10) the already-hoisted set is membership, not a sequence waterma
   check('a moved sequence is not pending', moved.has(45), true);
 }
 
+console.log('\n11) several hoisted images accumulate on one carrier');
+{
+  // Every image-bearing tool result between two user turns belongs to the earlier turn, so one
+  // carrier legitimately receives several images. The fold hands the projection the messages from
+  // *before* the event, so re-reading the carrier there would overwrite each earlier image with
+  // the next one and silently drop all but the last.
+  const log = [
+    event(0, 'user/message', { content: [{ type: 'text', text: 'go' }], role: 'user' }, { surfaceOp: 'append' }),
+    event(1, 'assistant/message', { message: { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'read_image', arguments: '{}' }] } }, { surfaceOp: 'append' }),
+    event(2, 'tool/result', { message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'a' }, IMG(1)] } }, { surfaceOp: 'append' }),
+    event(3, 'assistant/message', { message: { role: 'assistant', content: [{ type: 'tool-call', id: 'c2', name: 'read_image', arguments: '{}' }] } }, { surfaceOp: 'append' }),
+    event(4, 'tool/result', { message: { role: 'tool', toolCallId: 'c2', content: [{ type: 'text', text: 'b' }, IMG(2), IMG(3)] } }, { surfaceOp: 'append' }),
+    hoistEvent(5, [{ targetSeq: 2, userSeq: 0 }, { targetSeq: 4, userSeq: 0 }]),
+  ];
+  const fold = (l) => foldSurface(l, [imageHoistProjection]);
+  const result = fold(log);
+  const carrier = deriveEventMessage(log[0], result.projectedMessages);
+  const ids = carrier.content.filter((block) => block.type === 'image').map((block) => block.attachment.attachmentId.slice(-4));
+  check('every image reaches the carrier', ids, ['0001', '0002', '0003']);
+  check('the tool results keep their text', history(log, result), ['0:user[text+image+image+image]', '1:assistant[tool-call]', '2:tool[text]', '3:assistant[tool-call]', '4:tool[text]']);
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
