@@ -413,6 +413,38 @@
   max-width: 900px;
 }
 
+/*
+ * A surface whose body is a TABLE rather than prose.
+ *
+ * `.surface` caps at 900px because it is a reading column: a paragraph line longer
+ * than that is hard to track. A table has the opposite requirement -- every column is
+ * read across, and a 900px cap inside a 1160px body leaves a dead band on the right
+ * that reads as a broken layout. Measured on the live permission page before this:
+ * table 832px inside a 1160px body.
+ *
+ * Applied only to the three surfaces that host a table (permissions, trash, indexing).
+ * Widening `.surface` itself would restyle every prose panel in the plugin to fix a
+ * defect none of them has.
+ */
+.tableSurface {
+  max-width: none;
+  width: 100%;
+  align-items: stretch;
+  min-width: 0;
+}
+
+/* Within a table surface the table claims the full column, and the last column
+   (the row's action) takes whatever the content columns leave. */
+.tableSurface table {
+  width: 100%;
+}
+
+.tableSurface th:last-child,
+.tableSurface td:last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+
 .title {
   margin: 0;
   font: var(--dsw-font-base-strong-16);

@@ -225,12 +225,16 @@ function useRowDecoration(options: {
       // Amber is the one warm stop in the palette, which is what makes the mark read as
       // a star rather than as another grey glyph. Inline because the explorer's module
       // owns the row and has no class for this.
+      //
+      // `flex: none` is load-bearing: the name span truncates with an ellipsis, and a
+      // shrinkable star would be squeezed out of view on exactly the long file names
+      // where a reader still wants to see that the row is starred.
       star.style.cssText = 'flex:none;color:var(--dsw-static-amber-500);font:var(--dsw-font-xxs-12);margin-left:4px'
       star.textContent = '\u2605'
-      // Before the timestamp when the row has one, else at the end: in both cases to the
-      // LEFT of the date, which is the placement the reader asked for.
-      const time = row.querySelector('[class*="explorerTime"]')
-      if (time !== null) time.before(star)
+      // Immediately after the name, which is where a mark about the document belongs.
+      // The row's own timestamp stays where it was, at the far end.
+      const name = row.querySelector('[class*="explorerName"]')
+      if (name !== null) name.after(star)
       else row.appendChild(star)
     }
 

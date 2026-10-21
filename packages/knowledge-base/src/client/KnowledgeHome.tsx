@@ -40,12 +40,15 @@ import {
 } from './KnowledgeContextMenu.tsx'
 import { shareCopyFor } from './knowledgeMenuCopy.ts'
 import {
+  mergeShareRows,
+  shareRelationText,
   splitShareRelations,
   type PrincipalNameOf,
   type ShareGrant,
   type ShareRow,
 } from './shareRelations.ts'
-import { DEFAULT_PAGE_SIZE, paginate, needsPager } from './paging.ts'
+import { DEFAULT_PAGE_SIZE, paginate } from './paging.ts'
+import { bucketOfPath, isInOwnPersonalFolder } from './mineScope.ts'
 
 /** One document row, as the table renders it. */
 interface HomeRow {
@@ -109,6 +112,17 @@ export interface KnowledgeHomeProps {
   departmentCode?: string
   /** The caller's own department name; the code stands in when this is absent. */
   departmentName?: string
+  /**
+   * Whether the Host verified this caller may manage grants.
+   *
+   * This is the ONLY per-caller permission answer the client receives. There is no
+   * per-path "may I write this" route: `grants` is admin-scoped and the list route
+   * reports visibility, not writability. So the "Owned by me" tab uses this as its
+   * whole answer for the shared buckets -- an administrator sees the shared documents
+   * there, a plain reader does not -- and marks the rows whose answer it could not
+   * narrow rather than pretending either way.
+   */
+  canManageGrants?: boolean
   /**
    * The tab whose card should take focus on mount.
    *
@@ -178,104 +192,98 @@ function locationOf(relPath: string): string {
   return cut === -1 ? '—' : relPath.slice(0, cut)
 }
 
-/** Props for one direction of the Share tab. */
-interface ShareBlockProps {
+/** Props for the Share tab's single table. */
+interface ShareTableProps {
   /** Locale-bound copy resolver. */
   t: (key: string) => string
-  /** The block's heading, which also states the direction. */
-  title: string
-  /** What to say when this direction has no rows. */
-  empty: string
-  /** The rows on the current page. */
+  /** The rows on the current page, both directions. */
   rows: readonly ShareRow[]
   /** 1-based page shown. */
   page: number
   /** Total pages. */
   pageCount: number
-  /** Whether the pager is worth drawing at all. */
-  showPager: boolean
+  /** Total rows across both directions. */
+  total: number
   /** Move to another page. */
   onPage: (page: number) => void
-  /** How one row's sharing relation reads. */
-  relationOf: (row: ShareRow) => string
-  /** Header for the audience column. */
-  audienceHeader: string
+  /** What to say when there is no share in either direction. */
+  empty: string
   /** Copy for a grant whose principal id is empty. */
   unknownAudience: string
-  /** Locale tag for dates, unused when the row has none. */
-  locale: string
+  /** How one row's sharing relation reads. */
+  relationOf: (row: ShareRow) => string
 }
 
 /**
- * One direction of the Share tab: a heading, its own table, its own pager.
+ * The Share tab, as ONE table.
  *
- * Kept as one component for both directions so the two blocks cannot drift in layout.
- * The only thing that differs is `relationOf`, which is where the honesty rule lives:
- * "shared with me" says where it came from generically, because the sharer is not in
- * the grant data; "I shared out" names the audience, which is a fact the data does
- * support.
- * @param props - the block's rows and copy.
- * @returns The block.
+ * It was two blocks while the two directions looked like two answer sets. They are not:
+ * the reader asked for a single table where the direction is a column value, and that is
+ * what this is. Splitting it also made the extra column pointless -- a direction column
+ * only earns its place when both directions share a table.
+ *
+ * The direction travels on each row (`row.direction`), rendered through `relationOf`, so
+ * the merged table states it per row instead of by which block drew the row.
+ * @param props - the page's rows and copy.
+ * @returns The Share tab's table.
  */
-function ShareBlock(props: ShareBlockProps): ReactNode {
+function ShareTable(props: ShareTableProps): ReactNode {
   const c = props.t
+  if (props.total === 0) {
+    // One empty state for the whole tab: with a merged table there is no per-direction
+    // place to put a per-direction message.
+    return <p className={styles.shareEmpty}>{props.empty}</p>
+  }
   return (
-    <section className={styles.shareBlock} aria-label={props.title}>
-      <h3 className={styles.shareTitle}>{props.title}</h3>
-      {props.rows.length === 0 ? (
-        <p className={styles.shareEmpty}>{props.empty}</p>
-      ) : (
-        <>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th>{c('homeColTitle')}</th>
-                <th>{c('homeColLocation')}</th>
-                <th>{c('shareColRelation')}</th>
-                <th>{props.audienceHeader}</th>
-                <th>{c('shareColPermission')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.rows.map(row => (
-                <tr key={row.id}>
-                  <td>{row.name}</td>
-                  <td className={styles.muted}>{row.location}</td>
-                  <td className={styles.muted}>{props.relationOf(row)}</td>
-                  {/* A grant whose principal id is empty has no audience to name; every
-                      other row prints either the resolved label or the real id. */}
-                  <td className={styles.muted}>
-                    {row.audience === '' ? props.unknownAudience : row.audience}
-                  </td>
-                  <td className={styles.muted}>{row.action}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {props.showPager && (
-            <div className={styles.sharePager}>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={props.page <= 1}
-                onClick={() => { props.onPage(props.page - 1) }}
-              >
-                {c('auditPagePrev')}
-              </Button>
-              <span className={styles.muted}>
-                {c('auditPageOf').replace('{page}', String(props.page)).replace('{pages}', String(props.pageCount))}
-              </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={props.page >= props.pageCount}
-                onClick={() => { props.onPage(props.page + 1) }}
-              >
-                {c('auditPageNext')}
-              </Button>
-            </div>
-          )}
-        </>
+    <section className={styles.shareBlock} aria-label={c('homeTabShared')}>
+      <table className={styles.table}>
+        <thead>
+          <tr>
+            <th>{c('homeColTitle')}</th>
+            <th>{c('homeColLocation')}</th>
+            <th>{c('shareColRelation')}</th>
+            <th>{c('shareColAudience')}</th>
+            <th>{c('shareColPermission')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {props.rows.map(row => (
+            <tr key={row.id}>
+              <td>{row.name}</td>
+              <td className={styles.muted}>{row.location}</td>
+              <td className={styles.muted}>{props.relationOf(row)}</td>
+              {/* A grant whose principal id is empty has no audience to name; every
+                  other row prints either the resolved label or the real id. */}
+              <td className={styles.muted}>
+                {row.audience === '' ? props.unknownAudience : row.audience}
+              </td>
+              <td className={styles.muted}>{row.action}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {props.pageCount > 1 && (
+        <div className={styles.sharePager}>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={props.page <= 1}
+            onClick={() => { props.onPage(props.page - 1) }}
+          >
+            {c('auditPagePrev')}
+          </Button>
+          <span className={styles.muted}>
+            {c('auditPageOf').replace('{page}', String(props.page)).replace('{pages}', String(props.pageCount))}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={props.page >= props.pageCount}
+            onClick={() => { props.onPage(props.page + 1) }}
+          >
+            {c('auditPageNext')}
+          </Button>
+        </div>
       )}
     </section>
   )
@@ -341,9 +349,8 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   const [shareLoading, setShareLoading] = useState(false)
   /** A failed grants read, surfaced in the block rather than silently showing nothing. */
   const [shareError, setShareError] = useState<string | undefined>(undefined)
-  /** Each group pages independently: their sizes differ by orders of magnitude. */
-  const [receivedPage, setReceivedPage] = useState(1)
-  const [givenPage, setGivenPage] = useState(1)
+  /** One pager: the merged table is one list, so it gets one page number. */
+  const [sharePage, setSharePage] = useState(1)
 
 
 
@@ -434,13 +441,10 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
    * sizes differ: a reader with fifty inbound grants and three outbound would otherwise
    * have to page past all fifty to see their own three.
    */
-  const pagedReceived = useMemo(
-    () => paginate(share?.received ?? [], receivedPage, DEFAULT_PAGE_SIZE),
-    [share, receivedPage],
-  )
-  const pagedGiven = useMemo(
-    () => paginate(share?.given ?? [], givenPage, DEFAULT_PAGE_SIZE),
-    [share, givenPage],
+  const shareRows = useMemo(() => mergeShareRows(share ?? { received: [], given: [] }), [share])
+  const pagedShare = useMemo(
+    () => paginate(shareRows, sharePage, DEFAULT_PAGE_SIZE),
+    [shareRows, sharePage],
   )
 
     // Read once per mount, one level deep in each bucket.
@@ -536,8 +540,24 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         .filter(row => props.isFavorite?.(row.relPath) === true)
         .sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
     }
+    if (tab === 'mine') {
+      // "Owned by me" used to fall through to `[]`, which is why it looked empty while
+      // files sat in the personal folder: the branch was never written.
+      //
+      // The caller's own personal folder is theirs unconditionally. The shared buckets
+      // are theirs too when the Host verified they may manage grants -- that is the one
+      // per-caller permission answer this client receives, and an administrator asked
+      // for exactly this. Absent means "not verified", never "yes": an unverified
+      // caller keeps seeing only their personal folder rather than a claim the
+      // deployment cannot back.
+      const mayManageShared = props.canManageGrants === true
+      return rows
+        .filter(row => isInOwnPersonalFolder(row.relPath, props.callerId)
+          || (mayManageShared && bucketOfPath(row.relPath) !== 'personal'))
+        .sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
+    }
     return []
-  }, [tab, rows, props.isFavorite])
+  }, [tab, rows, props.isFavorite, props.callerId, props.canManageGrants])
 
   // The product's own glyphs rather than drawn characters: a text glyph renders at
   // the font's weight and baseline, which reads heavier than the 1px icon stroke
@@ -750,17 +770,33 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                 }}
               >
                 <td>
-                  {/* The title is the link and the rest of the row is data, so the
-                      control belongs inside the cell rather than wrapping the row.
-                      `Button` would paint a bordered control where this reads as a
-                      link. */}
-                  <button
-                    type="button"
-                    className={styles.rowLink}
-                    onClick={() => { props.onOpen(row.relPath) }}
-                  >
-                    {row.name}
-                  </button>
+                  {/* The star sits beside the name, not in a date column: a mark that
+                      says "this document" belongs with the document's own name.
+                      A flex row lets the link truncate while the star keeps its width,
+                      so a long file name ellipsises instead of pushing the star out of
+                      view. */}
+                  <span className={styles.titleCell}>
+                    {/* The title is the link and the rest of the row is data, so the
+                        control belongs inside the cell rather than wrapping the row.
+                        `Button` would paint a bordered control where this reads as a
+                        link. */}
+                    <button
+                      type="button"
+                      className={styles.rowLink}
+                      onClick={() => { props.onOpen(row.relPath) }}
+                    >
+                      {row.name}
+                    </button>
+                    {props.isFavorite?.(row.relPath) === true && (
+                      <span
+                        className={styles.favoriteMark}
+                        aria-label={c('favoriteMark')}
+                        title={c('favoriteMark')}
+                      >
+                        ★
+                      </span>
+                    )}
+                  </span>
                 </td>
                 <td className={styles.muted}>{row.location}</td>
                 {/* Ownership follows the bucket the document sits in, not a guess
@@ -783,17 +819,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                     ).label}
                   </Tag>
                 </td>
-                {/* The Created cell carries the favourites star on its LEFT, inside the
-                    same <td>. A separate cell would add a sixth column and shift every
-                    header, and the owner column was just accepted against this layout.
-                    The star leads the stamp so it reads as a mark on the row rather than
-                    as part of the date, and an unstarred row renders exactly as before. */}
-                <td className={styles.muted}>
-                  {props.isFavorite?.(row.relPath) === true && (
-                    <span className={styles.favoriteMark} aria-label={c('favoriteMark')} title={c('favoriteMark')}>★</span>
-                  )}
-                  {formatStamp(row.mtimeMs, locale)}
-                </td>
+                <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
                 <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
               </tr>
             ))}
@@ -810,40 +836,17 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
             {shareError !== undefined && <p className={styles.shareError} role="alert">{shareError}</p>}
             {shareLoading && share === null && <p className={styles.muted}>{c('loading')}</p>}
             {share !== null && (
-              <>
-                <ShareBlock
-                  t={c}
-                  title={c('shareGroupReceived')}
-                  empty={c('shareReceivedEmpty')}
-                  rows={pagedReceived.rows}
-                  page={pagedReceived.page}
-                  pageCount={pagedReceived.pageCount}
-                  showPager={needsPager(pagedReceived.total, DEFAULT_PAGE_SIZE)}
-                  onPage={setReceivedPage}
-                  // "Shared with me" has no arrow: the sharer is not in this data, and
-                  // an arrow would claim a fact the backend cannot supply.
-                  relationOf={() => c('shareReceivedRelation')}
-                  audienceHeader={c('shareColPermission')}
-                  unknownAudience={c('shareUnknownAudience')}
-                  locale={locale}
-                />
-                <ShareBlock
-                  t={c}
-                  title={c('shareGroupGiven')}
-                  empty={c('shareGivenEmpty')}
-                  rows={pagedGiven.rows}
-                  page={pagedGiven.page}
-                  pageCount={pagedGiven.pageCount}
-                  showPager={needsPager(pagedGiven.total, DEFAULT_PAGE_SIZE)}
-                  onPage={setGivenPage}
-                  // "I shared out" does state a direction we know: the audience is the
-                  // grant's principal, and the sharer is the caller.
-                  relationOf={row => c('shareGivenRelation').replace('{audience}', row.audience)}
-                  audienceHeader={c('shareColAudience')}
-                  unknownAudience={c('shareUnknownAudience')}
-                  locale={locale}
-                />
-              </>
+              <ShareTable
+                t={c}
+                rows={pagedShare.rows}
+                page={pagedShare.page}
+                pageCount={pagedShare.pageCount}
+                total={pagedShare.total}
+                onPage={setSharePage}
+                empty={c('shareEmpty')}
+                unknownAudience={c('shareUnknownAudience')}
+                relationOf={row => shareRelationText(row, c('shareReceivedRelation'), c('shareGivenRelation'))}
+              />
             )}
           </div>
         )}

@@ -1528,6 +1528,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 callerId={state.kind === 'ready' ? state.status.caller?.userId : undefined}
                 departmentCode={state.kind === 'ready' ? state.status.caller?.departmentCode : undefined}
                 departmentName={state.kind === 'ready' ? state.status.caller?.departmentName : undefined}
+                // The one per-caller permission answer this client has: it decides
+                // whether the shared buckets join "Owned by me".
+                canManageGrants={state.kind === 'ready' ? state.status.canManageGrants === true : false}
               />
             )}
             {rendered.kind === 'trash' && <KnowledgeTrash t={t} />}

@@ -5219,9 +5219,17 @@ describe('the @-mention target picker', () => {
   })
 
   it('names the audience for the outbound direction from the grant itself', async () => {
-    const home = await read('KnowledgeHome.tsx')
-    // The outbound relation substitutes the resolved audience, which is real data.
-    expect(home).toMatch(/c\('shareGivenRelation'\)\.replace\('\{audience\}'/u)
+    // The substitution lives in the pure helper now, so it can be tested directly
+    // rather than by grepping a component.
+    const { shareRelationText } = await import('../src/client/shareRelations.ts')
+    const given = {
+      id: '1', relPath: 'global/a.md', name: 'a.md', location: 'global',
+      principalType: 'user' as const, audience: '张三', action: 'read', direction: 'given' as const,
+    }
+    const received = { ...given, direction: 'received' as const }
+    expect(shareRelationText(given, 'FROM', 'Me → {audience}')).toBe('Me → 张三')
+    // Inbound is the fixed phrase: no interpolation, because the sharer is unknown.
+    expect(shareRelationText(received, 'FROM', 'Me → {audience}')).toBe('FROM')
   })
 
   it('falls back to the principal id, not to a placeholder, and uses the unknown word narrowly', async () => {
@@ -5234,16 +5242,17 @@ describe('the @-mention target picker', () => {
     expect(home).toMatch(/row\.audience === ''\s*\?\s*props\.unknownAudience/u)
   })
 
-  it('pages each direction separately through the shared paging helper', async () => {
+  it('shows both directions in ONE table with one pager', async () => {
     const home = await read('KnowledgeHome.tsx')
-    // Two independent pager states, and the shared helper does the slicing.
-    expect(home).toMatch(/const \[receivedPage, setReceivedPage\]/u)
-    expect(home).toMatch(/const \[givenPage, setGivenPage\]/u)
-    expect(home).toMatch(/from '\.\/paging\.ts'/u)
+    // The reader asked for a single table: a direction column only earns its place
+    // when both directions share a table, and two blocks made it meaningless.
+    const tables = home.match(/<ShareTable/gu) ?? []
+    expect(tables.length).toBe(1)
+    // Two blocks is the shape that was rejected.
+    expect(home).not.toMatch(/<ShareBlock/gu)
+    // One page number for the one list.
+    expect(home).toMatch(/const \[sharePage, setSharePage\]/u)
     expect(home).toMatch(/paginate\(/u)
-    // Two blocks, each with its own pager props.
-    const blocks = home.match(/<ShareBlock/gu) ?? []
-    expect(blocks.length).toBe(2)
   })
 
   it('reads grants from the existing route rather than a new endpoint', async () => {
@@ -5296,6 +5305,49 @@ describe('the @-mention target picker', () => {
     for (const handler of ['onShare', 'onFavorite', 'onReference', 'onPermissions', 'onCut', 'onPaste']) {
       expect(panel).toContain(handler + '=')
     }
+  })
+
+  /**
+   * The favourites star belongs beside the NAME, not in a date column.
+   *
+   * It shipped in the Created cell first, which reads as a mark about the timestamp.
+   * The reader's correction was explicit: "add it next to the title". These pin the
+   * placement in both surfaces so it cannot drift back.
+   */
+  it('draws the Home star inside the title cell, after the name', async () => {
+    const home = await read('KnowledgeHome.tsx')
+    // The star is inside the same wrapper as the open link, and that wrapper is the
+    // title cell. Asserted by order rather than by a brace-matched slice: the wrapper
+    // opens, then the link, then the mark.
+    const open = home.indexOf('<span className={styles.titleCell}>')
+    expect(open).toBeGreaterThan(-1)
+    const link = home.indexOf('styles.rowLink', open)
+    const mark = home.indexOf('styles.favoriteMark', open)
+    const close = home.indexOf('</td>', open)
+    expect(link).toBeGreaterThan(open)
+    expect(mark).toBeGreaterThan(link)
+    expect(mark).toBeLessThan(close)
+    // And no longer in a date cell: no isFavorite render inside a muted td.
+    expect(home).not.toMatch(/<td className=\{styles\.muted\}>\s*\{props\.isFavorite/u)
+  })
+
+  it('keeps the star from being squeezed out by a long name', async () => {
+    const css = await readFile(new URL('../src/client/KnowledgeHome.module.css', import.meta.url), 'utf8')
+    // flex:none on the mark and min-width:0 on the name are what make truncation
+    // happen on the name instead of on the star.
+    expect(css).toMatch(/\.favoriteMark \{[^}]*flex: none/u)
+    expect(css).toMatch(/\.titleCell \{[^}]*min-width: 0/u)
+    expect(css).toMatch(/\.rowLink \{[^}]*text-overflow: ellipsis/u)
+  })
+
+  it('draws the tree star after the file name, not before the timestamp', async () => {
+    const tree = await read('KnowledgeFileTree.tsx')
+    // Inserted after the name span...
+    expect(tree).toMatch(/name\.after\(star\)/u)
+    // ...and never relative to the timestamp any more.
+    expect(tree).not.toMatch(/explorerTime/u)
+    // Keep the mark protectable from the name's ellipsis.
+    expect(tree).toMatch(/flex:none/u)
   })
 
   it('declares every string it uses in both locales', async () => {

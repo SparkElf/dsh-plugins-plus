@@ -149,7 +149,7 @@ export function KnowledgeIndexing(props: KnowledgeIndexingProps) {
   useEffect(() => () => { onAction?.(undefined) }, [onAction])
 
   return (
-    <div className={styles.surface}>
+    <div className={`${styles.surface} ${styles.tableSurface}`}>
       {notice !== undefined && <p className={styles.notice}>{notice}</p>}
 
       <table className={tableStyles.table}>

@@ -29,7 +29,7 @@ import {
   roleMemberCounts,
   summarizeActions,
 } from '../src/client/permissionRows.ts'
-import { buildRoleSummaries } from '../src/client/roleSummary.ts'
+import { buildRoleSummaries, summarizeRoleActions } from '../src/client/roleSummary.ts'
 
 describe('the five knowledge permissions', () => {
   it('names exactly four concrete actions plus the union', () => {
@@ -465,5 +465,40 @@ describe('the three permission views', () => {
     )
     // u-2 has no grants and no roles, so it is not a permission row.
     expect(rows.map(row => row.userId)).toEqual(['u-1'])
+  })
+})
+
+describe('the role badges agree with the table below them', () => {
+  /**
+   * The page showed two answers for one role: the badges said 「只读」 while the table
+   * said 读/写/管理. The cause was a SECOND action vocabulary inside `roleSummary.ts`
+   * (`read`/`create`/`update`/`delete`), which matched none of DataOps' stored words
+   * (`read`/`write`/`manage`) and silently dropped two of them.
+   *
+   * These pin that the badge and the row are computed from the same rule, because a
+   * page that disagrees with itself is worse than one that is wrong consistently.
+   */
+  const ROLE_GRANTS = [
+    { id: '1', relPath: '@kb-root', kind: 'directory' as const, principalType: 'role' as const, principalId: '管理员', action: 'read', grantedBy: '', grantedAt: '' },
+    { id: '2', relPath: '@kb-root', kind: 'directory' as const, principalType: 'role' as const, principalId: '管理员', action: 'write', grantedBy: '', grantedAt: '' },
+    { id: '3', relPath: '@kb-root', kind: 'directory' as const, principalType: 'role' as const, principalId: '管理员', action: 'manage', grantedBy: '', grantedAt: '' },
+  ]
+
+  it('summarizes a role badge with the same union the table uses', () => {
+    const badges = buildRoleSummaries(ROLE_GRANTS)
+    const rows = groupHoldingsByRole(ROLE_GRANTS)
+    expect(badges).toHaveLength(1)
+    expect(rows).toHaveLength(1)
+    // THE assertion: badge and row must not disagree.
+    expect(badges[0]?.actions).toEqual(rows[0]?.resolved.actions)
+    // And the value must be the real one, not the old read-only reading.
+    expect(badges[0]?.actions).toEqual(['read', 'write', 'manage'])
+  })
+
+  it('does not invent a collapse word the table would not use', () => {
+    // The old summarizer returned ['all'] for a full house. `resolveActions` returns
+    // the concrete words, so the badge and the chips read the same.
+    expect(summarizeRoleActions(['read', 'write', 'manage'])).toEqual(['read', 'write', 'manage'])
+    expect(summarizeRoleActions(['read'])).toEqual(['read'])
   })
 })

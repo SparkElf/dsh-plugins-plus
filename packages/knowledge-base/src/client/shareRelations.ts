@@ -34,7 +34,10 @@ export type PrincipalNameOf = (kind: ShareGrant['principalType'], id: string) =>
 /** Which group one grant belongs to. */
 export type ShareDirection = 'received' | 'given'
 
-/** One row of either group. */
+/** Which direction a row states. */
+export type ShareRowDirection = 'received' | 'given'
+
+/** One row of the share table. */
 export interface ShareRow {
   /** Stable row id, taken from the grant. */
   id: string
@@ -50,6 +53,14 @@ export interface ShareRow {
   audience: string
   /** The permission the grant confers. */
   action: string
+  /**
+   * Which way this share points.
+   *
+   * Carried on the ROW rather than inferred from which table drew it: the whole point
+   * of merging the two blocks into one table is that the direction has to be readable
+   * per row, from the relation column.
+   */
+  direction: ShareRowDirection
 }
 
 /**
@@ -117,9 +128,46 @@ export function splitShareRelations(
       principalType: grant.principalType,
       audience: audienceOf(grant, nameOf),
       action: grant.action,
+      direction: isOwnGrant(grant, callerId) ? 'received' : 'given',
     }
-    if (isOwnGrant(grant, callerId)) received.push(row)
+    if (row.direction === 'received') received.push(row)
     else given.push(row)
   }
   return { received, given }
+}
+
+/**
+ * Every share row in the order one merged table shows them.
+ *
+ * Inbound first: "what has been shared with me" is the question this tab answers most
+ * often, and within each direction the order the grants arrived in is preserved so the
+ * table does not reshuffle between reads.
+ *
+ * A single list rather than two is what lets the tab be one table with one pager; the
+ * direction travels on each row so the relation column can state it per row.
+ * @param split - the two groups produced by {@link splitShareRelations}.
+ * @returns One list, inbound rows before outbound ones.
+ */
+export function mergeShareRows(split: { received: readonly ShareRow[]; given: readonly ShareRow[] }): ShareRow[] {
+  return [...split.received, ...split.given]
+}
+
+/**
+ * The text one row's relation column shows.
+ *
+ * `receivedTemplate` is a fixed phrase: the grant data has no grantor, so naming one
+ * would be a fabrication. `givenTemplate` interpolates the audience, which IS in the
+ * data (it is the grant's principal).
+ * @param row - the row to describe.
+ * @param receivedTemplate - the fixed phrase for an inbound share.
+ * @param givenTemplate - the outbound template containing `{audience}`.
+ * @returns The relation text.
+ */
+export function shareRelationText(
+  row: ShareRow,
+  receivedTemplate: string,
+  givenTemplate: string,
+): string {
+  if (row.direction === 'received') return receivedTemplate
+  return givenTemplate.replace('{audience}', row.audience)
 }

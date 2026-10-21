@@ -11,6 +11,7 @@
  */
 
 import type { GrantView } from '../api.ts'
+import { resolveActions } from './permissionRows.ts'
 
 /** One role as the overview shows it. */
 export interface RoleSummary {
@@ -32,24 +33,25 @@ const BUILT_IN_LABELS: Readonly<Record<string, { zh: string; en: string }>> = {
   'knowledge-dept-admin': { zh: '部门管理员', en: 'Department administrator' },
 }
 
-/** Actions in product order, so two renderings of the same grants agree. */
-const ACTION_ORDER = ['read', 'create', 'update', 'delete', 'all'] as const
-
 /**
- * Collapse raw action strings into the shortest describing list.
+ * Collapse raw action strings the way the rest of the page does.
  *
- * The client needs this independently of the server: the overview renders grants
- * the server already wrote, so it summarizes what is there rather than what a
- * request asked for.
+ * This used to carry its own word list, inherited from the create/edit form
+ * (`read`/`create`/`update`/`delete`). DataOps stores `read`/`write`/`manage`, so
+ * `write` and `manage` matched nothing and were dropped: the role BADGES above the
+ * table showed 「只读」 while the table below them — already fixed — showed
+ * 读/写/管理. One page, two conclusions, and the reader has no way to tell which is
+ * true.
+ *
+ * It now delegates to {@link resolveActions}, which is the single vocabulary and the
+ * single union rule for this package. Do not reintroduce a local list here: a second
+ * copy of "what the words mean" is exactly the defect this line removes.
  *
  * @param actions - raw action strings.
- * @returns `['all']` when all four concrete actions are held, else the subset.
+ * @returns The unioned actions in product order.
  */
 export function summarizeRoleActions(actions: readonly string[]): string[] {
-  if (actions.includes('all')) return ['all']
-  const held = new Set(actions)
-  if (ACTION_ORDER.slice(0, 4).every(action => held.has(action))) return ['all']
-  return ACTION_ORDER.filter(action => held.has(action))
+  return resolveActions(actions).actions
 }
 
 /**

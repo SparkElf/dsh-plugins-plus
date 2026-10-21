@@ -347,7 +347,7 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
   useEffect(() => () => { onAction?.(undefined) }, [onAction])
 
   return (
-    <div className={styles.surface}>
+    <div className={`${styles.surface} ${styles.tableSurface}`}>
       {notice !== undefined && <p className={styles.notice}>{notice}</p>}
 
       {/* The overview IS the page body, not a summary above a second body.
@@ -419,7 +419,6 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
             pathsHeld: (count: number) => c('overviewHeld').replace('{count}', String(count)),
             rolesHeld: c('overviewRoles'),
             actionsHeld: c('overviewActions'),
-            builtInRoles: c('overviewRolesHeading'),
             noActions: c('overviewNoActions'),
             tabsLabel: c('overviewTabsLabel'),
             statPrincipals: c('overviewStatPrincipals'),

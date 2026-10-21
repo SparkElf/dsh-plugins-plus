@@ -162,7 +162,7 @@ export function KnowledgeTrash(props: KnowledgeTrashProps) {
   const rows = state.kind === 'ready' ? state.entries : []
 
   return (
-    <div className={styles.surface}>
+    <div className={`${styles.surface} ${styles.tableSurface}`}>
       {notice !== undefined && <p className={styles.notice}>{notice}</p>}
       {state.kind === 'error' && <p className={styles.notice}>{state.message}</p>}
       {state.kind === 'ready' && state.error !== undefined && (

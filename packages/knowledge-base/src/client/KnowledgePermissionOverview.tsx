@@ -34,7 +34,6 @@ import {
   type RoleHoldings,
 } from './permissionRows.ts'
 import { DEFAULT_PAGE_SIZE, PAGE_SIZES, paginate } from './paging.ts'
-import { buildRoleSummaries, type RoleSummary } from './roleSummary.ts'
 import styles from './KnowledgePermissions.module.css'
 
 /**
@@ -99,7 +98,6 @@ export interface OverviewCopy {
   pathsHeld: (count: number) => string
   rolesHeld: string
   actionsHeld: string
-  builtInRoles: string
   noActions: string
   /** Accessible name for the tab strip, for readers who arrive at it by keyboard. */
   tabsLabel: string
@@ -155,8 +153,6 @@ export interface KnowledgePermissionOverviewProps {
     kind: 'available'
     users: ReadonlyArray<{ id: string; label: string; username?: string; roleCodes?: string[] }>
   } | { kind: 'unavailable'; reason: string }
-  /** Built-in role summaries, so the person view can explain what a role means. */
-  roles?: readonly RoleSummary[]
   /** Locale copy. */
   copy: OverviewCopy
   /**
@@ -242,14 +238,10 @@ function TablePager(props: {
  */
 export function KnowledgePermissionOverview(props: KnowledgePermissionOverviewProps) {
   const {
-    grants, labels = {}, copy, onRevoke, busy = false, directory, roles: roleSummaries,
+    grants, labels = {}, copy, onRevoke, busy = false, directory,
   } = props
   // The two older readings, kept because they are still exactly right for their grain.
   const resources = useMemo(() => groupHoldingsByResource(grants, labels), [grants, labels])
-  const roles = useMemo(
-    () => roleSummaries ?? buildRoleSummaries(grants),
-    [grants, roleSummaries],
-  )
   // The directory state, normalised once: a missing prop and a failed read are the same
   // fact to this surface -- membership is unknowable -- and both must say so rather than
   // render an account list that looks complete.
@@ -286,7 +278,7 @@ export function KnowledgePermissionOverview(props: KnowledgePermissionOverviewPr
     { key: 'principals', label: copy.statPrincipals, value: accounts.length },
     { key: 'resources', label: copy.statResources, value: resources.length },
     { key: 'grants', label: copy.statGrants, value: grants.length },
-    { key: 'roles', label: copy.statRoles, value: roles.length },
+    { key: 'roles', label: copy.statRoles, value: roleRows.length },
   ]
 
   const personPage = paginate(accounts, personPaging.page, personPaging.size)
@@ -313,24 +305,6 @@ export function KnowledgePermissionOverview(props: KnowledgePermissionOverviewPr
           </div>
         ))}
       </div>
-
-      {roles.length > 0 && (
-        <section className={styles.roleStrip} data-kb-overview="roles">
-          <h4 className={styles.roleStripHeading}>{copy.builtInRoles}</h4>
-          <div className={styles.roleStripList}>
-            {roles.map(role => (
-              <span key={role.id} className={styles.roleChip} data-kb-role={role.id}>
-                <span className={styles.roleChipName}>{role.label}</span>
-                {role.actions.length === 0
-                  ? <Tag tone="quiet">{copy.noActions}</Tag>
-                  : role.actions.map(action => (
-                    <Tag key={action} tone={actionTone(action)}>{copy.actionLabel(action)}</Tag>
-                  ))}
-              </span>
-            ))}
-          </div>
-        </section>
-      )}
 
       {/* Three readings of one payload. Switching changes the row GRAIN, never the data. */}
       <SegmentedTabs<OverviewTab>

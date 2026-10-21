@@ -56,45 +56,6 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* ── roles in use, as one wrapping strip ───────────────────────────────────── */
-
-/* Roles are a fact about the grants, not a column of any table, so they get a
-   strip of their own above the tabs rather than a fourth table nobody asked for. */
-.roleStrip {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.roleStripHeading {
-  margin: 0;
-  font: var(--dsw-font-xxxs-strong-11);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.roleStripList {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-/* One role reads as a unit: its name then its chips, hairline-separated so two
-   adjacent roles do not merge into one run of tags. */
-.roleChip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
-  border: 0.5px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-1);
-}
-
-.roleChipName {
-  font: var(--dsw-font-xxxs-strong-11);
-  color: var(--dsw-alias-label-secondary);
-}
-
 /* The tab strip sits directly over the table it switches. */
 .tabs {
   align-self: flex-start;

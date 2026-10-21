@@ -230,6 +230,12 @@
   font: var(--dsw-font-xxs-strong-12);
   text-align: left;
   cursor: pointer;
+  /* The name gives up width before the star does: `min-width: 0` lets it shrink below
+     its content width, and the ellipsis keeps a long name readable at the cut. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rowLink:hover {
@@ -275,23 +281,27 @@
   border: 0;
 }
 
-/* The favourites star, drawn at the start of the Created cell.
-   Inline rather than a block: it sits on the same baseline as the date it precedes,
-   and the cell keeps its existing alignment so the two date columns still line up
-   across starred and unstarred rows. `--dsw-static-amber-500` is the set's only warm
-   stop, which is what makes the mark read as a star rather than one more grey glyph. */
+/* The Title cell: the link and its star on one line.
+   `min-width: 0` is required for the link's ellipsis to engage inside a table cell;
+   without it the cell grows and the star is pushed out of the column. */
+.titleCell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* The favourites star, drawn immediately after the document's name.
+   `flex: none` so a long name truncates rather than squeezing the mark away -- the
+   star has to stay visible on exactly the rows where the name is cut short.
+   Amber is the one warm stop in the palette, which is what makes the mark read as a
+   star rather than one more grey glyph. */
 .favoriteMark {
-  margin-right: 4px;
+  flex: none;
   color: var(--dsw-static-amber-500);
   font: var(--dsw-font-xxs-12);
 }
 
-/* The drop surface around the document table.
-
-   The table lists documents only, so a reader dragging a file in has no directory row
-   to aim at: the whole surface is the target. The highlight is a dashed outline rather
-   than a fill, because a filled table reads as a selection and the rows underneath
-   stay readable this way. */
 .dropZone {
   border: 1px dashed transparent;
   border-radius: var(--dsw-radius-md);
@@ -305,30 +315,23 @@
   background: var(--dsw-alias-bg-layer-2);
 }
 
-/* The Share tab: two independent blocks, stacked.
-   Each owns a heading, a table and a pager. They are not laid out side by side
-   because the two tables have the same five columns and reading them across a
-   split view would make two different directions look like one wide table. */
+/* The Share tab: one table, so one wrapper.
+   It no longer holds two stacked blocks -- the reader asked for a single table and the
+   direction is a column value, not a section break. */
 .shareWrap {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 12px;
 }
 
-/* One direction: its title, its table, its own pager. */
+/* The table's own container, which also owns the pager beneath it. */
 .shareBlock {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.shareTitle {
-  margin: 0;
-  color: var(--dsw-alias-label-secondary);
-  font: var(--dsw-font-sm-bold-13);
-}
-
-/* The empty sentence for one direction. Muted because it is a state, not content. */
+/* The one empty state for the whole tab. Muted because it is a state, not content. */
 .shareEmpty {
   margin: 0;
   padding: 12px 0;
@@ -344,7 +347,7 @@
   font: var(--dsw-font-sm-13);
 }
 
-/* The pager for one block. Right-aligned so it sits under the numbers it controls. */
+/* The pager for the merged table. */
 .sharePager {
   display: flex;
   align-items: center;
