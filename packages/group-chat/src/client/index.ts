@@ -44,6 +44,7 @@ import { MembersGuideEntry, type MembersGuideEntryProps } from './GuideEntry.tsx
 import { createRoomStore, type RoomStore } from './store.ts'
 import { createQuoteStore } from './quote.ts'
 import { PendingQuoteBar } from './QuoteComposer.tsx'
+import { registerMessageSource, type InputTriggersLike } from './messageReference.ts'
 import { PRESET_LOCALE_NS } from './rows.ts'
 import { roomSessionId } from '../session-id.ts'
 import { en, zh, type GroupChatKey } from './locales.ts'
@@ -547,6 +548,14 @@ export function apply(ctx: ClientContext): void {
   // The pending-quote bar above the composer. `conversation.input.dock` is a list seat, so this
   // adds a row beside the official queue/todo docks instead of replacing one of them. The seat
   // is session-scoped and hands the factory a session id; a non-room session draws nothing.
+  // Room messages join the official `@` menu. This is the only route to a real inline
+  // reference: the pipeline owns chip insertion, so a plugin-provided pick is what makes a
+  // quote look and behave like a session reference instead of a second, parallel widget.
+  const inputTriggers = ctx.get('inputTriggers') as InputTriggersLike | undefined
+  if (inputTriggers !== undefined) {
+    ctx.effect(() => registerMessageSource(inputTriggers, store))
+  }
+
   ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
     name: 'conversation.input.dock',
     id: QUOTE_DOCK_ID,

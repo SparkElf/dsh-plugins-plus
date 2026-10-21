@@ -15,7 +15,7 @@
  * @module @sparkelf/dsh-group-chat/client/SidebarRooms
  */
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   IconChevronsUpDownOutlineRegular,
@@ -29,8 +29,15 @@ import {
   Modal,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { createRoom, readPreferences, savePreferences, updateRoom, type RoomSummary } from './api.ts'
-import { MessageSearch } from './MessageSearch.tsx'
+import {
+  createRoom,
+  readPreferences,
+  savePreferences,
+  searchMessages,
+  updateRoom,
+  type MessageHit,
+  type RoomSummary,
+} from './api.ts'
 import { CreateRoomDialog } from './CreateRoomDialog.tsx'
 import { RoomDialogs } from './RoomDialogs.tsx'
 import { joinableRooms } from './rows.ts'
@@ -77,6 +84,32 @@ type ArchivedFilter = 'default' | 'all'
  * @param props - the injected copy resolver and the shared room store.
  * @returns the section header plus the flat room list.
  */
+/**
+ * The hit text with the matched words marked.
+ *
+ * Splitting on the query gives the reader the one thing a result row has to offer: where in a
+ * long message the words are. Case comes from the source text; only the comparison folds case.
+ */
+const markQuery = (text: string, query: string): ReactNode => {
+  const needle = query.trim()
+  if (needle.length === 0) return text
+  const parts: ReactNode[] = []
+  const lower = text.toLowerCase()
+  const target = needle.toLowerCase()
+  let from = 0
+  let at = lower.indexOf(target)
+  let key = 0
+  while (at !== -1) {
+    if (at > from) parts.push(text.slice(from, at))
+    parts.push(<mark key={key} className={styles['mark']}>{text.slice(at, at + needle.length)}</mark>)
+    key += 1
+    from = at + needle.length
+    at = lower.indexOf(target, from)
+  }
+  if (from < text.length) parts.push(text.slice(from))
+  return parts
+}
+
 export function SidebarRooms(props: SidebarRoomsInjected) {
   const { t, tPreset, store } = props
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
@@ -88,6 +121,41 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
   const [archivedFilter, setArchivedFilter] = useState<ArchivedFilter>('default')
   const [joining, setJoining] = useState<string | undefined>(undefined)
   const searchInput = useRef<HTMLInputElement | null>(null)
+  /**
+   * Opens the room a hit belongs to and scrolls to that message.
+   *
+   * The conversation is still loading when this fires, so the row is not in the DOM yet: poll
+   * for the anchor instead of guessing one delay, and give up quietly rather than scrolling to
+   * a stranger's message.
+   */
+  const openHit = (hit: MessageHit): void => {
+    void store.open(hit.roomId)
+    store.setSearch('')
+    setSearchExpanded(false)
+    if (typeof document === 'undefined') return
+    let attempts = 0
+    const look = (): void => {
+      const node = document.querySelector(`[data-group-chat-message="${hit.eventId}"]`)
+      if (node !== null) {
+        node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        return
+      }
+      attempts += 1
+      if (attempts < 40) window.setTimeout(look, 250)
+    }
+    window.setTimeout(look, 400)
+  }
+  /**
+   * Message hits for the same box the room rows are filtered by.
+   *
+   * One field, two questions: the rows below answer "which room is this" and this list answers
+   * "where is this said". Two separate boxes made the reader choose which kind of search they
+   * wanted before they knew what they were looking for.
+   */
+  const [hits, setHits] = useState<readonly MessageHit[]>([])
+  const [searching, setSearching] = useState(false)
+  /** Issue counter so a slow query cannot overwrite the results of a later one. */
+  const searchTicket = useRef(0)
   /**
    * Height of this region, in pixels, once the user has dragged it.
    *
@@ -156,6 +224,32 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
     document.addEventListener('pointerup', onUp)
     document.addEventListener('pointercancel', onUp)
   }
+
+  /**
+   * Message search, driven by the header box.
+   *
+   * Debounced and latest-wins: typing issues several queries, and an early one resolving late
+   * would replace the results of a later, more specific one.
+   */
+  useEffect(() => {
+    if (!searchExpanded) return
+    const trimmed = searchQuery.trim()
+    if (trimmed.length === 0) {
+      setHits([])
+      setSearching(false)
+      return
+    }
+    const ticket = searchTicket.current + 1
+    searchTicket.current = ticket
+    setSearching(true)
+    const timer = setTimeout(() => {
+      void searchMessages(trimmed)
+        .then((found) => { if (searchTicket.current === ticket) setHits(found) })
+        .catch(() => { if (searchTicket.current === ticket) setHits([]) })
+        .finally(() => { if (searchTicket.current === ticket) setSearching(false) })
+    }, 250)
+    return () => { clearTimeout(timer) }
+  }, [searchQuery, searchExpanded])
 
   // The search box closes on Escape and on a click outside, the same way the workspace
   // one does, so the header returns to its resting width without a second control.
@@ -334,29 +428,33 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
       </div>
 
       <div className={styles.listArea}>
-        {/* Message search sits between the header and the room rows: it looks inside the rooms
-            listed below, so putting it above them is the order the reader expects. */}
-        <MessageSearch
-          t={t}
-          onOpen={(roomId, eventId) => {
-            void store.open(roomId)
-            // The conversation is still loading when this fires, so the row is not in the DOM
-            // yet: poll for the anchor instead of guessing one delay, and give up quietly after
-            // a few seconds rather than scrolling to a stranger's message.
-            if (typeof document === 'undefined') return
-            let attempts = 0
-            const look = (): void => {
-              const node = document.querySelector(`[data-group-chat-message="${eventId}"]`)
-              if (node !== null) {
-                node.scrollIntoView({ block: 'center', behavior: 'smooth' })
-                return
-              }
-              attempts += 1
-              if (attempts < 40) window.setTimeout(look, 250)
-            }
-            window.setTimeout(look, 400)
-          }}
-        />
+
+        {searchExpanded && query.length > 0 ? (
+          <div className={styles.hitList} role="listbox" aria-label={t('search')}>
+            {searching && hits.length === 0 ? (
+              <p className={styles.hitHint}>{t('searching')}</p>
+            ) : hits.length === 0 ? null : (
+              hits.map((hit) => (
+                <button
+                  key={`${hit.roomId}:${hit.eventId}`}
+                  type="button"
+                  role="option"
+                  aria-selected={false}
+                  className={styles.hit}
+                  onClick={() => { openHit(hit) }}
+                >
+                  <span className={styles.hitHead}>
+                    <span className={styles.hitRoom}>{hit.roomName}</span>
+                    {hit.authorName === null ? null : (
+                      <span className={styles.hitAuthor}>{hit.authorName}</span>
+                    )}
+                  </span>
+                  <span className={styles.hitText}>{markQuery(hit.text, searchQuery)}</span>
+                </button>
+              ))
+            )}
+          </div>
+        ) : null}
 
         <div className={styles.list}>
           {failure !== undefined && <p className={styles.empty}>{t(failure)}</p>}

@@ -133,6 +133,9 @@
   display: flex;
   align-items: center;
   margin-left: auto;
+  /* The header bleeds 4px to the right so its icon buttons sit on the section edge; the field
+     has to give that back, or `width: 100%` inside it ends past the panel. */
+  padding-right: 4px;
 }
 
 .search,
@@ -156,9 +159,12 @@
 }
 
 .searchExpanded {
-  width: calc(100% + 4px);
+  /* The box must stay inside the header: the previous `calc(100% + 4px)` with `margin-inline:
+     -2px` bled past the sidebar's right edge once the header's own negative margin was taken
+     into account, which showed up as the field hanging outside the panel. */
+  width: 100%;
   height: 30px;
-  margin-inline: -2px;
+  margin-inline: 0;
   padding: 0 4px 0 0;
   border: 0.5px solid var(--dsw-alias-border-l4);
   border-radius: var(--dsw-radius-md);
@@ -777,4 +783,84 @@
 
 .leaveConfirmDanger:disabled {
   opacity: 0.5;
+}
+
+/* ── message hits, shown under the same header search ────────────────────────── */
+
+.hitList {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 45%;
+  margin-bottom: 4px;
+  overflow-y: auto;
+}
+
+.hitHint {
+  margin: 2px 8px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.hit {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hit:hover,
+.hit:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+  outline: none;
+}
+
+.hitHead {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.hitRoom {
+  flex: none;
+  font-weight: 500;
+}
+
+.hitAuthor {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.hitText {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.mark {
+  padding: 0;
+  border-radius: 2px;
+  background: var(--dsw-alias-bg-brand-weak, rgb(255 214 102 / 35%));
+  color: inherit;
+  font-weight: 600;
 }
