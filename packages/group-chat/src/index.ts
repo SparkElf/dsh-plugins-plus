@@ -452,6 +452,34 @@ export const writePreferences = async (
 
 export type UserContent = readonly ContentBlockLike[]
 
+/**
+ * Puts a pending quote at the head of a message's text.
+ *
+ * As a blockquote line rather than as a block of its own. A block type the model side does not
+ * know is dropped on the way into the prompt — the reply would be published with a quote only
+ * people could see — and the official bubble draws such a block as a collapsed "extra content"
+ * row underneath. Text is read by both: the model gets the quote as context, and the renderer
+ * shows it as a quote.
+ *
+ * @param content - the message the member typed.
+ * @param quote - the reply target the browser registered.
+ * @returns the content with the quote line prepended.
+ */
+const withQuote = (
+  content: UserContent,
+  quote: { readonly messageId: string; readonly preview: string; readonly authorName?: string },
+): readonly ContentBlockLike[] => {
+  const speaker = quote.authorName === undefined ? '' : `${quote.authorName}：`
+  const line = `> ${speaker}${quote.preview}`
+  const blocks = [...content]
+  const at = blocks.findIndex((block) => block.type === 'text')
+  if (at < 0) return [{ type: 'text', text: line }, ...blocks]
+  const target = blocks[at] as ContentBlockLike & { readonly text?: unknown }
+  const text = typeof target.text === 'string' ? target.text : ''
+  blocks[at] = { ...target, text: `${line}\n\n${text}` }
+  return blocks
+}
+
 /** True when `data` looks like a `user/message` payload this workspace composed itself. */
 /**
  * True when a `user/message` carries runtime bookkeeping rather than something a member typed.
@@ -891,22 +919,10 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       // resolved here — which is also where the room's members are already at hand.
       const content = (data as { content: UserContent }).content
       const mentions = mentionedMemberIds(textOfContent(content), runtimes.get(roomId)?.members ?? [])
-      // The quote the browser registered, consumed here so it attaches to exactly one reply. It
-      // goes in as its own block after the typed content: the reply's words keep their order, and
-      // the renderer reads the bar from the block rather than from text the author did not write.
+      // The quote the browser registered, consumed here so it attaches to exactly one reply.
       const quote = pendingQuotes.get(roomId)
       pendingQuotes.delete(roomId)
-      const outgoing: readonly ContentBlockLike[] | string = quote === undefined
-        ? content
-        : [
-            ...content,
-            {
-              type: QUOTE_BLOCK_TYPE,
-              messageId: quote.messageId,
-              preview: quote.preview,
-              ...quote.authorName === undefined ? {} : { authorName: quote.authorName },
-            },
-          ]
+      const outgoing = quote === undefined ? content : withQuote(content, quote)
       backend
         .sendMessage(roomId, {
           // The blocks travel unchanged: an attachment, an image, or an @ reference is in
