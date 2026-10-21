@@ -54,8 +54,21 @@ let mountPoint = ''
  */
 const PANEL_ID = 'knowledge-base'
 
-/** Client services required for these contributions. */
-export const inject = ['slots', 'locale', 'uiSession']
+/**
+ * Client services required for these contributions.
+ *
+ * `sessions` and `workspaces` are here because the `@`-reference dialog inserts into a
+ * conversation draft, and that insert resolves the target session's scope through
+ * `ctx.sessions` before it can write anything. Without the injection the service is not
+ * on this plugin's ctx at all: the call throws `cannot get property "sessions" without
+ * inject`, `referenceInChat` catches it into a `console.warn`, and the reader sees a
+ * dialog that closes and inserts nothing -- the exact "clicked, nothing happened"
+ * symptom this injection fixes at the root rather than by reporting the failure.
+ *
+ * `workspaces` is the other half: the mention is spelled relative to the workspace that
+ * owns the session, so the insert needs that root to project the path.
+ */
+export const inject = ['slots', 'locale', 'uiSession', 'sessions', 'workspaces']
 
 /**
  * Register the knowledge-base navigation entry and Settings section.

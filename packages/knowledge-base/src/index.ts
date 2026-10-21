@@ -90,6 +90,12 @@ import {
   type MineruTier,
 } from './deploy.ts'
 import { RemoteError, originFrom, sshManagerRunner, type RemoteHost, type RemoteRunner } from './remote.ts'
+import {
+  createExtractionQueue,
+  type ExtractionOutcome,
+  type ExtractionQueue,
+  type ExtractionTask,
+} from './extractionQueue.ts'
 import { extractDocument, isExtractable, markdownSiblingOf, writeExtractedMarkdown } from './extract.ts'
 import { BUILT_IN_ROLES, KNOWLEDGE_ACTIONS, isKnowledgeAction, permissionToDataOpsActions } from './permissions.ts'
 import { addTombstone, readTrash, removeTombstone, writeTrash } from './trash.ts'
@@ -950,6 +956,21 @@ export interface KnowledgeEntry {
   readable?: boolean
   /** Number of direct children, for a directory row. */
   childCount?: number
+  /**
+   * Whether a reader exists for this file's format.
+   *
+   * Set on file rows only. The page uses it to decide whether "extract markdown" is a
+   * meaningful action for this row, so the menu does not have to know the extractor's
+   * extension list.
+   */
+  canExtract?: boolean
+  /**
+   * Whether this file's `.md` sibling already exists.
+   *
+   * Set on file rows only, and only for formats that have an extractor. Lets the page
+   * say "already extracted" rather than offering a retry that would be refused.
+   */
+  hasMarkdown?: boolean
 }
 
 /**
@@ -1218,6 +1239,18 @@ export interface PrincipalOption {
   id: string
   /** Human-facing name, falling back to the id when the backend sends none. */
   label: string
+  /** Login name, for users only: two accounts can share a display name. */
+  username?: string
+  /**
+   * Role codes this principal belongs to.
+   *
+   * Users only, and only when the directory reported it. The permission overview needs
+   * this to answer "what does this PERSON have": a role grant confers access on every
+   * member, so without the membership a reader whose access is entirely role-derived
+   * would look like they hold nothing. Absent means the directory did not say -- which
+   * the page reports as unavailable inheritance rather than as no inheritance.
+   */
+  roleCodes?: string[]
 }
 
 /**
@@ -1257,7 +1290,20 @@ export async function fetchPrincipals(
       const name = typeof row.displayName === 'string'
         ? row.displayName
         : (typeof row.name === 'string' ? row.name : (typeof row.username === 'string' ? row.username : id))
-      return { id, label: name }
+      // Users carry `roles: [{code,name}]` from DataOps' own projection; every other
+      // kind has no membership to report. Read defensively: an older backend that
+      // omits the field must leave it absent rather than look like "no roles".
+      const roleCodes = kind === 'user' && Array.isArray(row.roles)
+        ? row.roles
+          .map(role => (role as Record<string, unknown>).code)
+          .filter((code): code is string => typeof code === 'string' && code !== '')
+        : undefined
+      return {
+        id,
+        label: name,
+        ...(kind !== 'user' || typeof row.username !== 'string' ? {} : { username: row.username }),
+        ...(roleCodes === undefined ? {} : { roleCodes }),
+      }
     })
     .filter((row): row is PrincipalOption => row !== undefined)
 }
@@ -1736,6 +1782,46 @@ export async function extractBeside(
 }
 
 /**
+ * Translate {@link extractBeside}'s answer into a queue terminal state.
+ *
+ * The extractor reports three different outcomes through two fields, and they mean
+ * different things to a reader deciding what to do next:
+ *
+ * - `markdown` set, no `reason` — the sibling was written (`succeeded`).
+ * - `markdown` set WITH a `reason` — the text was produced but writing the sibling was
+ *   refused, typically because it already exists. The reason is kept so a retry can
+ *   report why nothing changed (`failed`, with the refusal verbatim).
+ * - `markdown` empty, `reason` set — no authority could read the document; this is the
+ *   `no-extractor-succeeded: …` case a reader retries after an upgrade.
+ *
+ * An `undefined` answer means the format has no extractor at all, which the queue
+ * normally prevents by asking `isExtractable` first; it is mapped for the caller that
+ * bypassed that gate rather than left to throw.
+ *
+ * @param outcome - what {@link extractBeside} returned.
+ * @returns the state the queue records.
+ */
+export function extractionOutcomeOf(
+  outcome: { markdown: string; via?: string; reason?: string } | undefined,
+): ExtractionOutcome {
+  if (outcome === undefined) {
+    return { state: 'unsupported', reason: 'this file type has no extractor' }
+  }
+  if (outcome.markdown !== '' && outcome.reason === undefined) {
+    return {
+      state: 'succeeded',
+      markdown: outcome.markdown,
+      ...(outcome.via === undefined ? {} : { via: outcome.via }),
+    }
+  }
+  return {
+    state: 'failed',
+    ...(outcome.markdown === '' ? {} : { markdown: outcome.markdown }),
+    ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+  }
+}
+
+/**
  * MinerU's base URL for this deployment, or undefined when it is not configured.
  *
  * @param config - resolved plugin config.
@@ -2172,6 +2258,27 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
   const context = planContext(config)
   /** Completed and in-flight step runs, newest last. */
   const runs: StepRun[] = []
+  /**
+   * Background extraction, one worker for this deployment.
+   *
+   * Upload and extraction are separate promises (see `extractionQueue.ts`): the bytes
+   * must be visible when the upload answers, while the `.md` sibling may take a minute
+   * on a scanned PDF. `run` reuses the same permission-checked `extractBeside` path the
+   * upload used, so a background run and a manual retry cannot diverge. One queue per
+   * registration means one worker per process, which is what keeps two parses from
+   * competing for the same small box.
+   */
+  const extractionQueue: ExtractionQueue = createExtractionQueue({
+    isExtractable: relPath => isExtractable(relPath),
+    run: async (relPath, mineruBaseUrl) => {
+      // `config` is the alias declared above (`const config = deploymentConfig`), named
+      // here because this is the ONE place production code calls `extractBeside`: both
+      // the upload path and the manual retry go through this runner, so the caller's
+      // stored address reaches the extractor exactly once per document.
+      const outcome = await extractBeside(config, relPath, mineruBaseUrl)
+      return extractionOutcomeOf(outcome)
+    },
+  })
   /**
    * Callers whose missing pointer has already been repaired once this process.
    *
@@ -3151,14 +3258,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 content: encoding === 'base64' ? undefined : content,
                 ...(encoding === 'base64' ? { bytes: payloadBytes } : {}),
               })
-              // A document's text is what a search can see, and its bytes are what a
-              // reader opens. Extract beside the original rather than instead of it:
-              // the upload keeps the file the user chose, and gains a greppable
-              // `.md` sibling. A failed extraction is reported, never fatal.
-              // The caller's own MinerU address, when they set one. This is the step that
-              // makes the setting do anything: without it the page would store a value
-              // nothing reads. Empty falls back to the deployment answer.
-              const extraction = await extractBeside(config, relPath, uploadSettings.mineruBaseUrl)
               // Recorded before answering, and a recording failure never changes the
               // answer: the bytes are already on disk.
               await appendAuditEntry(uploadViewDir, {
@@ -3170,10 +3269,20 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 outcome: 'applied',
               }).catch(() => undefined)
               const afterWrite = await refreshViewIfStale(true, created.relPath)
-              const reply = writeReplyAfterSync(
-                { created, ...(extraction === undefined ? {} : { extraction }) },
-                afterWrite,
-              )
+              // Extraction is enqueued AFTER the reply is built, and never awaited.
+              //
+              // The document's bytes are what the uploader handed over, and the tree must
+              // show them now. The `.md` sibling is derived text that can take a minute
+              // (MinerU on a scanned PDF, LibreOffice on a legacy .doc); waiting for it
+              // here made a slow parse read as a slow upload, and a failed parse read as
+              // a failed upload. `enqueue` cannot throw, so the upload's answer is already
+              // decided by the two calls above and nothing below can change it.
+              //
+              // The accepted task travels back as `extraction`, so the page can show
+              // "extracting…" instead of guessing, and a reader can read the outcome
+              // through `extract.status` once it finishes.
+              const extraction = extractionQueue.enqueue(relPath, uploadSettings.mineruBaseUrl)
+              const reply = writeReplyAfterSync({ created, extraction }, afterWrite)
               return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {
@@ -3256,9 +3365,140 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 detail: callerFailure,
               })
             }
+            const visible = await listDirectoryWithPermissions(host, config, root, target, callerId)
+            // Two derived flags per row, so the page can offer "extract markdown"
+            // without asking the Host about each file it renders.
+            //
+            // `canExtract` answers whether a reader exists for this format. `hasMarkdown`
+            // answers whether the sibling is already on disk, which is what lets the menu
+            // show "already extracted" instead of running a parse that would be refused.
+            // Both are computed from the names in this one listing, so a directory of N
+            // rows costs one readdir, not N stats.
+            const present = new Set(visible.map(entry => entry.name))
+            const entries: KnowledgeEntry[] = visible.map((entry) => {
+              if (entry.isDir) return entry
+              const extractable = isExtractable(entry.relPath)
+              return {
+                ...entry,
+                canExtract: extractable,
+                hasMarkdown: extractable ? present.has(entry.name + '.md') : false,
+              }
+            })
             return writeJson(res, 200, {
-              entries: await listDirectoryWithPermissions(host, config, root, target, callerId),
+              entries,
+              // The number of rows in this directory level before any client-side
+              // paging. `list` returns a whole level rather than a page, so this is also
+              // what a paginator needs for its page count without counting rows itself.
+              // Named explicitly so a future server-side page can keep the field's
+              // meaning while `entries` shrinks.
+              total: entries.length,
               permissionsResolved: true,
+            })
+          }
+          case 'extract.status': {
+            // What this process knows about extraction, which is deliberately all it
+            // knows: the queue is in memory, so a task that survived a restart is gone.
+            //
+            // A file that is neither in `tasks` nor beside an `.md` sibling is therefore
+            // "never attempted in this process" or "attempted, then the process restarted"
+            // -- and `list`'s `hasMarkdown` is what tells those two apart from the disk,
+            // which is the authority. The snapshot never claims something is running that
+            // is not: `running` is read from the worker itself, not from a stored flag.
+            return writeJson(res, 200, extractionQueue.snapshot())
+          }
+          case 'extract.retry': {
+            // Re-run extraction for one document, for the case the upload path could not
+            // finish: a scanned PDF whose parser was down, a legacy `.doc` with no
+            // LibreOffice, a file dropped in by a copy that bypassed upload entirely.
+            //
+            // Permission is the same gate as `upload`/`create`: a caller who may not write
+            // the path may not spend the deployment's parser on it either.
+            if (config.baseUrl.trim() === '') {
+              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
+            }
+            const body = await readJsonBody(req)
+            const relPath = String(body.relPath ?? '')
+            if (relPath.trim() === '') {
+              return writeJson(res, 400, { error: 'relPath is required' })
+            }
+            if (!isContainedRelPath(relPath)) {
+              return writeJson(res, 400, { error: 'path escapes the knowledge root', refused: [relPath] })
+            }
+            // No reader for this format is a definite answer, not a failure: the caller
+            // asked and the honest reply is that this file type is never extractable.
+            if (!isExtractable(relPath)) {
+              return writeJson(res, 200, {
+                outcome: 'unsupported',
+                relPath,
+                message: 'this file type has no extractor',
+              })
+            }
+            const localRoot = localConfig(config)
+            const target = join(localRoot.actualRoot, relPath)
+            const source = await stat(target).catch(() => undefined)
+            if (source === undefined || !source.isFile()) {
+              return writeJson(res, 404, { error: 'no such file' })
+            }
+            if (!await canWritePath(host, config, relPath)) {
+              return writeJson(res, 403, { error: 'write access is required to extract here', refused: [relPath] })
+            }
+            // Already extracted: report it instead of overwriting. A sibling the reader
+            // may have edited by hand must not be silently replaced by a retry.
+            const sibling = markdownSiblingOf(relPath)
+            const existing = await stat(join(localRoot.actualRoot, sibling)).catch(() => undefined)
+            if (existing !== undefined && existing.isFile()) {
+              return writeJson(res, 200, { outcome: 'exists', relPath, markdown: sibling })
+            }
+            const viewDir = viewPathFor({
+              actualRoot: localRoot.actualRoot,
+              viewRoot: localRoot.viewRoot,
+              userId: (await fetchCaller(host, config).catch(() => undefined))?.userId ?? '',
+            })
+            const settings = await readSettings(viewDir)
+            // ONE extraction, whichever way the caller asked.
+            //
+            // Both branches enqueue and then wait on the TASK, never running an
+            // extraction of their own. An earlier version ran `extractBeside` inline and
+            // enqueued a second copy so the status surface would stay current: that
+            // parsed the document twice, and the route answered from one run while
+            // `extract.status` reported the other. `settled(relPath)` is what keeps a
+            // single truth -- the state this route returns IS the state the status
+            // surface shows for that path.
+            const accepted = extractionQueue.enqueue(relPath, settings.mineruBaseUrl)
+            // `wait` lets the menu be a single call for the common case while still
+            // allowing a caller to fire-and-poll when the parse is long.
+            if (body.wait === false) {
+              return writeJson(res, 202, { outcome: 'queued', relPath, extraction: accepted })
+            }
+            const settled = await extractionQueue.settled(relPath)
+            // Unreachable in practice (`enqueue` above always records a task), but a
+            // route must not dereference a missing task: an unknown outcome is reported
+            // as a failure with a reason rather than as a success.
+            const outcome: ExtractionOutcome = settled === undefined
+              ? { state: 'failed', reason: 'the extraction task was not recorded' }
+              : {
+                state: settled.state === 'succeeded' ? 'succeeded' : settled.state === 'unsupported' ? 'unsupported' : 'failed',
+                ...(settled.markdown === undefined ? {} : { markdown: settled.markdown }),
+                ...(settled.via === undefined ? {} : { via: settled.via }),
+                ...(settled.reason === undefined ? {} : { reason: settled.reason }),
+              }
+            if (outcome.state === 'succeeded') {
+              // The sibling is a new file in the tree, so the reader's view needs the
+              // same refresh any other write gets; 207 reports a refresh that failed.
+              const afterWrite = await refreshViewIfStale(true, sibling)
+              const reply = writeReplyAfterSync({
+                outcome: 'extracted',
+                relPath,
+                markdown: outcome.markdown,
+                ...(outcome.via === undefined ? {} : { via: outcome.via }),
+              }, afterWrite)
+              return writeJson(res, reply.status, reply.body)
+            }
+            return writeJson(res, 200, {
+              outcome: outcome.state === 'unsupported' ? 'unsupported' : 'failed',
+              relPath,
+              ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+              ...(outcome.markdown === undefined ? {} : { markdown: outcome.markdown }),
             })
           }
           case 'search': {
@@ -3444,7 +3684,19 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // whether they may read it, and it is DataOps' answer, not ours: the page
             // renders the control read-only when this is false.
             const canEdit = await canManageGrants(host, config)
-            return writeJson(res, 200, { settings, canEdit })
+            // The address that is actually in effect, derived by the same function the
+            // extractor uses. An empty `mineruBaseUrl` means "derive it from the port",
+            // so the stored value alone leaves the page with nothing to show for a
+            // deployment that works -- the field came up blank while the service was
+            // reachable. Sent so the page can display the effective address without
+            // recomputing the derivation in the browser, where a second copy of the rule
+            // would drift from this one.
+            const mineruUrl = mineruUrlFor(config)
+            return writeJson(res, 200, {
+              settings,
+              canEdit,
+              ...(mineruUrl === undefined ? {} : { mineruUrl }),
+            })
           }
           case 'settings.set': {
             // Replace the review settings, but only for a caller who may write here.
@@ -3585,7 +3837,19 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 outcome: 'applied',
               }).catch(() => undefined)
               const afterWrite = await refreshViewIfStale(true, created.relPath)
-              const reply = writeReplyAfterSync({ approved: created }, afterWrite)
+              // An approved document is a stored document, and every stored document is
+              // supposed to be searchable. Extraction normally happens on the upload
+              // path, but a reviewed upload was PARKED before it could happen: the bytes
+              // only reached the tree here. Skipping it would make "review required" a
+              // silent choice against retrievability, which the uploader never made.
+              //
+              // The parser address comes from the APPROVER's settings rather than the
+              // uploader's: the submission is pinned bytes with no settings attached, and
+              // the approver is the identity this request can resolve. A deployment-wide
+              // address is the fallback either way.
+              const approveSettings = await readSettings(viewDir)
+              const extraction = extractionQueue.enqueue(created.relPath, approveSettings.mineruBaseUrl)
+              const reply = writeReplyAfterSync({ approved: created, extraction }, afterWrite)
               return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {

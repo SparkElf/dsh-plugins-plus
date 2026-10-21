@@ -24,10 +24,11 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Button, Input, MenuItemButton, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { referenceInChat } from 'dsh-better-sidebar/src/client/reference-in-chat.ts'
 import styles from './KnowledgeReferencePicker.module.css'
+import { deadlineFrom, decideReadiness, isExpired } from './insertReadiness.ts'
 
 /**
  * The bits of the host's client services this dialog reads.
@@ -82,6 +83,19 @@ export interface KnowledgeReferencePickerProps {
   path: string
   /** Whether that entry is a directory (a folder mention rather than a file chip). */
   isDir: boolean
+  /**
+   * Every entry a multi-row selection asked to reference.
+   *
+   * Present only when the `@` button was pressed with several rows selected; the
+   * single-row case keeps using `path`/`isDir`. Each entry carries its own `isDir`
+   * because a selection may mix folders and documents, and the mention spelling
+   * differs between them.
+   *
+   * This is one dialog for both cases on purpose: "where should this go" is the same
+   * question whether one row or five are being referenced, and a second batch-only
+   * dialog would be a second place for the insertion contract to drift.
+   */
+  targets?: readonly { path: string; isDir: boolean }[]
   /** The client context; both the draft insert and the service lookups need it. */
   ctx: unknown
   /** Locale-bound copy for this package's namespace. */
@@ -110,18 +124,70 @@ export interface KnowledgeReferencePickerProps {
 /**
  * Absolute-path mention insertion for one session.
  *
- * `referenceInChat` returns void and answers a `false` internally on every degraded
- * path, so the dialog cannot tell "inserted" from "silently skipped" through it. It
- * is still the function called -- the contract must stay single-source -- and the
- * caller treats a closed dialog as "asked", not as "succeeded".
+ * `referenceInChat` answers `void` and swallows every degraded path into a
+ * `console.warn`, which is precisely how "the button did nothing" reached the reader:
+ * nothing above it could tell an insert from a silent skip. The insert itself stays
+ * with `referenceInChat` -- that contract must remain single-source -- but this wrapper
+ * reports whether the dialog can claim it happened, by checking that the call neither
+ * threw nor left the draft untouched.
+ *
+ * The check is deliberately coarser than the real one: `referenceInChat` returns void,
+ * so "did it throw" is all this layer can observe for sure. A throw is a definite
+ * failure and is reported; a silent no-op cannot be distinguished from success here,
+ * which is why the dialog also states the destination (so a reader who sees nothing in
+ * that conversation knows where to look) rather than promising the chip exists.
  * @param ctx - the client context.
  * @param sessionId - target conversation.
  * @param path - absolute entry path.
  * @param isDir - folder versus file.
+ * @returns True when the insert completed without throwing.
  */
-function referenceInto(ctx: unknown, sessionId: string, path: string, isDir: boolean): void {
-  referenceInChat(ctx as never, sessionId, path, isDir)
+function referenceInto(ctx: unknown, sessionId: string, path: string, isDir: boolean): boolean {
+  try {
+    // `referenceInChat` is declared `void` but its implementation returns the result of
+    // `insertWorkspaceReference`, which answers `false` on every degraded path (no
+    // workspace for the session, path outside it, no conversation service, draft not
+    // ready). Discarding that boolean is why the old code could only ever report
+    // "no exception", so a silent no-op looked like success. Read it.
+    const answer = (referenceInChat as unknown as (
+      c: unknown, s: string, p: string, d: boolean,
+    ) => boolean | void)(ctx, sessionId, path, isDir)
+    return answer !== false
+  } catch {
+    return false
+  }
 }
+
+/**
+ * How long the new-conversation path waits for the session to become insertable.
+ *
+ * Two things have to happen after `startSession` returns, and neither is synchronous:
+ * the session appears in the catalog (so there is an id to target), and the workspace
+ * that owns it starts reporting it in `sessionIds` (which is how
+ * `insertWorkspaceReference` resolves the root the mention is relative to).
+ *
+ * The window is sized for "new conversation + workspace membership", not for the whole
+ * index: creating a conversation is a local registration, and the workspace bookkeeping
+ * that follows it is sub-second in practice. Four seconds is roughly two orders of
+ * magnitude of headroom over the observed latency.
+ *
+ * The trade-off is failure fidelity, not data safety. Running out of this budget makes
+ * the dialog report `refPickerFailed` (a visible error) rather than silently closing,
+ * so a too-short window is loud. A too-long window is the worse failure: the reader sits
+ * on a frozen dialog with no explanation while the reference is already impossible to
+ * deliver, so the constant must not be raised "just in case" without re-measuring.
+ */
+const NEW_SESSION_READY_TIMEOUT_MS = 4000
+
+/**
+ * How often that readiness is re-checked while the window is open.
+ *
+ * Polling rather than a subscription because the two conditions live on two different
+ * observables (the session catalog and the workspace list) and there is no combined
+ * "this session is insertable" signal to subscribe to. 100 ms keeps the visible delay
+ * below a frame budget's worth of human perception while costing at most 40 lookups.
+ */
+const NEW_SESSION_READY_POLL_MS = 100
 
 /**
  * Format one session's last activity the way the sidebar's session list does.
@@ -155,9 +221,46 @@ function formatWhen(value: number | undefined, locale: string | undefined): stri
 export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
   const { open, onClose, path, isDir, ctx, t, locale, selectedSessionId } = props
   const [term, setTerm] = useState('')
+
+  /**
+   * Which of the dialog's two steps is showing.
+   *
+   * `actions` is the landing surface: two named actions and nothing else. `sessions`
+   * is the search-and-pick step, reached only by choosing the conversation action.
+   * The split exists because opening straight into a hundred-row list buries the
+   * decision the dialog is actually asking ("where should this go?") under a list the
+   * reader has to read before they can answer it.
+   */
+  const [step, setStep] = useState<'actions' | 'sessions'>('actions')
+
+  /**
+   * Every entry this dialog will insert.
+   *
+   * A multi-row selection arrives as `targets`; the single-row case arrives as
+   * `path`/`isDir`. Normalised once here so the rest of the dialog has no branch on
+   * which shape it was opened with.
+   */
+  const entries = useMemo<readonly { path: string; isDir: boolean }[]>(
+    () => props.targets !== undefined && props.targets.length > 0 ? props.targets : [{ path, isDir }],
+    [props.targets, path, isDir],
+  )
   /** Bumped after a failed create so the row's error is not a stale one. */
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+
+  /**
+   * Land on the action list every time the dialog opens.
+   *
+   * Without this a closed-and-reopened dialog would resume on the search step, with
+   * the previous filter still typed -- the reader would have to press "back" to reach a
+   * surface they never asked to leave.
+   */
+  useEffect(() => {
+    if (!open) return
+    setStep('actions')
+    setTerm('')
+    setError(undefined)
+  }, [open])
 
   /**
    * Subscribe to the host's session catalog.
@@ -189,6 +292,24 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
       return undefined
     }
   }, [ctx])
+
+  /**
+   * The conversation the host currently has selected, when it names one.
+   *
+   * Read lazily from the page's own binding rather than as a prop, for the same reason
+   * `selectedSessionId` is a callback: the New Session flow creates a conversation
+   * asynchronously, so the value has to be sampled when the row is used, not when the
+   * dialog mounted. `undefined` hides the shortcut row rather than offering a
+   * destination whose name the dialog cannot state.
+   */
+  const current = useMemo(() => {
+    try {
+      const value = selectedSessionId?.()
+      return typeof value === 'string' && value !== '' ? value : undefined
+    } catch {
+      return undefined
+    }
+  }, [selectedSessionId, open])
 
   const [rows, setRows] = useState<readonly SessionRow[]>([])
 
@@ -246,9 +367,26 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
     })
   }, [rows, term])
 
-  /** Insert into one existing conversation and switch to it. */
+  /**
+   * Insert every selected entry into one existing conversation and switch to it.
+   *
+   * The failure is surfaced in the dialog rather than only logged: a click that
+   * appears to do nothing is the exact complaint this dialog exists to answer, so a
+   * refused insert has to say so. The dialog stays open on failure, which is what lets
+   * the reader retry or pick another conversation.
+   */
   const choose = useCallback((sessionId: string): void => {
-    referenceInto(ctx, sessionId, path, isDir)
+    const failed = entries.filter(entry => !referenceInto(ctx, sessionId, entry.path, entry.isDir))
+    if (failed.length > 0 && failed.length === entries.length) {
+      // Nothing landed: say so and keep the dialog open.
+      setError(t('refPickerFailed'))
+      return
+    }
+    if (failed.length > 0) {
+      // A partial insert is still a problem the reader must know about, but the dialog
+      // closes because something did arrive; the page reports the rest.
+      setError(t('refPickerFailed'))
+    }
     // Navigate after inserting: the draft belongs to that session, and showing it
     // is what lets the reader see the chip they just asked for.
     try {
@@ -263,7 +401,7 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
     }
     props.onReferenced?.(sessionId)
     onClose()
-  }, [ctx, isDir, onClose, path, props])
+  }, [ctx, entries, onClose, props, t])
 
   /** Create a fresh conversation, put the reference in it, and go there. */
   const createNew = useCallback((): void => {
@@ -281,31 +419,63 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
         // create does not.
         if (typeof workspace?.startSession === 'function') {
           workspace.startSession(workspaceId)
-          // The conversation is created asynchronously and its id is not returned.
-          // Resolve it from the catalog on the next tick, then insert: the draft
-          // service needs a session scope, so inserting before it exists would
-          // degrade to the no-op path and lose the reference.
-          setTimeout(() => {
+
+          // The conversation is created asynchronously and its id is not returned, so
+          // it has to be discovered. Two things must both be true before the insert can
+          // land, and neither is guaranteed on the next tick:
+          //
+          //   1. the catalog lists the new session (there is an id to target), and
+          //   2. `insertWorkspaceReference` can resolve the workspace that OWNS it --
+          //      it looks the session up in `workspace.sessionIds`, and a session that
+          //      was created a moment ago is not in that list yet.
+          //
+          // Waiting only one tick was why "new conversation" produced no chip: the
+          // insert ran while condition (2) was still false, the mention resolved to
+          // `undefined`, and the failure was a logged no-op. Polling both conditions
+          // and reporting a timeout is what turns that silence into a message.
+          // One deadline for the whole attempt, computed once. Recomputing it per
+          // retry would push it forward forever and the window would never expire --
+          // the "report a failure" branch would become unreachable and the dialog
+          // would sit there forever, which is the silence this whole path exists to
+          // remove. `isExpired`/`decideReadiness` are the tested form of that rule.
+          const deadline = deadlineFrom(Date.now(), NEW_SESSION_READY_TIMEOUT_MS)
+          const insertWhenReady = (): void => {
+            const expired = isExpired(Date.now(), deadline)
+            let target: string | undefined
             try {
               const snapshot = sessions?.list?.getSnapshot()
               const ids = snapshot?.ids ?? []
-              // Ask the page's own session binding which conversation the New
-              // Session flow just selected. It is the same observable the file tree
-              // is scoped by, so it cannot disagree with what is on screen.
               const selected = selectedSessionId?.()
-              const target = typeof selected === 'string' && selected !== ''
+              target = typeof selected === 'string' && selected !== ''
                 ? selected
                 : ids[ids.length - 1]
-              if (typeof target === 'string' && target !== '') {
-                referenceInto(ctx, target, path, isDir)
-                props.onReferenced?.(target)
-              }
             } catch {
-              // Best effort: the conversation exists even if the reference could
-              // not be inserted, and the reader can drop it in by hand.
+              target = undefined
             }
+            const hasTarget = typeof target === 'string' && target !== ''
+            const landed = hasTarget
+              ? entries.filter(entry => referenceInto(ctx, target as string, entry.path, entry.isDir))
+              : []
+            const inserted = landed.length === entries.length
+            const action = decideReadiness({ hasTarget, inserted }, expired)
+            if (action === 'retry') {
+              window.setTimeout(insertWhenReady, NEW_SESSION_READY_POLL_MS)
+              return
+            }
+            if (action === 'failed-no-target') {
+              setError(t('refPickerNoTarget'))
+              onClose()
+              return
+            }
+            if (action === 'failed-insert') {
+              // Out of time with nothing inserted: say so instead of closing on a
+              // silent no-op.
+              setError(t('refPickerFailed'))
+            }
+            props.onReferenced?.(target as string)
             onClose()
-          }, 0)
+          }
+          window.setTimeout(insertWhenReady, 0)
           return
         }
         // No navigator (an older or stripped host): create through the controller.
@@ -313,7 +483,8 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
         // the fallback that still puts the reference somewhere.
         const id = await sessions?.create?.({ ...(workspaceId === undefined ? {} : { workspaceId }) })
         if (typeof id === 'string' && id !== '') {
-          referenceInto(ctx, id, path, isDir)
+          const landed = entries.filter(entry => referenceInto(ctx, id, entry.path, entry.isDir))
+          if (landed.length === 0) setError(t('refPickerFailed'))
           props.onReferenced?.(id)
         } else {
           setError(t('refPickerNoTarget'))
@@ -325,67 +496,92 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
         setBusy(false)
       }
     })()
-  }, [ctx, isDir, onClose, path, props, sessions, t, workspaceId])
+  }, [ctx, entries, onClose, props, sessions, t, workspaceId])
+
+  /**
+   * One row of the landing step: a name and nothing else.
+   *
+   * No subtitle and no explanation. The product rule is that a control states its
+   * name; a sentence underneath it is documentation, and documentation in a menu is
+   * read once and then in the way for every subsequent use.
+   */
+  const actionRow = (label: string, onSelect: () => void, disabled = false): ReactNode => (
+    <li>
+      <MenuItemButton disabled={disabled} onSelect={onSelect}>
+        <span className={styles.rowName}>{label}</span>
+      </MenuItemButton>
+    </li>
+  )
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={t('refPickerTitle')}
+      title={entries.length > 1
+        ? t('refPickerBatchTitle').replace('{n}', String(entries.length))
+        : t('refPickerTitle')}
       closeLabel={t('cancel')}
-      description={t('refPickerHint')}
     >
       <div className={styles.body}>
-        <Input
-          value={term}
-          placeholder={t('refPickerSearch')}
-          aria-label={t('refPickerSearch')}
-          onChange={(event) => { setTerm(event.target.value) }}
-          // The modal focuses the control carrying this marker, which is the
-          // primitive's own way to land the caret in the search box without a
-          // React ref (the Input wrapper does not forward one).
-          data-modal-autofocus
-        />
+        {step === 'actions' && (
+          <ul className={styles.list} aria-label={t('refPickerTitle')}>
+            {/* New conversation: creates one, and the reference is inserted into its
+                draft through the same `referenceInChat` contract the explorer uses, so
+                the composer shows the product's own `@` chip rather than text. */}
+            {actionRow(busy ? t('refPickerCreating') : t('refPickerNew'), createNew, busy)}
+            {/* The two-step door. Choosing this is what reveals the search field and
+                the conversation list -- the dialog does not open with a hundred rows. */}
+            {actionRow(t('refPickerTitle'), () => { setStep('sessions') }, busy)}
+          </ul>
+        )}
 
-        {/* The new-conversation door is the first row rather than a footer button:
-            "start a new one" is one of the two answers to the question the dialog
-            asks, and putting it at the top is what makes it comparable with the
-            list instead of looking like a dialog-level action. */}
-        <ul className={styles.list} aria-label={t('refPickerTitle')}>
-          <li>
-            <MenuItemButton disabled={busy} onSelect={createNew}>
-              <span className={styles.rowName}>{busy ? t('refPickerCreating') : t('refPickerNew')}</span>
-              <span className={styles.rowHint}>{t('refPickerNewHint')}</span>
-            </MenuItemButton>
-          </li>
+        {step === 'sessions' && (
+          <>
+            <Input
+              value={term}
+              placeholder={t('refPickerSearch')}
+              aria-label={t('refPickerSearch')}
+              onChange={(event) => { setTerm(event.target.value) }}
+              data-modal-autofocus
+            />
 
-          {visible.length === 0 && (
-            <li className={styles.empty}>
-              {/* Two different empties, stated differently: nothing matches the
-                  filter is the reader's own typing, while an empty catalog means
-                  there is nothing to choose from yet. */}
-              {term.trim() === '' ? t('refPickerNoSessions') : t('refPickerNoMatch')}
-            </li>
-          )}
+            <ul className={styles.list} aria-label={t('refPickerSearch')}>
+              {visible.length === 0 && (
+                <li className={styles.empty}>
+                  {/* Nothing matches the typing versus an empty catalog: the reader's
+                      own filter earns a different sentence from a missing catalog. */}
+                  {term.trim() === '' ? t('refPickerNoSessions') : t('refPickerNoMatch')}
+                </li>
+              )}
 
-          {visible.map((row) => {
-            const name = row.displayTitle ?? row.title ?? row.id
-            const when = formatWhen(row.updatedAt, locale)
-            return (
-              <li key={row.id}>
-                <MenuItemButton onSelect={() => { choose(row.id) }}>
-                  <span className={styles.rowName}>{name}</span>
-                  {when !== '' && <span className={styles.rowWhen}>{when}</span>}
-                </MenuItemButton>
-              </li>
-            )
-          })}
-        </ul>
+              {visible.map((row) => {
+                const name = row.displayTitle ?? row.title ?? row.id
+                const when = formatWhen(row.updatedAt, locale)
+                return (
+                  <li key={row.id}>
+                    <MenuItemButton onSelect={() => { choose(row.id) }}>
+                      <span className={styles.rowName}>{name}</span>
+                      {/* The timestamp is data about the conversation, not a sentence
+                          explaining the control, so it stays. */}
+                      {when !== '' && <span className={styles.rowWhen}>{when}</span>}
+                    </MenuItemButton>
+                  </li>
+                )
+              })}
+            </ul>
+          </>
+        )}
 
         {error !== undefined && <p className={styles.error} role="alert">{error}</p>}
       </div>
 
       <div className={styles.footer}>
+        {/* One control, two jobs: on the search step it goes back to the action list
+            (so the step is not a trap); on the landing step there is nothing behind it,
+            so it closes. Both are labelled with the action they perform. */}
+        {step === 'sessions' && (
+          <Button variant="ghost" onClick={() => { setStep('actions') }}>{t('refPickerBack')}</Button>
+        )}
         <Button variant="ghost" onClick={onClose}>{t('cancel')}</Button>
       </div>
     </Modal>

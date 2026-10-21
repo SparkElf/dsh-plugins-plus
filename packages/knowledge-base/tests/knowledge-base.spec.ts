@@ -57,6 +57,8 @@ import {
 import { RemoteError, originFrom, sshManagerRunner } from '../src/remote.ts'
 // The wizard's visibility gate is a pure function, so it is tested by calling it.
 import { hasDeployTarget } from '../src/client/deployTarget.ts'
+import { sortAuditRows } from '../src/client/auditPaging.ts'
+import { DEFAULT_PAGE_SIZE, paginate } from '../src/client/paging.ts'
 // The outline's heading extraction is pure, so it is tested by calling it. The
 // rendering rules around it (the two-heading floor, the observer) are asserted
 // against the source, since neither has a route to drive from node.
@@ -408,8 +410,11 @@ describe('host plugin', () => {
     }) as unknown as typeof fetch
     const { ctx } = fakeHost({ token: 't', fetchImpl })
 
+    // `toMatchObject` rather than `toEqual`: a user row also carries `username` (and
+    // `roleCodes` when the directory reports roles), which the person view needs to
+    // attribute inherited access. The id/label pair is what this test is about.
     await expect(fetchPrincipals(ctx as never, CONFIG, 'user'))
-      .resolves.toEqual([{ id: 'u-1', label: 'Alice' }])
+      .resolves.toMatchObject([{ id: 'u-1', label: 'Alice' }])
     await expect(fetchPrincipals(ctx as never, CONFIG, 'role'))
       .resolves.toEqual([{ id: '运营人员', label: '运营人员' }])
     await expect(fetchPrincipals(ctx as never, CONFIG, 'department'))
@@ -5094,13 +5099,21 @@ describe('the @-mention target picker', () => {
 
   it('no longer drops the click when no conversation is open', async () => {
     const source = await read('KnowledgePanel.tsx')
-    // The old one-line early return is gone from every `@` handler; each one now
-    // opens the picker instead. Count the handlers that mention `setReferencing`.
-    const handlers = source.match(/onReference(?:File)?=\{/gu) ?? []
+    // Every `@` handler must open the picker, whether or not a conversation is open.
+    // They all route through `askReferenceTarget`, which is the single place that sets
+    // the dialog state -- so a handler cannot gate on `sessionId` and return instead.
+    const handlers = source.match(/onReference(?:File)?=/gu) ?? []
     expect(handlers.length).toBeGreaterThanOrEqual(4)
     for (const match of source.matchAll(/onReference(?:File)?=\{[\s\S]{0,400}?\}\}/gu)) {
-      expect(match[0]).toMatch(/setReferencing/u)
+      expect(match[0]).toMatch(/askReferenceTarget\(/u)
+      // The old shape: a `sessionId === undefined` guard that dropped the click.
+      expect(match[0]).not.toMatch(/sessionId === undefined/u)
     }
+
+    // The helper itself always sets the dialog state, with no session gate.
+    const helper = source.match(/const askReferenceTarget = \([\s\S]{0,600}?\n  \}/u)?.[0] ?? ''
+    expect(helper).toMatch(/setReferencing\(/u)
+    expect(helper).not.toMatch(/sessionId/u)
   })
 
   it('renders a primitive Modal rather than a native prompt or a hand-built layer', async () => {
@@ -5115,10 +5128,54 @@ describe('the @-mention target picker', () => {
     expect(source).not.toMatch(/\bprompt\(/u)
   })
 
-  it('reuses the shared referenceInChat contract instead of a second write path', async () => {
-    const source = await read('KnowledgeReferencePicker.tsx')
-    expect(source).toMatch(/from 'dsh-better-sidebar\/src\/client\/reference-in-chat\.ts'/u)
-    expect(source).toMatch(/referenceInChat\(/u)
+  /**
+   * The insertion must have exactly ONE owner.
+   *
+   * The constraint is real and predates this split: the picker and the sidebar explorer
+   * share `referenceInChat`, which owns the workspace-relative mention spelling and the
+   * degrade-to-no-op policy. A second write path would let the two surfaces disagree
+   * about where a `@` reference points.
+   *
+   * What moved is WHERE the one call lives. Inserting used to happen on the page, which
+   * is also why the button looked dead: the page's ctx never had the `sessions`
+   * injection that function needs, and its failure was swallowed into a `console.warn`.
+   * The call now lives only in the picker, which is the only place that knows which
+   * conversation the reader chose -- so these assertions follow the code rather than
+   * guarding a line that no longer exists.
+   */
+  it('keeps referenceInChat as the single write path, owned by the picker', async () => {
+    const picker = await read('KnowledgeReferencePicker.tsx')
+    const panel = await read('KnowledgePanel.tsx')
+    const listing = await read('KnowledgeListing.tsx')
+    const home = await read('KnowledgeHome.tsx')
+
+    // The picker imports the shared contract and is the one place that invokes it.
+    // The invocation is cast so its boolean can be read (the declared type is `void`
+    // while the implementation answers false on every degraded path), which is why the
+    // name is matched rather than a bare call.
+    expect(picker).toMatch(/from 'dsh-better-sidebar\/src\/client\/reference-in-chat\.ts'/u)
+    expect(picker).toMatch(/referenceInChat as unknown as/u)
+
+    // No surface that merely OFFERS the reference may write it itself: each must route
+    // through the picker, so none can invent a spelling or swallow a failure.
+    for (const source of [panel, listing, home]) {
+      expect(source).not.toMatch(/referenceInChat\(/u)
+      expect(source).not.toMatch(/from 'dsh-better-sidebar\/src\/client\/reference-in-chat\.ts'/u)
+    }
+  })
+
+  it('routes every reference surface through the picker instead of a direct insert', async () => {
+    // The page's own `onReference` handlers must all reach `askReferenceTarget`, which
+    // always opens the dialog. A handler that inserts directly is the bug this guards:
+    // with a conversation open it returned before the dialog state was set, so the
+    // button did nothing at all.
+    const panel = await read('KnowledgePanel.tsx')
+    const handlers = panel.match(/onReference=\{\(path, isDir\)[^}]*\}/gu) ?? []
+    expect(handlers.length).toBeGreaterThan(0)
+    for (const handler of handlers) {
+      expect(handler).toMatch(/askReferenceTarget\(/u)
+      expect(handler).not.toMatch(/referenceInChat/u)
+    }
   })
 
   it('offers a new-conversation row and lists existing conversations', async () => {
@@ -5145,6 +5202,55 @@ describe('the @-mention target picker', () => {
     // there is nothing to choose from yet. Two different sentences.
     expect(source).toMatch(/refPickerNoMatch/u)
     expect(source).toMatch(/refPickerNoSessions/u)
+  })
+
+  /**
+   * The Share tab's honesty rules, held in source because they are about what the UI
+   * must NOT claim. A runtime test would need a browser; the constraint is structural:
+   * the inbound block has no arrow, and no grantor field is invented.
+   */
+  it('states the inbound direction without inventing a sharer', async () => {
+    const home = await read('KnowledgeHome.tsx')
+    // "Shared with me" uses the fixed phrase; it does not interpolate a person.
+    expect(home).toMatch(/c\('shareReceivedRelation'\)/u)
+    expect(home).not.toMatch(/shareReceivedRelation'\).replace/u)
+    // And no grantor-shaped field is read anywhere on this surface.
+    expect(home).not.toMatch(/grantedBy|sharedBy|grantor/u)
+  })
+
+  it('names the audience for the outbound direction from the grant itself', async () => {
+    const home = await read('KnowledgeHome.tsx')
+    // The outbound relation substitutes the resolved audience, which is real data.
+    expect(home).toMatch(/c\('shareGivenRelation'\)\.replace\('\{audience\}'/u)
+  })
+
+  it('falls back to the principal id, not to a placeholder, and uses the unknown word narrowly', async () => {
+    const relations = await read('shareRelations.ts')
+    // The audience helper returns the raw id when the directory has no entry.
+    expect(relations).toMatch(/return grant\.principalId/u)
+    // The picker of the "unknown" wording lives in the component, guarded by an empty
+    // audience rather than by a failed lookup.
+    const home = await read('KnowledgeHome.tsx')
+    expect(home).toMatch(/row\.audience === ''\s*\?\s*props\.unknownAudience/u)
+  })
+
+  it('pages each direction separately through the shared paging helper', async () => {
+    const home = await read('KnowledgeHome.tsx')
+    // Two independent pager states, and the shared helper does the slicing.
+    expect(home).toMatch(/const \[receivedPage, setReceivedPage\]/u)
+    expect(home).toMatch(/const \[givenPage, setGivenPage\]/u)
+    expect(home).toMatch(/from '\.\/paging\.ts'/u)
+    expect(home).toMatch(/paginate\(/u)
+    // Two blocks, each with its own pager props.
+    const blocks = home.match(/<ShareBlock/gu) ?? []
+    expect(blocks.length).toBe(2)
+  })
+
+  it('reads grants from the existing route rather than a new endpoint', async () => {
+    const home = await read('KnowledgeHome.tsx')
+    expect(home).toMatch(/KB_API\.grants/u)
+    // No bespoke sharing route was introduced.
+    expect(home).not.toMatch(/KB_API\.share[A-Z]/u)
   })
 
   it('declares every string it uses in both locales', async () => {
@@ -5211,17 +5317,23 @@ describe('the deployment wizard only appears where a step can run', () => {
     expect(source).toMatch(/KB_API\.deployHosts/u)
   })
 
-  it('renders one explanation instead of the dead controls', async () => {
+  it('renders nothing at all when no step could run', async () => {
     const source = await settings()
-    const localBranch = source.slice(source.indexOf('if (!hasRemoteTarget)'))
     // The early return sits ABOVE the wizard's markup, so the step list is
     // unreachable when the branch is taken.
     expect(source.indexOf('if (!hasRemoteTarget)')).toBeLessThan(source.indexOf('{steps.map('))
-    expect(localBranch).toMatch(/data-testid="kb-deploy-local-note"/u)
-    // Text only: no link and no disclosure, because the plugin owns no documentation
-    // URL and a control here would be one more thing that cannot act.
-    expect(localBranch).not.toMatch(/<a\b/u)
-    expect(localBranch).not.toMatch(/<details/u)
+    // The branch returns null rather than a heading over an explanation: a lone
+    // `Deployment` title above empty space promises controls that are not there.
+    const localBranch = source.slice(
+      source.indexOf('if (!hasRemoteTarget)'),
+      source.indexOf('return (\n    <div className={styles.wizard}>'),
+    )
+    expect(localBranch).toMatch(/if \(!hasRemoteTarget\) return null/u)
+    // No heading, no sentence, no control survives in that branch.
+    expect(localBranch).not.toMatch(/groupTitle/u)
+    expect(localBranch).not.toMatch(/data-testid="kb-deploy-local-note"/u)
+    // The heading still exists for the remote shape, which is where it has content.
+    expect(source).toMatch(/<h3 className=\{styles\.groupTitle\}>\{t\('deploy'\)\}<\/h3>/u)
   })
 
   it('does not fetch the step plan when the block will not draw it', async () => {
@@ -6268,6 +6380,128 @@ describe('the MinerU service address is a setting a reader can change', () => {
   })
 })
 
+describe('the settings section shows only controls and dynamic state', () => {
+  const settings = async (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeSettingsSection.tsx', import.meta.url), 'utf8')
+
+  /**
+   * The reader struck these four explanations out of the rendered page. Deleting the
+   * sentence is not enough -- an unreferenced key is dead weight in two dictionaries --
+   * so this pins both halves: the copy is gone from the component, and no surviving
+   * heading was left standing over nothing.
+   */
+  it('renders none of the struck-out explanations', async () => {
+    const source = await settings()
+    for (const key of [
+      'description', 'storageModeLocalHint', 'storageModeRemoteHint',
+      'deployLocalOnly', 'deployAboutRemote', 'deployAboutRemoteBody',
+      'settingsMineruHint',
+    ]) {
+      expect(source).not.toContain("t('" + key + "')")
+    }
+  })
+
+  it('keeps the dynamic status text that carries information', async () => {
+    const source = await settings()
+    // How the address in effect was arrived at is state, not explanation, so it stays.
+    expect(source).toContain("t('settingsMineruDerived')")
+    expect(source).toContain("t('settingsMineruExplicit')")
+  })
+
+  it('leaves no heading standing over an empty block', async () => {
+    const source = await settings()
+    // Every group heading is followed by a control or a value within a short distance.
+    // The one that used to head a deleted explanation (`Deployment`'s local shape) now
+    // returns before its heading is drawn at all.
+    const localBranch = source.slice(
+      source.indexOf('if (!hasRemoteTarget)'),
+      source.indexOf('return (\n    <div className={styles.wizard}>'),
+    )
+    expect(localBranch).toMatch(/return null/u)
+    expect(localBranch).not.toMatch(/groupTitle/u)
+  })
+})
+
+describe('the MinerU field shows the address in effect, not a blank', () => {
+  const settings = async (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeSettingsSection.tsx', import.meta.url), 'utf8')
+
+  /**
+   * The reported defect: with nothing stored the deployment derives a working address,
+   * and the field rendered empty under a "leave it empty to derive" placeholder. The
+   * value existed; the page just did not show it.
+   */
+  it('falls back to the derived address when nothing is stored', async () => {
+    const source = await settings()
+    // The input's value is the stored address when there is one, else the derived one.
+    expect(source).toMatch(/mineruDraft \?\? \(mineru\.stored !== '' \? mineru\.stored : mineru\.derived\)/u)
+  })
+
+  it('takes the derived address from the Host rather than recomputing it', async () => {
+    const source = await settings()
+    // The port lives in the deployment config, which the browser never sees; a second
+    // copy of the derivation here would drift from `mineruUrlFor`.
+    expect(source).toMatch(/mineruUrl\?: string/u)
+    expect(source).toMatch(/typeof reply\.mineruUrl === 'string'/u)
+  })
+
+  it('does not send the derived value back as an explicit setting', async () => {
+    const source = await settings()
+    // Saving an untouched field would freeze today's derivation into a stored address.
+    // The write is gated on the draft actually differing from what is stored.
+    expect(source).toMatch(/const mineruChanged = mineruDraft !== undefined && mineru !== undefined && mineruDraft !== mineru\.stored/u)
+    expect(source).toMatch(/if \(mineruChanged\) \{/u)
+  })
+
+  it('reports the Host-derived address in the settings route', async () => {
+    const host = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    const branch = host.slice(host.indexOf("case 'settings.get'"))
+    expect(branch.slice(0, 2600)).toMatch(/mineruUrlFor\(config\)/u)
+    // Sent only when it resolves: an undefined address is left out rather than shown
+    // as the string "undefined".
+    expect(branch.slice(0, 2600)).toMatch(/mineruUrl === undefined \? \{\} : \{ mineruUrl \}/u)
+  })
+})
+
+describe('the whole settings block has one save', () => {
+  const settings = async (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeSettingsSection.tsx', import.meta.url), 'utf8')
+
+  it('submits both groups from a single control', async () => {
+    const source = await settings()
+    // One handler, both write routes.
+    expect(source).toMatch(/const save = useCallback/u)
+    expect(source).toMatch(/KB_API\.configSet/u)
+    expect(source).toMatch(/KB_API\.settingsSet/u)
+    // And exactly one button wired to it.
+    const wired = source.match(/onClick=\{\(\) => \{ void save\(\) \}\}/gu) ?? []
+    expect(wired).toHaveLength(1)
+  })
+
+  it('keeps the address write from flipping the review switch', async () => {
+    const source = await settings()
+    // `settings.set` replaces one record that also holds the review flag; this page does
+    // not show that flag, so it must send the stored value and leave it alone.
+    expect(source).toMatch(/reviewRequired: reviewRequiredRef\.current/u)
+    expect(source).toMatch(/reviewRequiredRef\.current = /u)
+  })
+
+  it('still refuses an impossible port before the round trip', async () => {
+    const source = await settings()
+    expect(source).toMatch(/!Number\.isInteger\(port\) \|\| port <= 0 \|\| port > 65_535/u)
+    expect(source).toContain("t('saveBadPort')")
+  })
+
+  it('reports a partial failure instead of claiming success', async () => {
+    const source = await settings()
+    // The two writes can fail apart; a failed half must be named rather than reported
+    // as a clean save.
+    expect(source).toMatch(/storageFailure/u)
+    expect(source).toMatch(/settingsFailure/u)
+    expect(source).toMatch(/if \(storageFailure !== undefined \|\| settingsFailure !== undefined\)/u)
+  })
+})
+
 describe('the settings write keeps older callers working', () => {
   /**
    * `settings.set` gained a field. An older client that sends only the review toggle must
@@ -6310,8 +6544,13 @@ describe('the settings write keeps older callers working', () => {
     expect(section).toMatch(/id="kb-mineru-base-url"/u)
     expect(section).toMatch(/KB_API\.settingsGet/u)
     expect(section).toMatch(/KB_API\.settingsSet/u)
-    // 保存必须由显式动作提交，而不是每次按键就写盘。
-    expect(section).toMatch(/saveMineru/u)
+    // 保存必须由显式动作提交，而不是每次按键就写盘。两个分组的按钮已合并成一个，
+    // 所以断言的是那一个动作：它同时提交存储设置与地址。
+    expect(section).toMatch(/const save = useCallback/u)
+    expect(section).toMatch(/KB_API\.configSet/u)
+    expect(section).toMatch(/KB_API\.settingsSet/u)
+    // 整块只有一个保存按钮。
+    expect(section.match(/onClick=\{\(\) => \{ void save\(\) \}\}/gu) ?? []).toHaveLength(1)
     // 没授权的人能看到值但改不了。
     expect(section).toMatch(/disabled=\{!mineru\.canEdit/u)
 
@@ -6325,9 +6564,111 @@ describe('the settings write keeps older callers working', () => {
     // must pass the caller's own address to `extractBeside`.
     const source = await settingsSource()
     expect(source).toMatch(/export async function extractBeside\(\s*config: Config,\s*relPath: string,\s*mineruUrl\?: string,/u)
-    expect(source).toMatch(/extractBeside\(config, relPath, uploadSettings\.mineruBaseUrl\)/u)
+    // The call site names the caller's stored address; the local variable was renamed
+    // when the upload path moved onto the extraction queue, so match the argument rather
+    // than one spelling of it.
+    expect(source).toMatch(/extractBeside\(config, relPath, [A-Za-z.]*mineruBaseUrl\)/u)
     // And the override outranks the deployment answer inside the extractor.
     const body = source.slice(source.indexOf('export async function extractBeside'))
     expect(body.slice(0, 1400)).toMatch(/mineruUrl !== undefined && mineruUrl !== '' \? mineruUrl : mineruUrlFor\(config\)/u)
+  })
+})
+
+describe('audit trail ordering and paging', () => {
+  /**
+   * The ordering is a correctness rule, not a presentation detail. The Host appends
+   * newest-last, and the table used to draw the array in the order it arrived -- which
+   * "looked right" only because of that accident. These cases assert the order the
+   * reader is shown is COMPUTED from the timestamps.
+   */
+  const row = (at: string, relPath: string, action = 'create', toRelPath?: string) =>
+    ({ at, relPath, action, ...(toRelPath === undefined ? {} : { toRelPath }) })
+
+  it('orders newest first regardless of the array it was handed', () => {
+    const given = [
+      row('2026-10-01T10:00:00.000Z', 'oldest.md'),
+      row('2026-10-03T10:00:00.000Z', 'newest.md'),
+      row('2026-10-02T10:00:00.000Z', 'middle.md'),
+    ]
+    expect(sortAuditRows(given).map(r => r.relPath)).toEqual(['newest.md', 'middle.md', 'oldest.md'])
+    // The input is not mutated: the same array re-sorts to the same answer.
+    expect(sortAuditRows(given).map(r => r.relPath)).toEqual(['newest.md', 'middle.md', 'oldest.md'])
+  })
+
+  it('ranks by instant, not by string shape, across timezone forms', () => {
+    // Lexical comparison would put "+02:00" after "Z" regardless of the real instant.
+    const given = [
+      row('2026-10-01T12:00:00+02:00', 'a.md'), // 10:00Z
+      row('2026-10-01T11:00:00Z', 'b.md'), // 11:00Z, later
+    ]
+    expect(sortAuditRows(given).map(r => r.relPath)).toEqual(['b.md', 'a.md'])
+  })
+
+  it('breaks ties deterministically so paging cannot drop or repeat a row', () => {
+    // A batch writes several rows with one identical instant. Without a total order
+    // the platform sort may order equal keys either way, and a reader paging forward
+    // would then see a row twice or never.
+    const sameInstant = '2026-10-05T08:00:00.000Z'
+    const given = [
+      row(sameInstant, 'zeta.md', 'create'),
+      row(sameInstant, 'alpha.md', 'move', 'to/b.md'),
+      row(sameInstant, 'alpha.md', 'move', 'to/a.md'),
+      row(sameInstant, 'alpha.md', 'create'),
+    ]
+    const first = sortAuditRows(given)
+    // Path, then action, then destination: a total order.
+    expect(first.map(r => [r.relPath, r.action, r.toRelPath ?? ''])).toEqual([
+      ['alpha.md', 'create', ''],
+      ['alpha.md', 'move', 'to/a.md'],
+      ['alpha.md', 'move', 'to/b.md'],
+      ['zeta.md', 'create', ''],
+    ])
+    // Shuffling the input cannot change the output order.
+    const shuffled = [given[2], given[0], given[3], given[1]]
+    expect(sortAuditRows(shuffled)).toEqual(first)
+  })
+
+  it('sinks an unparseable timestamp instead of floating it to the top', () => {
+    const given = [
+      row('not-a-date', 'broken.md'),
+      row('2026-10-01T10:00:00.000Z', 'real.md'),
+    ]
+    expect(sortAuditRows(given).map(r => r.relPath)).toEqual(['real.md', 'broken.md'])
+  })
+
+  it('pages a list and reports the numbers the pager draws', () => {
+    const rows = Array.from({ length: 45 }, (_, index) => row(`2026-10-01T10:${String(index).padStart(2, '0')}:00.000Z`, `f${String(index)}.md`))
+    const first = paginate(rows, 1, 20)
+    expect([first.page, first.pageCount, first.total, first.rows.length]).toEqual([1, 3, 45, 20])
+    const last = paginate(rows, 3, 20)
+    expect([last.page, last.pageCount, last.rows.length]).toEqual([3, 3, 5])
+  })
+
+  it('clamps a page number that the list no longer has', () => {
+    // A re-read or a filter can shrink the list under a reader sitting on page 3;
+    // rendering an empty page 3 of 1 is the "page 1 of 0" bug in another form.
+    const rows = Array.from({ length: 5 }, (_, index) => row('2026-10-01T10:00:00.000Z', `f${String(index)}.md`))
+    const beyond = paginate(rows, 9, 20)
+    expect([beyond.page, beyond.pageCount, beyond.rows.length]).toEqual([1, 1, 5])
+    // Below range clamps up, and a garbage page number lands on the first page.
+    expect(paginate(rows, 0, 20).page).toBe(1)
+    expect(paginate(rows, -3, 20).page).toBe(1)
+    expect(paginate(rows, Number.NaN, 20).page).toBe(1)
+    expect(paginate(rows, 2.7, 20).page).toBe(1)
+  })
+
+  it('never reports page 0 of 0 for an empty list', () => {
+    const empty = paginate([], 1, 20)
+    expect([empty.page, empty.pageCount, empty.total, empty.rows.length]).toEqual([1, 1, 0, 0])
+    // And a nonsense size falls back rather than dividing by zero.
+    const fallback = paginate(Array.from({ length: 3 }, () => row('2026-10-01T10:00:00.000Z', 'x')), 1, 0)
+    expect(fallback.rows.length).toBe(3)
+  })
+
+  it('slices a single page exactly at the boundary', () => {
+    const twenty = Array.from({ length: 20 }, (_, index) => row('2026-10-01T10:00:00.000Z', `f${String(index)}.md`))
+    const one = paginate(twenty, 1, 20)
+    // Exactly one full page: the pager shows no navigation, because pageCount is 1.
+    expect([one.pageCount, one.rows.length]).toEqual([1, 20])
   })
 })

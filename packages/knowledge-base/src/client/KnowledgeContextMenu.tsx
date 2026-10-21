@@ -27,6 +27,7 @@ import { useCallback, useState } from 'react'
 import { Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import { KnowledgeShareDialog, type ShareDialogCopy } from './KnowledgeShareDialog.tsx'
+import { batchLabel, batchRowsFor, referenceTargetsFor } from './referenceTargets.ts'
 
 /** One row the menu can act on. */
 export interface ContextTarget {
@@ -40,10 +41,15 @@ export interface ContextTarget {
 
 /** The clipboard the copy/cut entries fill. */
 export interface TreeClipboard {
-  /** The path that was copied or cut. */
-  relPath: string
-  /** Its display name, so the paste label can name the entry. */
-  name: string
+  /**
+   * Every entry taken, in the order they were selected.
+   *
+   * A list rather than one path because a multi-row copy is a normal gesture and the
+   * paste has to put all of them somewhere. A single-row copy is a one-element list,
+   * which is why there is no separate single-row clipboard: one shape means the paste
+   * path cannot be right for one row and wrong for five.
+   */
+  entries: readonly { relPath: string; name: string }[]
   /** True when the source is removed on paste (cut); false for a copy request. */
   cut: boolean
 }
@@ -52,6 +58,18 @@ export interface TreeClipboard {
 export interface KnowledgeContextMenuProps {
   /** The row the menu is open on, or null when closed. */
   target: ContextTarget | null
+  /**
+   * Every row the menu acts on, when the reader right-clicked inside a multi-selection.
+   *
+   * Absent or shorter than two means single-row behaviour, which is why the component
+   * stays one menu rather than gaining a batch twin: the entries, the handlers and the
+   * clipboard are identical, and only the LABELS change to say how many rows they will
+   * touch. A second menu is how the two surfaces drifted apart before.
+   *
+   * `target` is still the row under the pointer -- it anchors the menu and supplies the
+   * name used by rename/download, which have no batch meaning.
+   */
+  selection?: readonly ContextTarget[]
   /** Where the pointer was, in viewport coordinates. */
   at: { x: number; y: number } | null
   /** Copy resolver for this package's namespace. */
@@ -70,8 +88,13 @@ export interface KnowledgeContextMenuProps {
   onFavorite: (path: string, favorite: boolean) => void
   /** Whether this path is currently favourited. */
   favorite: boolean
-  /** Insert a reference to this path into the conversation. */
-  onReference: (path: string, isDir: boolean) => void
+  /**
+   * Insert references into a conversation, via the picker.
+   *
+   * `targets` is present only for a multi-row selection; the single-row case passes the
+   * one path. The picker renders one dialog either way.
+   */
+  onReference: (path: string, isDir: boolean, targets?: readonly ContextTarget[]) => void
   /** Called after a rename succeeds, so the page reloads the tree. */
   onRenamed: () => void
   /** Called after a delete-to-trash succeeds, so the page reloads the tree. */
@@ -204,6 +227,81 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
   }
 
   /** Remove the row into the caller's own trash. */
+  /**
+   * Run one request per row and report how many failed.
+   *
+   * Sequential rather than `Promise.all`: these are writes to a shared export, and
+   * firing two hundred of them at once turns one slow request into a stalled tree. The
+   * count is what the caller reports -- a batch that half-succeeded must not claim it
+   * fully worked, which is the failure mode that made the old single-row paths look
+   * fine while doing nothing.
+   */
+  const forEachRow = async (rows: readonly ContextTarget[], run: (row: ContextTarget) => Promise<unknown>): Promise<number> => {
+    let failed = 0
+    for (const row of rows) {
+      try {
+        await run(row)
+      } catch {
+        failed += 1
+      }
+    }
+    return failed
+  }
+
+  /** Favourite or unfavourite every selected row. */
+  const favoriteMany = (favorite: boolean): void => {
+    // Client state, so this is synchronous: the store coalesces its own write. Doing it
+    // through one call per row keeps the single-row path unchanged.
+    for (const entry of batch) props.onFavorite(entry.relPath, favorite)
+    onClose()
+  }
+
+  /** Delete every selected row to the trash, then reload once. */
+  const removeMany = async (): Promise<void> => {
+    setBusy(true); setNotice(undefined)
+    try {
+      const failed = await forEachRow(batch, async (entry) => {
+        const response = await fetch(kbApiPath(KB_API.trashRemove), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ relPath: entry.relPath, kind: entry.isDir ? 'directory' : 'file' }),
+          cache: 'no-store',
+        })
+        const body = await readKnowledgeJson<{ error?: string }>(response)
+        if (!response.ok || body.error !== undefined) {
+          throw new Error(body.error ?? 'HTTP ' + String(response.status))
+        }
+      })
+      if (failed > 0) {
+        // Reload anyway: the rows that DID go must disappear from the tree.
+        props.onDeleted()
+        setNotice(t('deleteFailed'))
+        return
+      }
+      onClose()
+      props.onDeleted()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Put every selected row on the clipboard, for a cut or a copy.
+   *
+   * One call with the whole list rather than one call per row: the clipboard is a
+   * single value, and assigning it repeatedly would leave only the last row on it.
+   * A single-row menu passes a one-element list and takes exactly the old path.
+   */
+  const clipMany = (cut: boolean): void => {
+    const rows = batch.length > 0 ? batch : (row === null ? [] : [row])
+    if (rows.length === 0) return
+    props.onClipboard({
+      entries: rows.map(entry => ({ relPath: entry.relPath, name: entry.name })),
+      cut,
+    })
+    onClose()
+  }
+
   const remove = async (row: ContextTarget): Promise<void> => {
     setBusy(true); setNotice(undefined)
     try {
@@ -243,18 +341,33 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
   const paste = async (): Promise<void> => {
     const clip = props.clipboard
     const into = props.pasteInto
-    if (clip === null || into === null) return
+    if (clip === null || into === null || clip.entries.length === 0) return
     setBusy(true); setNotice(undefined)
     try {
-      const response = await fetch(kbApiPath(clip.cut ? KB_API.move : KB_API.copy), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ from: clip.relPath, to: into }),
-        cache: 'no-store',
-      })
-      const body = await readKnowledgeJson<{ error?: string }>(response)
-      if (!response.ok || body.error !== undefined) {
-        throw new Error(body.error ?? 'HTTP ' + String(response.status))
+      // One request per entry, sequentially. Each is an independent copy/move on the
+      // Host, and the destination is the same directory for all of them, so a batch is
+      // a loop rather than a new route. The first failure names itself; the rows that
+      // already landed stay where they are, because undoing a successful copy would
+      // delete a file the reader can see.
+      let failed: string | undefined
+      for (const entry of clip.entries) {
+        const response = await fetch(kbApiPath(clip.cut ? KB_API.move : KB_API.copy), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ from: entry.relPath, to: into }),
+          cache: 'no-store',
+        })
+        const body = await readKnowledgeJson<{ error?: string }>(response)
+        if (!response.ok || body.error !== undefined) {
+          failed = body.error ?? 'HTTP ' + String(response.status)
+          break
+        }
+      }
+      if (failed !== undefined) {
+        // The tree changed for whatever did land, so reload before reporting.
+        props.onMoved()
+        setNotice(failed)
+        return
       }
       onClose()
       props.onMoved()
@@ -273,16 +386,52 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
   const row: ContextTarget | null = menuOpen ? target : null
 
   const clipboardEmpty = props.clipboard === null || props.pasteInto === null
+
+  /**
+   * The rows a batch entry will act on.
+   *
+   * Empty for a single-row menu, which is how every entry below decides between its
+   * one-row and many-row label. `target` stays the row under the pointer regardless.
+   */
+  // The rows a batch entry covers. Empty means single-row, which is what every entry
+  // below tests -- the menu is one component for both cases.
+  const batch: readonly ContextTarget[] = row === null
+    ? []
+    : batchRowsFor(row, props.selection)
+  const many = batch.length
+  /** Fill `{n}` in a batch label. */
+  const count = (key: string): string => batchLabel(t(key), many)
+
+  /**
+   * Entries that mean the same thing for one row and for many.
+   *
+   * Only the label changes: one `favorite` id, one handler, one code path. Splitting
+   * them into a separate batch menu is what let the tree and the table disagree before,
+   * and the count says what the entry will touch.
+   */
+  const favoriteAll = many > 0 && batch.every(entry => props.favorite)
+
   const items: MenuEntry[] = row !== null ? [
     // A directory has no bytes to save, so the row is absent rather than disabled: a
     // permanently disabled entry teaches the reader nothing.
-    ...(row.isDir ? [] : [{ id: 'download', label: t('actionDownload'), disabled: busy }]),
-    { id: 'rename', label: t('actionRename'), disabled: busy },
-    { id: 'share', label: t('actionShare') },
-    { id: 'favorite', label: props.favorite ? t('actionUnfavorite') : t('actionFavorite') },
+    ...(many === 0 && !row.isDir ? [{ id: 'download', label: t('actionDownload'), disabled: busy }] : []),
+    // Rename and share address ONE row: a batch rename has no meaning (there is no
+    // shared new name) and a share dialog taking several principals for several files
+    // would be a different feature. Hiding them for a batch is clearer than disabling
+    // an entry the reader would have to guess at.
+    ...(many === 0 ? [
+      { id: 'rename', label: t('actionRename'), disabled: busy } as MenuEntry,
+      { id: 'share', label: t('actionShare') } as MenuEntry,
+    ] : []),
+    {
+      id: 'favorite',
+      label: many > 0
+        ? (favoriteAll ? count('actionUnfavoriteMany') : count('actionFavoriteMany'))
+        : (props.favorite ? t('actionUnfavorite') : t('actionFavorite')),
+    },
     { type: 'separator', id: 'sep-clip' },
-    { id: 'copy', label: t('actionCopy') },
-    { id: 'cut', label: t('actionCut') },
+    { id: 'copy', label: many > 0 ? count('actionCopyMany') : t('actionCopy') },
+    { id: 'cut', label: many > 0 ? count('actionCutMany') : t('actionCut') },
     {
       id: 'paste',
       // Disabled with an empty clipboard, and when there is no known destination. The
@@ -291,7 +440,9 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
       label: clipboardEmpty
         ? t('actionPaste')
         : (props.clipboard?.cut === true ? t('actionPasteCut') : t('actionPasteCopy'))
-          + ' ' + (props.clipboard?.name ?? ''),
+          + ' ' + (props.clipboard?.entries.length === 1
+            ? props.clipboard.entries[0].name
+            : String(props.clipboard?.entries.length ?? 0)),
       disabled: busy || clipboardEmpty,
     },
     { type: 'separator', id: 'sep-2' },
@@ -299,7 +450,7 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
     { id: 'reference', label: t('actionReference') },
     { type: 'separator', id: 'sep-3' },
     { id: 'grant', label: t('actionPermissions') },
-    { id: 'delete', label: t('actionDelete'), danger: true, disabled: busy },
+    { id: 'delete', label: many > 0 ? count('actionDeleteMany') : t('actionDelete'), danger: true, disabled: busy },
   ] : []
 
   return (
@@ -320,22 +471,34 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
             onClose()
             return
           }
-          if (id === 'favorite') { props.onFavorite(row.relPath, !props.favorite); onClose(); return }
-          if (id === 'copy') {
-            props.onClipboard({ relPath: row.relPath, name: row.name, cut: false })
+          if (id === 'favorite') {
+            if (many > 0) { favoriteMany(!favoriteAll); return }
+            props.onFavorite(row.relPath, !props.favorite)
             onClose()
             return
           }
-          if (id === 'cut') {
-            props.onClipboard({ relPath: row.relPath, name: row.name, cut: true })
-            onClose()
-            return
-          }
+          if (id === 'copy') { clipMany(false); return }
+          if (id === 'cut') { clipMany(true); return }
           if (id === 'paste') { void paste(); return }
           if (id === 'pin') { props.onPin(row.relPath, !props.pinned); onClose(); return }
-          if (id === 'reference') { props.onReference(row.relPath, row.isDir); onClose(); return }
+          if (id === 'reference') {
+            // One implementation decides which rows a reference covers, shared with the
+            // picker's own target resolution: a menu that says "reference 3 items" must
+            // hand over exactly those three.
+            const targets = referenceTargetsFor(row.relPath, many > 0 ? batch : undefined)
+            if (targets.length > 1) {
+              props.onReference(row.relPath, row.isDir, batch as readonly ContextTarget[])
+            } else {
+              props.onReference(row.relPath, row.isDir)
+            }
+            onClose()
+            return
+          }
           if (id === 'grant') { props.onGrant(row.relPath); onClose() }
-          if (id === 'delete') { void remove(row) }
+          if (id === 'delete') {
+            if (many > 0) { void removeMany(); return }
+            void remove(row)
+          }
         }}
         onClose={onClose}
         portal

@@ -27,12 +27,6 @@
   gap: 10px;
 }
 
-.description {
-  margin: 0;
-  color: var(--dsw-alias-label-secondary);
-  font: var(--dsw-font-xs-13);
-  line-height: 1.6;
-}
 
 /* The product's settings groups head their block with a quiet small label, not
    an uppercased one: the design system carries no letter-spaced caps step. */
@@ -80,18 +74,7 @@
   font: var(--dsw-font-xxs-12) var(--ds-font-family-code);
 }
 
-.grants {
-  margin: 0;
-  padding-left: 18px;
-  display: grid;
-  gap: 4px;
-}
 
-.grantMeta {
-  margin-left: 8px;
-  font: var(--dsw-font-xxxs-11);
-  color: var(--dsw-alias-label-tertiary);
-}
 
 .detail {
   margin: 0;
@@ -101,27 +84,12 @@
 
 /* The read-only marker is a `Tag`-shaped pill in the official outline tone:
    hairline border, tertiary ink, 999px radius. */
-.readOnly {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--dsw-alias-border-l4);
-  border-radius: 999px;
-  padding: 1px 8px;
-  font: var(--dsw-font-xxxs-11);
-  color: var(--dsw-alias-label-tertiary);
-}
 
 .notice {
   margin: 0;
   font: var(--dsw-font-xxs-12);
 }
 
-.actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 6px;
-}
 
 /* ---- Deployment wizard ---- */
 
@@ -299,28 +267,4 @@
   margin: 0;
   color: var(--dsw-alias-state-error-primary);
   font: var(--dsw-font-xxs-12);
-}
-
-/* ---- The deployment block's local shape ----
-
-   A local deployment cannot run any deployment step: every one of them executes on a
-   remote host, so with no SSH host configured the wizard has nothing that can act.
-   Rather than seven disabled buttons with an explanation, the block becomes two
-   sentences of plain text. No link and no disclosure: the plugin owns no
-   documentation URL, and a control here would be one more thing that cannot do
-   anything -- which is the exact complaint this branch answers. */
-
-.deployAbout {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-/* The aside's own caption. Tertiary ink and a caption weight: it labels an
-   explanation rather than introducing a section, so it must sit below the sentence
-   above it in the visual hierarchy rather than competing with the block's heading. */
-.deployAboutLabel {
-  margin: 0;
-  color: var(--dsw-alias-label-tertiary);
-  font: var(--dsw-font-xxxs-strong-11);
 }

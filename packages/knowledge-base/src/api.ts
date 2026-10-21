@@ -110,6 +110,16 @@ export const KB_API = {
   templateSave: 'template.save',
   /** Remove one template: its document and its metadata record. */
   templateRemove: 'template.remove',
+  /**
+   * Read what this process knows about extraction.
+   *
+   * The queue lives in memory, so this reports the tasks of the running process only;
+   * a file that is neither queued nor beside a `.md` sibling reads as never attempted,
+   * which is a fact about this process rather than a claim about the document.
+   */
+  extractStatus: 'extract.status',
+  /** Re-run extraction for one document that could not finish. */
+  extractRetry: 'extract.retry',
   /** Read the caller's pinned paths. */
   favoritesGet: 'favorites.get',
   favoritesSet: 'favorites.set',
@@ -605,4 +615,43 @@ export interface KnowledgeTemplateSaveInput {
   fileName: string
   /** Set when editing an existing template, so its document is replaced in place. */
   id?: string
+}
+
+/** Where one extraction task is in its lifecycle, as the Host reports it. */
+export type ExtractionStateView = 'pending' | 'running' | 'succeeded' | 'failed' | 'unsupported'
+
+/**
+ * One extraction task.
+ *
+ * Mirrors the Host's own record: the source path, the state, and whatever it managed to
+ * learn about the outcome. `reason` is the extractor's verbatim text, which is the only
+ * thing that tells a reader whether to retry or give up.
+ */
+export interface ExtractionTaskView {
+  /** Knowledge-relative path of the source document. */
+  relPath: string
+  /** Where the task is in its lifecycle. */
+  state: ExtractionStateView
+  /** When the task was accepted, ISO-8601. */
+  queuedAt: string
+  /** When the run started, ISO-8601. */
+  startedAt?: string
+  /** When the run reached a terminal state, ISO-8601. */
+  finishedAt?: string
+  /** The Markdown sibling that was written, when one was. */
+  markdown?: string
+  /** Which authority produced the text. */
+  via?: string
+  /** Why the extraction produced nothing. */
+  reason?: string
+}
+
+/** The extraction queue's snapshot. */
+export interface ExtractionStatusView {
+  /** The path of the task running right now, when one is. */
+  running?: string
+  /** How many tasks are queued or running. */
+  size: number
+  /** Every task this process knows about. */
+  tasks: ExtractionTaskView[]
 }

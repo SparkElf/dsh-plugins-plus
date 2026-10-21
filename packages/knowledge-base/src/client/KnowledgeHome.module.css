@@ -285,3 +285,69 @@
   color: var(--dsw-static-amber-500);
   font: var(--dsw-font-xxs-12);
 }
+
+/* The drop surface around the document table.
+
+   The table lists documents only, so a reader dragging a file in has no directory row
+   to aim at: the whole surface is the target. The highlight is a dashed outline rather
+   than a fill, because a filled table reads as a selection and the rows underneath
+   stay readable this way. */
+.dropZone {
+  border: 1px dashed transparent;
+  border-radius: var(--dsw-radius-md);
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+/* Painted only while a file drag is over the surface. The brand accent is the colour
+   the product already uses for "this is the active thing", not a new one. */
+.dropZoneActive {
+  border-color: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* The Share tab: two independent blocks, stacked.
+   Each owns a heading, a table and a pager. They are not laid out side by side
+   because the two tables have the same five columns and reading them across a
+   split view would make two different directions look like one wide table. */
+.shareWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* One direction: its title, its table, its own pager. */
+.shareBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shareTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-sm-bold-13);
+}
+
+/* The empty sentence for one direction. Muted because it is a state, not content. */
+.shareEmpty {
+  margin: 0;
+  padding: 12px 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-sm-13);
+}
+
+/* A failed grants read: a warning tone, not the empty state's grey. */
+.shareError {
+  margin: 0;
+  padding: 8px 0;
+  color: var(--dsw-alias-label-error);
+  font: var(--dsw-font-sm-13);
+}
+
+/* The pager for one block. Right-aligned so it sits under the numbers it controls. */
+.sharePager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}

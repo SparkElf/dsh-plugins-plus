@@ -54,11 +54,6 @@
 
 /* The hint under "new conversation" is supporting copy, not a value, so it sits
    a step below the row's own type size. */
-.rowHint {
-  display: block;
-  color: var(--dsw-alias-label-tertiary);
-  font: var(--dsw-font-xxxs-11);
-}
 
 /* Both empty states are sentences, centred in the list's own area: an empty
    list that collapses to zero height reads as a rendering bug. */

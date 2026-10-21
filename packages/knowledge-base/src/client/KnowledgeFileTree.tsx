@@ -24,11 +24,13 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { FileTree } from 'dsh-better-sidebar/src/client/FileTree.tsx'
 import type { UploadItem } from 'dsh-better-sidebar/src/client/upload.ts'
 import { departmentPathLabels, folderLabelOf, type DepartmentPath } from './departmentFolders.ts'
 import { VIEW_METADATA_FILENAMES } from '../viewMetadata.ts'
+import styles from './KnowledgeFileTree.module.css'
+import { batchRowsFor } from './referenceTargets.ts'
 
 /**
  * Files the explorer must not list.
@@ -116,6 +118,237 @@ export interface KnowledgeFileTreeProps {
    * worse than the code they can at least match against their own department.
    */
   departmentPath?: DepartmentPath
+  /**
+   * Whether one path is currently favourited, so its row can draw the star.
+   *
+   * The borrowed explorer has no row-decoration hook, so the star is applied by this
+   * wrapper observing the rows it renders (see `useRowFavorites`). Absent means the
+   * caller has no favourites store, which keeps the wrapper from touching the DOM at all.
+   */
+  isFavorite?: (relPath: string) => boolean
+  /**
+   * Open the row context menu for one row.
+   *
+   * The explorer builds its own menu inside itself and marks the event handled, so the
+   * only place to intercept is a capture-phase listener above it. This wrapper does
+   * that and forwards the row here; the page then renders the SAME menu component the
+   * home table uses, so both surfaces offer one action set.
+   *
+   * Absent means "leave the explorer's own menu alone", which is what a read-only
+   * surface embedding this tree would want.
+   */
+  onRowContextMenu?: (
+    relPath: string,
+    isDir: boolean,
+    at: { x: number; y: number },
+    selection?: readonly { relPath: string; name: string; isDir: boolean }[],
+  ) => void
+  /** The favourites star's accessible name. */
+  favoriteMarkLabel?: string
+}
+
+/**
+ * One row's absolute path, read from the element the explorer rendered.
+ *
+ * The explorer prints the full path as the row's `title` (it is a tooltip for every row,
+ * including the root), and nothing else in the row's own markup identifies the path. That
+ * makes `title` the contract this wrapper reads: a row with no title is not a row this
+ * code can address, and it is skipped rather than guessed at.
+ *
+ * A broken symlink's title carries a suffix after an em dash; the path is the part before
+ * it, which is why this splits rather than trusting the whole string.
+ * @param row - one `.explorerRow` element.
+ * @returns The absolute path, or undefined when the row names none.
+ */
+function rowPathOf(row: Element): string | undefined {
+  const title = row.getAttribute('title')
+  if (title === null || title === '') return undefined
+  return title.split(' \u2014 ')[0]
+}
+
+/**
+ * The row element containing one node.
+ *
+ * The explorer marks rows with a class from its CSS module, whose generated name is not
+ * importable here; the role and the row shape are. Walking up to the nearest element with
+ * `role="button"` reaches the row without depending on the module's hash.
+ * @param node - any node inside a row.
+ * @returns The row element, or null when the node is not inside one.
+ */
+function rowOf(node: Element): Element | null {
+  return node.closest('[role="button"]')
+}
+
+/**
+ * Keep the borrowed explorer's rows in step with the caller's favourites.
+ *
+ * The explorer has no row-decoration hook and builds its context menu internally, so
+ * neither a star nor a menu can be passed as a prop. Both are therefore applied by
+ * observing the rows after they render:
+ *
+ * - The star is an element this code inserts before the row's timestamp, which is the
+ *   placement the reader asked for ("left of the date"). It is inserted once and then
+ *   toggled, so a re-render does not stack a second star on the same row.
+ * - The menu is intercepted in the CAPTURE phase. The explorer's own handler runs on the
+ *   row itself and calls `stopPropagation`, which stops the synthetic bubble but not a
+ *   native capture listener on an ancestor — capture runs first, so this can suppress the
+ *   explorer's menu and open the caller's instead. That is the only interception point
+ *   the component exposes.
+ *
+ * A MutationObserver drives both, because every expansion re-renders rows and a one-shot
+ * pass on mount would decorate only the top level.
+ * @param container - the element wrapping the explorer.
+ * @param root - absolute knowledge root, stripped to build the relative paths favourites use.
+ * @param isFavorite - the caller's favourites lookup.
+ * @param label - the star's accessible name.
+ * @param onContextMenu - the caller's menu opener, or undefined to leave the explorer's menu.
+ */
+function useRowDecoration(options: {
+  container: React.RefObject<HTMLDivElement | null>
+  root: string
+  isFavorite: ((relPath: string) => boolean) | undefined
+  label: string | undefined
+  onContextMenu: ((
+    relPath: string,
+    isDir: boolean,
+    at: { x: number; y: number },
+    selection?: readonly { relPath: string; name: string; isDir: boolean }[],
+  ) => void) | undefined
+}): void {
+  const { container, root, isFavorite, label, onContextMenu } = options
+
+  /**
+   * Turn an absolute row path into the key favourites are stored under.
+   *
+   * Favourites are addressed relative to the mount point, which is what the Host
+   * resolves and what every route speaks; rows speak absolute paths. The root is
+   * stripped here, and a row above the root yields undefined because it cannot be a
+   * favourited document.
+   */
+  const relPathOf = useCallback((absolute: string): string | undefined => {
+    const base = root.endsWith('/') ? root.slice(0, -1) : root
+    if (!absolute.startsWith(base + '/')) return undefined
+    return absolute.slice(base.length + 1)
+  }, [root])
+
+  useEffect(() => {
+    const host = container.current
+    if (host === null) return undefined
+
+    /** Insert or remove one row's star so it reflects the current favourites set. */
+    const paintRow = (row: Element, favorite: boolean): void => {
+      const RE = '[data-kb-favorite]'
+      const existing = row.querySelector(RE)
+      if (!favorite) { existing?.remove(); return }
+      if (existing !== null) return
+      if (label === undefined) return
+      const star = document.createElement('span')
+      star.setAttribute('data-kb-favorite', '')
+      star.setAttribute('aria-label', label)
+      star.setAttribute('title', label)
+      // Amber is the one warm stop in the palette, which is what makes the mark read as
+      // a star rather than as another grey glyph. Inline because the explorer's module
+      // owns the row and has no class for this.
+      star.style.cssText = 'flex:none;color:var(--dsw-static-amber-500);font:var(--dsw-font-xxs-12);margin-left:4px'
+      star.textContent = '\u2605'
+      // Before the timestamp when the row has one, else at the end: in both cases to the
+      // LEFT of the date, which is the placement the reader asked for.
+      const time = row.querySelector('[class*="explorerTime"]')
+      if (time !== null) time.before(star)
+      else row.appendChild(star)
+    }
+
+    /** Decorate every row currently rendered. */
+    const paint = (): void => {
+      if (isFavorite === undefined) return
+      for (const row of host.querySelectorAll('[role="button"]')) {
+        const absolute = rowPathOf(row)
+        if (absolute === undefined) continue
+        const relPath = relPathOf(absolute)
+        if (relPath === undefined) continue
+        paintRow(row, isFavorite(relPath))
+      }
+    }
+
+    paint()
+    const observer = new MutationObserver(paint)
+    // `subtree` because expansion renders rows under descendants; `childList` alone is
+    // enough for the star because its own insertion is not a row-list change.
+    observer.observe(host, { childList: true, subtree: true })
+
+    return () => { observer.disconnect() }
+  }, [container, isFavorite, label, relPathOf])
+
+  // Capture phase: runs before the explorer's own row handler, which is the only reason
+  // this can replace its menu instead of opening a second one.
+  useEffect(() => {
+    const host = container.current
+    if (host === null || onContextMenu === undefined) return undefined
+
+    /**
+     * Whether a row is a folder.
+     *
+     * The explorer marks directory rows with `css.explorerDir`, whose generated class name
+     * is not importable here (it is that package's CSS module). The stable trace is the
+     * class fragment: CSS modules always keep the original name inside the generated one,
+     * so matching the substring finds the marker without depending on the hash.
+     *
+     * A row whose class cannot be classified is treated as a file. That is the harmless
+     * direction: every action except "paste into" behaves identically, and a paste aimed
+     * at a file row lands in its parent, which is what a reader dropping beside a
+     * document expects anyway.
+     */
+    const isDirRow = (row: Element): boolean =>
+      /(^|\s)[A-Za-z0-9_-]*explorerDir(\s|$)/u.test(row.getAttribute('class') ?? '')
+
+    /**
+     * Every row the explorer currently marks selected, as relative paths.
+     *
+     * The explorer owns the selection and does not publish it, but it writes
+     * `data-dsh-selected` onto each selected row, which is the one place the state is
+     * legible from outside. Read BEFORE the explorer's own handler runs (this listener
+     * is capture phase), so the set is the one the reader saw when they right-clicked:
+     * the explorer collapses a right-click outside the selection onto the single row,
+     * and doing that first would erase the batch the reader meant to act on.
+     */
+    const selectedRelPaths = (): { relPath: string; isDir: boolean; name: string }[] => {
+      const picked: { relPath: string; isDir: boolean; name: string }[] = []
+      for (const candidate of host.querySelectorAll('[data-dsh-selected="true"]')) {
+        const absolute = rowPathOf(candidate)
+        if (absolute === undefined) continue
+        const rel = relPathOf(absolute)
+        if (rel === undefined) continue
+        picked.push({ relPath: rel, isDir: isDirRow(candidate), name: rel.split('/').pop() ?? rel })
+      }
+      return picked
+    }
+
+    const onContextCapture = (event: Event): void => {
+      if (!(event instanceof MouseEvent)) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const row = rowOf(target)
+      if (row === null) return
+      const absolute = rowPathOf(row)
+      if (absolute === undefined) return
+      const relPath = relPathOf(absolute)
+      if (relPath === undefined) return
+      // Suppress the explorer's own menu, then take over the gesture.
+      event.preventDefault()
+      event.stopPropagation()
+      // A right-click INSIDE the selection keeps the whole batch; one outside it is a
+      // single-row action on the row under the pointer. This mirrors the explorer's own
+      // selection gesture, and it is why the menu needs no mode switch.
+      const picked = selectedRelPaths()
+      // The shared rule, not a second copy of it: the menu decides a batch the same way.
+      const covered = batchRowsFor({ relPath, name: relPath.split('/').pop() ?? relPath, isDir: isDirRow(row) }, picked)
+      const selection = covered.length > 0 ? covered : undefined
+      onContextMenu(relPath, isDirRow(row), { x: event.clientX, y: event.clientY }, selection)
+    }
+
+    host.addEventListener('contextmenu', onContextCapture, { capture: true })
+    return () => { host.removeEventListener('contextmenu', onContextCapture, { capture: true }) }
+  }, [container, onContextMenu, relPathOf])
 }
 
 /**
@@ -134,6 +367,22 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
   // explorer from wiping its level cache on every render.
   const expandedList = useMemo(() => [...expanded], [expanded])
   const revealedList = useMemo(() => [...revealed], [revealed])
+
+  /**
+   * The element wrapping the explorer, which the row decoration observes.
+   *
+   * The explorer renders its own rows, so neither a star nor a context menu can be
+   * handed to it; both are applied from outside through this element. See
+   * `useRowDecoration` for why capture phase is the only workable interception point.
+   */
+  const container = useRef<HTMLDivElement | null>(null)
+  useRowDecoration({
+    container,
+    root,
+    isFavorite: props.isFavorite,
+    label: props.favoriteMarkLabel,
+    onContextMenu: props.onRowContextMenu,
+  })
 
   /** Every exclusion pattern at once, in the one array identity the explorer keys on. */
   const exclude = useMemo(() => METADATA_NAMES.map(name => `**/${name}`), [])
@@ -168,6 +417,7 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
   }, [props.bucketLabels, departmentCodes, departmentNames])
 
   return (
+    <div ref={container} className={styles.treeFrame}>
     <FileTree
       sessionId={sessionId}
       cwd={root}
@@ -202,5 +452,6 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
       onPathRenamed={props.onPathRenamed === undefined ? undefined : onRenamed}
       onPathDeleted={props.onPathDeleted}
     />
+    </div>
   )
 }

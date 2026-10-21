@@ -85,6 +85,15 @@ interface PrincipalOption {
   id: string
   /** Human-facing name. */
   label: string
+  /** Login name, for users only: two accounts can share a display name. */
+  username?: string
+  /**
+   * Role codes this principal belongs to, for users whose directory reported them.
+   *
+   * Absent means the directory did not say, which the overview reports as unavailable
+   * inheritance rather than as "this account has no role".
+   */
+  roleCodes?: string[]
 }
 
 type LoadState =
@@ -367,10 +376,46 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
         <KnowledgePermissionOverview
           grants={state.grants}
           labels={labels}
+          // The user directory doubles as the role-membership source: `/api/system/users`
+          // reports each account's roles, which is the ONLY way to attribute a role
+          // grant to the people who actually hold it. When that directory could not be
+          // read the overview is told so, rather than being handed an empty list that
+          // would render as "nobody has inherited access".
+          directory={directory.user === undefined
+            ? { kind: 'unavailable', reason: c('sourceUnavailable') }
+            : {
+              kind: 'available',
+              users: directory.user.map(option => ({
+                id: option.id,
+                label: option.label,
+                ...(option.username === undefined ? {} : { username: option.username }),
+                ...(option.roleCodes === undefined ? {} : { roleCodes: option.roleCodes }),
+              })),
+            }}
           copy={{
             tabByPerson: c('overviewByPerson'),
+            tabByRole: c('overviewByRole'),
             tabByResource: c('overviewByResource'),
             empty: c('grantsEmpty'),
+            emptyByPerson: c('emptyByPerson'),
+            emptyByRole: c('emptyByRole'),
+            emptyByResource: c('emptyByResource'),
+            sourceDirect: c('sourceDirect'),
+            sourceViaRole: (role: string) => c('sourceViaRole').replace('{role}', role),
+            sourceUnavailable: c('sourceUnavailable'),
+            actionsUnknown: c('actionsUnknown'),
+            actionsUnknownHint: c('actionsUnknownHint'),
+            colAccount: c('colAccount'),
+            colSource: c('colSource'),
+            roleMemberCount: (count: number) => c('roleMemberCount').replace('{count}', String(count)),
+            pagerPrev: c('auditPagePrev'),
+            pagerNext: c('auditPageNext'),
+            pagerStatus: (page: number, pageCount: number, total: number) => c('auditPageOf')
+              .replace('{page}', String(page))
+              .replace('{pages}', String(pageCount))
+              .replace('{total}', String(total)) + ' · ' + c('auditPageTotal').replace('{total}', String(total)),
+            pageSizeLabel: c('auditPageSize'),
+            pageSizeOption: (size: number) => c('auditPageSizeOption').replace('{size}', String(size)),
             pathsHeld: (count: number) => c('overviewHeld').replace('{count}', String(count)),
             rolesHeld: c('overviewRoles'),
             actionsHeld: c('overviewActions'),

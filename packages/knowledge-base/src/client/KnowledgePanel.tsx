@@ -18,7 +18,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { referenceInChat } from 'dsh-better-sidebar/src/client/reference-in-chat.ts'
 import {
   IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
@@ -74,8 +73,16 @@ import { KnowledgeAudit } from './KnowledgeAudit.tsx'
 import { KnowledgeSettings } from './KnowledgeSettings.tsx'
 import { KnowledgeSearch, useKnowledgeSearch } from './KnowledgeSearch.tsx'
 import { KB_DRAG_MIME, KnowledgeListing } from './KnowledgeListing.tsx'
+import { KnowledgeProgressPanel, type UploadTaskView } from './KnowledgeProgressPanel.tsx'
+import { failureReason } from './progressRules.ts'
 import { KnowledgeIconButton, KnowledgeSectionHeader } from './KnowledgeSectionHeader.tsx'
 import { useFavorites } from './useFavorites.ts'
+import {
+  KnowledgeContextMenu,
+  type ContextTarget,
+  type TreeClipboard,
+} from './KnowledgeContextMenu.tsx'
+import { shareCopyFor } from './knowledgeMenuCopy.ts'
 import { usePinnedPaths } from './usePinnedPaths.ts'
 import { useTreeState } from './useTreeState.ts'
 import { useViewMode } from './useViewMode.ts'
@@ -372,10 +379,29 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * @param dir - absolute directory the drop landed in.
    * @param items - the dropped files with their relative names.
    */
-  const uploadInto = useCallback(async (mountPoint: string, dir: string, items: readonly { file: File; relativePath: string }[]): Promise<void> => {
+  const uploadInto = useCallback(async (
+    mountPoint: string,
+    dir: string,
+    items: readonly { file: File; relativePath: string }[],
+  ): Promise<void> => {
     const parent = relativeToRoot(mountPoint, dir)
-    for (const item of items) {
+    // One row per file, in drop order, so the progress area can show the whole batch
+    // from the first byte rather than growing a row per completed file.
+    const queue: UploadTaskView[] = items.map(item => ({
+      name: item.relativePath,
+      // The directory the file lands in, tree-relative: what the reader recognises.
+      dir: parent === '' ? '' : parent,
+      state: 'waiting',
+    }))
+    setUploadTasks(queue)
+    setUploadBusy(true)
+
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]
       const target = parent === '' ? item.relativePath : parent + '/' + item.relativePath
+      setUploadTasks(current => current.map((task, at) => (
+        at === index ? { ...task, state: 'uploading' } : task
+      )))
       try {
         // A document is bytes, not text. Reading a .docx through `file.text()`
         // would decode it as UTF-8 and post a corrupted body, so the route is told
@@ -392,16 +418,33 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
           body: JSON.stringify(binary ? { relPath: target, content, encoding: 'base64' } : { relPath: target, content }),
           cache: 'no-store',
         })
-        if (!response.ok) {
-          // One refused file is reported without stopping the drop; the tree reload below
-          // shows what did land.
-          continue
+        if (response.ok) {
+          setUploadTasks(current => current.map((task, at) => (
+            at === index ? { ...task, state: 'done' } : task
+          )))
+        } else {
+          // The route answers a refusal with `{error, code}`: a taken name, a size
+          // limit, a permission denial. That text is the only thing that tells the
+          // reader whether to rename, split, or ask for access, so it travels with the
+          // row instead of the row just saying "failed".
+          // A gateway answering 502 sends HTML, so `json()` rejects on it. That
+          // rejection must not escape: it would leave the row saying "failed" with no
+          // reason at all, which is the silence this whole path exists to remove.
+          const body = (await response.json().catch(() => undefined)) as { error?: string; code?: string; limitBytes?: number } | undefined
+          const reason = failureReason(body, response.status)
+          setUploadTasks(current => current.map((task, at) => (
+            at === index ? { ...task, state: 'failed', reason } : task
+          )))
         }
-      } catch {
-        // A file that could not be read is skipped for the same reason.
-        continue
+      } catch (error: unknown) {
+        // A file that could not be read is a failure like any other, and the reason
+        // matters most here: nothing on the server ever saw it.
+        setUploadTasks(current => current.map((task, at) => (
+          at === index ? { ...task, state: 'failed', reason: error instanceof Error ? error.message : 'could not read the file' } : task
+        )))
       }
     }
+    setUploadBusy(false)
     setRefreshTick(t => t + 1)
   }, [])
 
@@ -482,9 +525,15 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * Null while nothing is being referenced. Set only when there is no conversation
    * otherwise: with one open, `@` stays a one-click insert as it is in the sidebar.
    */
-  const [referencing, setReferencing] = useState<{ path: string; isDir: boolean } | undefined>(undefined)
+  const [referencing, setReferencing] = useState<
+    { path: string; isDir: boolean; targets?: readonly { path: string; isDir: boolean }[] } | undefined
+  >(undefined)
   /** The only feedback a reader gets when the target conversation is not on screen. */
   const [referenceNote, setReferenceNote] = useState<string | undefined>(undefined)
+  /** True while a dropped batch is uploading, so a second drop cannot start. */
+  const [uploadBusy, setUploadBusy] = useState(false)
+  /** The batch's per-file rows, shown in the progress strip at the panel's foot. */
+  const [uploadTasks, setUploadTasks] = useState<UploadTaskView[]>([])
 
   // Publish the knowledge root and the caller identity to the plugin-scope save-audit
   // registration. The registration exists before any page mounts (an edit in the
@@ -572,6 +621,37 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
 
   /** The caller's list/grid preference, read from their own view directory. */
   const viewMode = useViewMode(state.kind === 'ready' && state.config.mountPoint !== '')
+
+  /**
+   * The row context menu for the surfaces THIS component owns.
+   *
+   * One instance for the whole page rather than one per surface: the home table and the
+   * tree must offer the same actions, and two instances would be two places to keep in
+   * step. Each surface reports the row the reader right-clicked and where, and this
+   * renders the menu.
+   */
+  const [treeMenu, setTreeMenu] = useState<{
+    target: ContextTarget
+    at: { x: number; y: number }
+    /** The rows a batch entry acts on, when the click landed inside a multi-selection. */
+    selection?: readonly ContextTarget[]
+  } | null>(null)
+  /** The cut/copied entry, shared by both surfaces so a copy on one pastes on the other. */
+  const [clipboard, setClipboard] = useState<TreeClipboard | null>(null)
+  /** Copy for the share dialog. */
+  const shareCopy = useMemo(() => shareCopyFor(props.locale), [props.locale])
+
+  /**
+   * The directory a paste would land in for one row.
+   *
+   * A folder pastes into itself; a file pastes beside itself. `''` is the tree root,
+   * which is a real destination rather than "unknown".
+   */
+  const pasteTargetFor = useCallback((relPath: string, isDir: boolean): string | null => {
+    if (isDir) return relPath
+    const cut = relPath.lastIndexOf('/')
+    return cut === -1 ? '' : relPath.slice(0, cut)
+  }, [])
 
   /**
    * The rows the batch bar acts on.
@@ -789,6 +869,35 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   }
 
   const { config, status } = state
+
+  /**
+   * Ask where a reference should go, for every surface that offers one.
+   *
+   * Always the dialog -- never a direct insert. The direct path was the bug: with a
+   * conversation open (the ordinary case) it called `referenceInChat` and returned, so
+   * `setReferencing` was never reached and the picker never opened; the insert itself
+   * then failed inside `referenceInChat` because this page's ctx lacked the `sessions`
+   * injection, and a `try/catch` there turned that into a `console.warn` nobody read.
+   * The reader saw a click with no effect.
+   *
+   * The dialog's first row is the current conversation, so the one-click gesture is
+   * preserved; what it adds is the reader seeing where the reference will land.
+   */
+  const askReferenceTarget = (
+    relPath: string,
+    isDir: boolean,
+    targets?: readonly { relPath: string; isDir: boolean }[],
+  ): void => {
+    const mount = config.mountPoint
+    setReferencing({
+      path: joinPath(mount, relPath),
+      isDir,
+      targets: targets === undefined
+        ? undefined
+        : targets.map(entry => ({ path: joinPath(mount, entry.relPath), isDir: entry.isDir })),
+    })
+  }
+
 
 
   /**
@@ -1011,15 +1120,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
                   onOpen={(path) => { openDocument(path) }}
                   onGrant={(path) => { openPermissions(path) }}
-                  onReference={(path, isDir) => {
-                    // No conversation open: ask which one to use rather than dropping
-                    // the click. See the file-tree handler for the full reasoning.
-                    if (sessionId === undefined) {
-                      setReferencing({ path: joinPath(config.mountPoint, path), isDir })
-                      return
-                    }
-                    referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
-                  }}
+                  onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                 />
               )}
             </section>
@@ -1173,22 +1274,46 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                       openDocument(relativeToRoot(kbRoot, path))
                     }}
                     onReferenceFile={(path, isDir) => {
-                      // With a conversation open the reference goes straight into it --
-                      // the same one-click gesture the sidebar explorer has.
-                      if (sessionId !== undefined) {
-                        referenceInChat(props.ctx as never, sessionId, path, isDir)
-                        return
-                      }
-                      // No conversation open is the NORMAL state here: this page is a
-                      // management surface, not a chat. The click used to `return` and
-                      // the button looked broken. Ask where the reference should go
-                      // instead, then insert through the same contract.
+                      // ALWAYS ask, even with a conversation open.
+                      //
+                      // This used to insert straight into the current session and
+                      // `return`, which made the button look dead: with a conversation
+                      // open (the ordinary case) `setReferencing` was never reached, so
+                      // the picker's `open` stayed false; and the insert it took instead
+                      // failed inside `referenceInChat` -- this page's `ctx` has no
+                      // `sessions` inject -- where a `try/catch` turned it into a
+                      // `console.warn`. Nothing above it read the result, so the click
+                      // had no visible effect at all.
+                      //
+                      // The dialog still offers the current conversation as one click
+                      // (its first row), so the shortcut is preserved; what it adds is
+                      // the reader seeing where the reference is going, which is the
+                      // part that was missing.
                       setReferencing({ path, isDir })
                     }}
                     onUploadRequest={(dir, items) => { void uploadInto(kbRoot, dir, items) }}
-                    busy={false}
+                    // A drop during an upload is ignored rather than queued: two batches
+                    // writing the same folder at once would interleave their progress
+                    // rows and make the strip's counts meaningless.
+                    busy={uploadBusy}
                     refreshTick={refreshTick}
                     onPathRenamed={() => { setRefreshTick(t => t + 1) }}
+                    // The same favourites the home table reads, so one file shows its
+                    // star in both places instead of each surface keeping its own set.
+                    isFavorite={favorites.has}
+                    favoriteMarkLabel={t('favoriteMark')}
+                    // The explorer builds its own menu inside itself; this hands the
+                    // gesture to the page's shared menu instead, so the tree and the home
+                    // table offer one action set rather than two that can drift.
+                    onRowContextMenu={(relPath, isDir, at, selection) => {
+                      setTreeMenu({
+                        target: { relPath, name: relPath.split('/').pop() ?? relPath, isDir },
+                        at,
+                        // Present only when the click landed inside a multi-selection;
+                        // the menu says how many rows that is in its labels.
+                        selection,
+                      })
+                    }}
                   />
                 ) : (
                   // The plugin's own listing rather than the borrowed tree.
@@ -1203,6 +1328,15 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   <KnowledgeListing
                     t={t}
                     locale={props.locale}
+                    // A desktop file dropped on a directory row uploads there. Paths
+                    // arrive relative to that row, which is what `uploadInto` appends
+                    // to the row's own path.
+                    onUpload={(relPath, files) => {
+                      // `uploadInto` addresses the directory the way the explorer does:
+                      // absolute under the mount. A root-level drop has no row of its
+                      // own, so `relPath` there is '' and the target is the root itself.
+                      void uploadInto(kbRoot, relPath === '' ? kbRoot : joinPath(kbRoot, relPath), files as never)
+                    }}
                     refreshTick={refreshTick}
                     onRenamed={() => { setRefreshTick(t => t + 1) }}
                     filter={treeFilter}
@@ -1214,13 +1348,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     onMove={(from, to) => { void moveOne(from, to) }}
                     onOpen={(path) => { openDocument(path) }}
                     onGrant={(path) => { openPermissions(path) }}
-                    onReference={(path, isDir) => {
-                      if (sessionId === undefined) {
-                        setReferencing({ path: joinPath(config.mountPoint, path), isDir })
-                        return
-                      }
-                      referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
-                    }}
+                    onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                     // An empty tree offers the way to make a document. It does not
                     // create one: there is no create route, and a button that
                     // silently did nothing would be worse than none. It navigates to
@@ -1244,6 +1372,32 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     )}
                   />
                 )}
+              {/* The page's shared row menu, one instance for both surfaces. Rendered
+                  outside the tree's scroll container so it is never clipped by it. */}
+              <KnowledgeContextMenu
+                target={treeMenu?.target ?? null}
+                at={treeMenu?.at ?? null}
+                t={t}
+                shareCopy={shareCopy}
+                pinned={treeMenu === null ? false : pins.has(treeMenu.target.relPath)}
+                favorite={treeMenu === null ? false : favorites.has(treeMenu.target.relPath)}
+                clipboard={clipboard}
+                pasteInto={treeMenu === null ? null : pasteTargetFor(treeMenu.target.relPath, treeMenu.target.isDir)}
+                onClose={() => { setTreeMenu(null) }}
+                onGrant={(path) => { openPermissions(path) }}
+                onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
+                onFavorite={(path, favorite) => { favorites.setFavorite(path, favorite) }}
+                onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
+                onClipboard={(entry) => { setClipboard(entry) }}
+                onRenamed={() => { setRefreshTick(t => t + 1) }}
+                onDeleted={() => { setRefreshTick(t => t + 1) }}
+                onMoved={() => {
+                  // A cut consumes the clipboard; a copy keeps it so one entry can be
+                  // pasted into a second folder.
+                  setClipboard(current => (current?.cut === true ? null : current))
+                  setRefreshTick(t => t + 1)
+                }}
+              />
               {/* The batch bar closes the tree's own scroll container, so it sits
                   below every row rather than over them and never shifts the tree the
                   way a top bar would. It appears only while rows are selected: an
@@ -1329,6 +1483,19 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 locale={props.locale}
                 mountPoint={config.mountPoint}
                 focusNew={focusNew}
+                // A file dropped anywhere on the table lands in the reader's own
+                // folder: `global` is the bucket everyone reads, so defaulting there
+                // would publish a private draft without asking.
+                dropDirectory={(() => {
+                  // The reader's own folder, named by the id the Host reports for them.
+                  // Without that id there is no personal folder to aim at, so the drop
+                  // falls back to the mount root rather than to a path ending in '/'.
+                  const me = state.kind === 'ready' ? state.status.caller?.userId : undefined
+                  return me === undefined || me === '' ? '' : 'personal/' + me
+                })()}
+                onUpload={(directory, files) => {
+                  void uploadInto(config.mountPoint, directory === '' ? config.mountPoint : joinPath(config.mountPoint, directory), files as never)
+                }}
                 onOpen={(path) => { openDocument(path) }}
                 // The Home table is the surface a reader starts from, so the same
                 // context menu the tree carries is wired here too -- including the
@@ -1338,13 +1505,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 isPinned={pins.has}
                 onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
                 onGrant={(path) => { openPermissions(path) }}
-                onReference={(path, isDir) => {
-                  if (sessionId === undefined) {
-                    setReferencing({ path: joinPath(config.mountPoint, path), isDir })
-                    return
-                  }
-                  referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
-                }}
+                onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                 onTreeChanged={() => { setRefreshTick(t => t + 1) }}
                 // Where a create lands when the reader has not opened a directory:
                 // their own personal bucket rather than the shared one.
@@ -1371,13 +1532,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   // A right-click on a row opens the grant form with that path already
                   // filled in: a row is where an operator has a path in mind.
                   onGrant={canManageGrants ? (path) => { openPermissions(path) } : undefined}
-                  onReference={(path, isDir) => {
-                    if (sessionId === undefined) {
-                      setReferencing({ path: joinPath(config.mountPoint, path), isDir })
-                      return
-                    }
-                    referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
-                  }}
+                  onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                 />}
               />
             )}
@@ -1415,6 +1570,17 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
           </section>
         </div>
       )}
+        {/* The progress strip lives at the foot of the content column, in its own
+            flow: it never covers the tree, it folds to one summary line once the
+            batch settles, and it is absent entirely when nothing has been queued.
+            Polling extraction only where it can be acted on -- an unwritable mount
+            has nothing to retry. */}
+        <KnowledgeProgressPanel
+          t={t}
+          uploads={uploadTasks}
+          watchExtraction={config.mountPoint !== ''}
+          onRetried={() => { setRefreshTick(t => t + 1) }}
+        />
       </div>
 
       {/* The `@`-mention target picker. Mounted here rather than inside the tree so

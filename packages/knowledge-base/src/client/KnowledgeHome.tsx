@@ -19,6 +19,7 @@
 import { ownerLabelOf } from './ownerLabel.ts'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
+  Button,
   IconFolderOpenOutlineRegular,
   IconListPenOutlineRegular,
   IconPlusOutlineRegular,
@@ -31,12 +32,20 @@ import styles from './KnowledgeHome.module.css'
 import panelStyles from './KnowledgePanel.module.css'
 import { KnowledgeTemplates } from './KnowledgeTemplates.tsx'
 import { KnowledgeCreateDialog, defaultDestination, type CreateMode } from './KnowledgeCreateDialog.tsx'
+import { isFileDrag, planDrop, readDroppedFiles } from './useFileDrop.ts'
 import {
   KnowledgeContextMenu,
   type ContextTarget,
   type TreeClipboard,
 } from './KnowledgeContextMenu.tsx'
 import { shareCopyFor } from './knowledgeMenuCopy.ts'
+import {
+  splitShareRelations,
+  type PrincipalNameOf,
+  type ShareGrant,
+  type ShareRow,
+} from './shareRelations.ts'
+import { DEFAULT_PAGE_SIZE, paginate, needsPager } from './paging.ts'
 
 /** One document row, as the table renders it. */
 interface HomeRow {
@@ -133,6 +142,26 @@ export interface KnowledgeHomeProps {
    * re-read; the page owns the tick that triggers it.
    */
   onTreeChanged?: () => void
+  /**
+   * Upload files dropped onto the table area.
+   *
+   * The table lists documents only -- there is no directory row here to aim at -- so
+   * the whole surface is one target and the destination has to be decided rather than
+   * read off the row under the pointer. `dropDirectory` carries that decision.
+   * Omitted by a read-only caller, which keeps the surface from accepting a drop that
+   * would then be refused on the Host.
+   * @param directory - the tree-relative directory the files land in.
+   * @param files - the dropped files with paths relative to that directory.
+   */
+  onUpload?: (directory: string, files: readonly { file: unknown; relativePath: string }[]) => void
+  /**
+   * Where a drop on this table lands, tree-relative.
+   *
+   * The reader's own folder is the right default: `global` is the bucket everyone
+   * reads, so defaulting there would publish a private draft without asking. Empty
+   * means the mount root, which is what a caller with no personal bucket gets.
+   */
+  dropDirectory?: string
 }
 
 /** Format one instant for the table, matching the preview's own absolute form. */
@@ -149,6 +178,109 @@ function locationOf(relPath: string): string {
   return cut === -1 ? '—' : relPath.slice(0, cut)
 }
 
+/** Props for one direction of the Share tab. */
+interface ShareBlockProps {
+  /** Locale-bound copy resolver. */
+  t: (key: string) => string
+  /** The block's heading, which also states the direction. */
+  title: string
+  /** What to say when this direction has no rows. */
+  empty: string
+  /** The rows on the current page. */
+  rows: readonly ShareRow[]
+  /** 1-based page shown. */
+  page: number
+  /** Total pages. */
+  pageCount: number
+  /** Whether the pager is worth drawing at all. */
+  showPager: boolean
+  /** Move to another page. */
+  onPage: (page: number) => void
+  /** How one row's sharing relation reads. */
+  relationOf: (row: ShareRow) => string
+  /** Header for the audience column. */
+  audienceHeader: string
+  /** Copy for a grant whose principal id is empty. */
+  unknownAudience: string
+  /** Locale tag for dates, unused when the row has none. */
+  locale: string
+}
+
+/**
+ * One direction of the Share tab: a heading, its own table, its own pager.
+ *
+ * Kept as one component for both directions so the two blocks cannot drift in layout.
+ * The only thing that differs is `relationOf`, which is where the honesty rule lives:
+ * "shared with me" says where it came from generically, because the sharer is not in
+ * the grant data; "I shared out" names the audience, which is a fact the data does
+ * support.
+ * @param props - the block's rows and copy.
+ * @returns The block.
+ */
+function ShareBlock(props: ShareBlockProps): ReactNode {
+  const c = props.t
+  return (
+    <section className={styles.shareBlock} aria-label={props.title}>
+      <h3 className={styles.shareTitle}>{props.title}</h3>
+      {props.rows.length === 0 ? (
+        <p className={styles.shareEmpty}>{props.empty}</p>
+      ) : (
+        <>
+          <table className={styles.table}>
+            <thead>
+              <tr>
+                <th>{c('homeColTitle')}</th>
+                <th>{c('homeColLocation')}</th>
+                <th>{c('shareColRelation')}</th>
+                <th>{props.audienceHeader}</th>
+                <th>{c('shareColPermission')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {props.rows.map(row => (
+                <tr key={row.id}>
+                  <td>{row.name}</td>
+                  <td className={styles.muted}>{row.location}</td>
+                  <td className={styles.muted}>{props.relationOf(row)}</td>
+                  {/* A grant whose principal id is empty has no audience to name; every
+                      other row prints either the resolved label or the real id. */}
+                  <td className={styles.muted}>
+                    {row.audience === '' ? props.unknownAudience : row.audience}
+                  </td>
+                  <td className={styles.muted}>{row.action}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {props.showPager && (
+            <div className={styles.sharePager}>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={props.page <= 1}
+                onClick={() => { props.onPage(props.page - 1) }}
+              >
+                {c('auditPagePrev')}
+              </Button>
+              <span className={styles.muted}>
+                {c('auditPageOf').replace('{page}', String(props.page)).replace('{pages}', String(props.pageCount))}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={props.page >= props.pageCount}
+                onClick={() => { props.onPage(props.page + 1) }}
+              >
+                {c('auditPageNext')}
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
 /**
  * Render the Home surface.
  * @param props - copy resolver, mount state, and the open callback.
@@ -158,6 +290,8 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   const c = props.t
   const locale = props.locale ?? 'zh-CN'
   const [rows, setRows] = useState<HomeRow[]>([])
+  /** True while a file drag is over the table, so the surface shows it will accept it. */
+  const [dropActive, setDropActive] = useState(false)
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [tab, setTab] = useState<HomeTab>('recent')
   /**
@@ -195,7 +329,119 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   /** Locale-resolved copy for the share dialog, whose strings are dialog-specific. */
   const shareCopy = useMemo(() => shareCopyFor(props.locale), [props.locale])
 
+  /**
+   * The two share groups, read from the grants route the permissions page already uses.
+   *
+   * No new endpoint: the same `grants` payload, split by direction. `null` means "not
+   * read yet", which is distinct from "read and empty" -- the two need different copy,
+   * and an empty array would let a failed read look like a clean bill of health.
+   */
+  const [share, setShare] = useState<{ received: ShareRow[]; given: ShareRow[] } | null>(null)
+  /** Whether the grants read is in flight, so the block can say so instead of flashing empty. */
+  const [shareLoading, setShareLoading] = useState(false)
+  /** A failed grants read, surfaced in the block rather than silently showing nothing. */
+  const [shareError, setShareError] = useState<string | undefined>(undefined)
+  /** Each group pages independently: their sizes differ by orders of magnitude. */
+  const [receivedPage, setReceivedPage] = useState(1)
+  const [givenPage, setGivenPage] = useState(1)
 
+
+
+  /**
+   * Read the grants and split them into the two directions.
+   *
+   * Runs only while the Share tab is open: the grants route is admin-scoped and not
+   * every reader may call it, so asking for it on mount would produce a refusal for
+   * people who never opened the tab. A refusal is shown as itself rather than as an
+   * empty list -- "you cannot see this" and "there is nothing here" are different facts.
+   *
+   * Principal names come from the same `principals` route the permission editor uses,
+   * one call per kind, and a kind that fails simply yields no names -- the rows then
+   * print their real principal ids, which is still true data.
+   */
+  const readShares = useCallback(async (): Promise<void> => {
+    if (props.mountPoint === '') return
+    setShareLoading(true)
+    setShareError(undefined)
+    try {
+      const response = await fetch(kbApiPath(KB_API.grants), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mountPoint: props.mountPoint }),
+        cache: 'no-store',
+      })
+      if (!response.ok) throw new Error('HTTP ' + String(response.status))
+      const payload = await readKnowledgeJson<{
+        grants?: ShareGrant[]
+        supported?: boolean
+        error?: { message?: string }
+      }>(response)
+      if (payload.supported === false) {
+        // No permissions backend: the two groups are genuinely unknown, not empty.
+        // Reuses the permissions surface's own wording rather than adding a key.
+        setShare({ received: [], given: [] })
+        setShareError(c('readFailed'))
+        return
+      }
+      const grants = payload.grants ?? []
+      // Collect the principal ids actually referenced, then resolve each kind once.
+      const needed = new Map<ShareGrant['principalType'], Set<string>>()
+      for (const grant of grants) {
+        const bucket = needed.get(grant.principalType) ?? new Set<string>()
+        bucket.add(grant.principalId)
+        needed.set(grant.principalType, bucket)
+      }
+      const resolved = new Map<string, string>()
+      await Promise.all([...needed.entries()].map(async ([kind, ids]) => {
+        try {
+          const answer = await fetch(kbApiPath(KB_API.principals), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ principalType: kind }),
+            cache: 'no-store',
+          })
+          if (!answer.ok) return
+          const body = await readKnowledgeJson<{ options?: Array<{ id: string; label: string }> }>(answer)
+          for (const option of body.options ?? []) {
+            if (ids.has(option.id)) resolved.set(kind + ':' + option.id, option.label)
+          }
+        } catch {
+          // One kind failing leaves its rows printing their ids, which is still true.
+        }
+      }))
+      const nameOf: PrincipalNameOf = (kind, id) => resolved.get(kind + ':' + id)
+      setShare(splitShareRelations(grants, props.callerId, nameOf))
+    } catch (error: unknown) {
+      setShare({ received: [], given: [] })
+      setShareError(error instanceof Error ? error.message : c('readFailed'))
+    } finally {
+      setShareLoading(false)
+    }
+  }, [props.mountPoint, props.callerId, c])
+
+  // Read the shares when the tab is opened, and again whenever the caller identity
+  // resolves (it arrives after mount), so the split is never computed against
+  // "unknown caller" longer than necessary.
+  useEffect(() => {
+    if (tab !== 'shared') return
+    void readShares()
+  }, [tab, readShares])
+
+  /**
+   * The rows for one group, paged.
+   *
+   * Paged independently because the two groups answer different questions and their
+   * sizes differ: a reader with fifty inbound grants and three outbound would otherwise
+   * have to page past all fifty to see their own three.
+   */
+  const pagedReceived = useMemo(
+    () => paginate(share?.received ?? [], receivedPage, DEFAULT_PAGE_SIZE),
+    [share, receivedPage],
+  )
+  const pagedGiven = useMemo(
+    () => paginate(share?.given ?? [], givenPage, DEFAULT_PAGE_SIZE),
+    [share, givenPage],
+  )
 
     // Read once per mount, one level deep in each bucket.
     //
@@ -269,9 +515,29 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   // the modification instant. The other three need an owner or a star per file,
   // neither of which exists yet, so they render the empty line rather than a
   // fabricated set.
-  const visible = tab === 'recent'
-    ? [...rows].sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
-    : []
+  /**
+   * The rows the current tab shows.
+   *
+   * Only `recent` used to be implemented; the other three fell through to `[]`, which
+   * made them read as "you have nothing" rather than "this tab is not wired up". The
+   * starred tab is now real: it filters the rows already read by the caller's own
+   * favourites, so starring a document makes it appear here without a second request.
+   *
+   * `mine` and `shared` still have no owner information behind them -- the tree carries
+   * no owner per file, only DataOps grants -- so they keep the empty list and their own
+   * empty-state wording rather than inventing a split the data cannot support.
+   */
+  const visible = useMemo(() => {
+    if (tab === 'recent') return [...rows].sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
+    if (tab === 'starred') {
+      // Order by modification time like `recent`, so the same set reads the same way
+      // whichever tab the reader is on.
+      return rows
+        .filter(row => props.isFavorite?.(row.relPath) === true)
+        .sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
+    }
+    return []
+  }, [tab, rows, props.isFavorite])
 
   // The product's own glyphs rather than drawn characters: a text glyph renders at
   // the font's weight and baseline, which reads heavier than the 1px icon stroke
@@ -413,6 +679,32 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
             a header the reader can scan. `DisclosureRow` is the alternative the
             primitives offer, and it renders a two-level tree -- a document list has
             no nesting to disclose. */}
+        <div
+          className={styles.dropZone + (dropActive ? ' ' + styles.dropZoneActive : '')}
+          // The table lists documents only, so there is no directory row to aim at:
+          // the whole surface is the target and the destination is the prop's decision.
+          onDragOver={props.onUpload === undefined ? undefined : (event) => {
+            if (!isFileDrag(event.dataTransfer?.types)) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'copy'
+            setDropActive(true)
+          }}
+          onDragLeave={props.onUpload === undefined ? undefined : () => { setDropActive(false) }}
+          onDrop={props.onUpload === undefined ? undefined : (event) => {
+            setDropActive(false)
+            if (!isFileDrag(event.dataTransfer?.types)) return
+            event.preventDefault()
+            // Must run inside the dispatch: the payload is protected afterwards.
+            void readDroppedFiles(event.dataTransfer).then((files) => {
+              const plan = planDrop(
+                { relativePath: props.dropDirectory ?? '', isDirectory: true, drops: true },
+                { hasFiles: files.length > 0, files },
+              )
+              if (plan.kind === 'upload') props.onUpload?.(plan.directory, plan.files)
+            })
+          }}
+        >
+        {tab !== 'shared' && (
         <table className={styles.table}>
           <thead>
             <tr>
@@ -436,7 +728,10 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
             )}
             {state === 'ready' && visible.length === 0 && (
               <tr className={styles.emptyRow}>
-                <td colSpan={5}>{c('homeEmpty')}</td>
+                {/* A starred tab with nothing in it is not an empty knowledge base; it
+                    is "you have not starred anything yet". Saying the former would send
+                    the reader looking for lost documents. */}
+                <td colSpan={5}>{tab === 'starred' ? c('homeStarredEmpty') : c('homeEmpty')}</td>
               </tr>
             )}
             {visible.map(row => (
@@ -504,6 +799,55 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
             ))}
           </tbody>
         </table>
+        )}
+
+        {/* The Share tab is two tables, not one: the two directions answer different
+            questions and are paged separately. Each block states its own empty case,
+            because "nobody has shared with you" and "you have shared nothing" are
+            different facts and a shared empty message would blur them. */}
+        {tab === 'shared' && (
+          <div className={styles.shareWrap}>
+            {shareError !== undefined && <p className={styles.shareError} role="alert">{shareError}</p>}
+            {shareLoading && share === null && <p className={styles.muted}>{c('loading')}</p>}
+            {share !== null && (
+              <>
+                <ShareBlock
+                  t={c}
+                  title={c('shareGroupReceived')}
+                  empty={c('shareReceivedEmpty')}
+                  rows={pagedReceived.rows}
+                  page={pagedReceived.page}
+                  pageCount={pagedReceived.pageCount}
+                  showPager={needsPager(pagedReceived.total, DEFAULT_PAGE_SIZE)}
+                  onPage={setReceivedPage}
+                  // "Shared with me" has no arrow: the sharer is not in this data, and
+                  // an arrow would claim a fact the backend cannot supply.
+                  relationOf={() => c('shareReceivedRelation')}
+                  audienceHeader={c('shareColPermission')}
+                  unknownAudience={c('shareUnknownAudience')}
+                  locale={locale}
+                />
+                <ShareBlock
+                  t={c}
+                  title={c('shareGroupGiven')}
+                  empty={c('shareGivenEmpty')}
+                  rows={pagedGiven.rows}
+                  page={pagedGiven.page}
+                  pageCount={pagedGiven.pageCount}
+                  showPager={needsPager(pagedGiven.total, DEFAULT_PAGE_SIZE)}
+                  onPage={setGivenPage}
+                  // "I shared out" does state a direction we know: the audience is the
+                  // grant's principal, and the sharer is the caller.
+                  relationOf={row => c('shareGivenRelation').replace('{audience}', row.audience)}
+                  audienceHeader={c('shareColAudience')}
+                  unknownAudience={c('shareUnknownAudience')}
+                  locale={locale}
+                />
+              </>
+            )}
+          </div>
+        )}
+        </div>
       </div>
 
       {/* One menu for the whole table, mounted outside the scroll container so it is

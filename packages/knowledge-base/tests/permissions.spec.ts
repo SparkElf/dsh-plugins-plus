@@ -21,8 +21,12 @@ import {
 } from '../src/permissions.ts'
 import {
   formatGrantInstant,
+  groupHoldingsByAccount,
   groupHoldingsByPrincipal,
   groupHoldingsByResource,
+  groupHoldingsByRole,
+  resolveActions,
+  roleMemberCounts,
   summarizeActions,
 } from '../src/client/permissionRows.ts'
 import { buildRoleSummaries } from '../src/client/roleSummary.ts'
@@ -202,12 +206,32 @@ describe('deciding one role action with an explanation', () => {
 })
 
 describe('permission overview grouping', () => {
-  it('summarizes a full house as all and a partial set explicitly', () => {
-    expect(summarizeActions(['read', 'create', 'update', 'delete'])).toEqual(['all'])
-    expect(summarizeActions(['all'])).toEqual(['all'])
-    // Three of four is not all: claiming it would overstate the grant.
-    expect(summarizeActions(['read', 'create', 'update'])).toEqual(['read', 'create', 'update'])
+  it('summarizes in the vocabulary DataOps actually stores', () => {
+    // These words come from the backend's grant summary (`read`/`write`/`manage`),
+    // NOT from the create/edit form (`create`/`update`/`delete`). An earlier version
+    // filtered on the form words, so every `write` and `manage` grant was dropped and
+    // an administrator holding all three displayed as "read only". This test used to
+    // assert that defect -- it passed while the screen lied.
+    expect(summarizeActions(['read', 'write', 'manage'])).toEqual(['read', 'write', 'manage'])
+    expect(summarizeActions(['read'])).toEqual(['read'])
     expect(summarizeActions([])).toEqual([])
+    // A full house still collapses, now expressed in the real words.
+    expect(summarizeActions(['all'])).toEqual(['read', 'write', 'manage'])
+  })
+
+  it('unions a principal grants instead of reading one row', () => {
+    // Read and write arrive on separate rows; what the principal holds is both.
+    expect(resolveActions(['read', 'write'])).toEqual({ actions: ['read', 'write'], known: true })
+    // Duplicates and case do not change the answer.
+    expect(resolveActions(['READ', 'write', 'read'])).toEqual({ actions: ['read', 'write'], known: true })
+  })
+
+  it('reports an unknown action word rather than silently dropping it', () => {
+    // Under-reporting a permission is the dangerous direction: it tells an operator
+    // that access is lower than it is.
+    const resolved = resolveActions(['read', 'share'])
+    expect(resolved.known).toBe(false)
+    expect(resolved.reason).toContain('share')
   })
 
   it('groups one person into one row even across several grants', () => {
@@ -305,5 +329,141 @@ describe('the two tabbed readings of one grant table', () => {
 
   it('formats a missing instant as a dash rather than an epoch date', () => {
     expect(formatGrantInstant('')).toBe('-')
+  })
+})
+
+describe('the three permission views', () => {
+  /** A minimal grant row; only the fields grouping reads are meaningful. */
+  function grant(over: Partial<import('../src/api.ts').GrantView> & { id: string }): import('../src/api.ts').GrantView {
+    return {
+      relPath: 'global/a.md',
+      kind: 'file',
+      principalType: 'user',
+      principalId: 'u-1',
+      action: 'read',
+      grantedBy: 'admin',
+      grantedAt: '2026-01-01T00:00:00.000Z',
+      ...over,
+    }
+  }
+
+  /** The directory the page gets from `/api/system/users`, reduced. */
+  const directory = {
+    kind: 'available' as const,
+    users: [
+      { userId: 'u-1', username: 'zhang', displayName: '张三', roleCodes: ['管理员'] },
+      { userId: 'u-2', username: 'li', displayName: '李四', roleCodes: [] },
+    ],
+  }
+
+  it('attributes a role grant to every member of that role', () => {
+    // The defect being fixed: a reader whose access is entirely role-derived appeared
+    // on no row, so "by person" said nobody had access while they could write.
+    const rows = groupHoldingsByAccount(
+      [grant({ id: 'g1', principalType: 'role', principalId: '管理员', action: 'write' })],
+      directory,
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.userId).toBe('u-1')
+    expect(rows[0]?.label).toBe('张三')
+    expect(rows[0]?.paths).toEqual(['global/a.md'])
+    expect(rows[0]?.viaRoles).toEqual(['管理员'])
+    expect(rows[0]?.resolved).toEqual({ actions: ['write'], known: true })
+  })
+
+  it('unions a direct grant with an inherited one on the same account', () => {
+    // THE key case: one person holding a direct read AND an inherited write must show
+    // read+write -- not read (first row), not write (last row), and not the intersection.
+    const rows = groupHoldingsByAccount(
+      [
+        grant({ id: 'g1', principalType: 'user', principalId: 'u-1', action: 'read' }),
+        grant({ id: 'g2', principalType: 'role', principalId: '管理员', action: 'write' }),
+        grant({ id: 'g3', principalType: 'role', principalId: '管理员', action: 'manage' }),
+      ],
+      directory,
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.resolved).toEqual({ actions: ['read', 'write', 'manage'], known: true })
+    expect(rows[0]?.directGrants.map(g => g.id)).toEqual(['g1'])
+    expect(rows[0]?.viaRoles).toEqual(['管理员'])
+  })
+
+  it('does not merge two different accounts into one row', () => {
+    // A role covers several people: each gets their own row, not one shared row.
+    const rows = groupHoldingsByAccount(
+      [grant({ id: 'g1', principalType: 'role', principalId: '管理员', action: 'read' })],
+      { kind: 'available', users: [
+        { userId: 'u-1', username: 'zhang', displayName: '张三', roleCodes: ['管理员'] },
+        { userId: 'u-2', username: 'li', displayName: '李四', roleCodes: ['管理员'] },
+      ] },
+    )
+    expect(rows.map(row => row.userId).sort()).toEqual(['u-1', 'u-2'])
+    expect(rows.every(row => row.resolved.actions.includes('read'))).toBe(true)
+  })
+
+  it('marks inheritance unknown instead of pretending the account holds nothing', () => {
+    // The safety net: without the directory a role grant cannot be attributed, and
+    // showing "read only, directly granted" would be a false negative.
+    const rows = groupHoldingsByAccount(
+      [
+        grant({ id: 'g1', principalType: 'user', principalId: 'u-1', action: 'read' }),
+        grant({ id: 'g2', principalType: 'role', principalId: '管理员', action: 'write' }),
+      ],
+      { kind: 'unavailable', reason: 'requires administrator access' },
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.inheritanceKnown).toBe(false)
+    expect(rows[0]?.inheritanceReason).toContain('administrator')
+    // The direct half is still correct and still shown.
+    expect(rows[0]?.resolved).toEqual({ actions: ['read'], known: true })
+  })
+
+  it('lists roles separately from accounts', () => {
+    // The old "by person" tab showed the administrators; those rows belong here.
+    const rows = groupHoldingsByRole(
+      [
+        grant({ id: 'g1', principalType: 'role', principalId: '管理员', action: 'read' }),
+        grant({ id: 'g2', principalType: 'role', principalId: '管理员', action: 'write' }),
+        grant({ id: 'g3', principalType: 'role', principalId: '超级管理员', action: 'manage' }),
+        grant({ id: 'g4', principalType: 'user', principalId: 'u-1', action: 'read' }),
+      ],
+      {},
+      roleMemberCounts(directory),
+    )
+    // Sorted by label via localeCompare, which orders 管理员 before 超级管理员.
+    expect(rows.map(row => row.roleCode)).toEqual(['管理员', '超级管理员'])
+    const admin = rows.find(row => row.roleCode === '管理员')
+    expect(admin?.resolved).toEqual({ actions: ['read', 'write'], known: true })
+    expect(admin?.memberCount).toBe(1)
+    expect(admin?.paths).toEqual(['global/a.md'])
+  })
+
+  it('reports a role whose grant actions cannot be read as unknown, not as read-only', () => {
+    // Safety net for the role view: an unreadable action word must not render as a
+    // lower permission than it is.
+    const rows = groupHoldingsByRole([
+      grant({ id: 'g1', principalType: 'role', principalId: '管理员', action: 'share' }),
+    ])
+    expect(rows[0]?.resolved.known).toBe(false)
+    expect(rows[0]?.resolved.reason).toContain('share')
+  })
+
+  it('omits the member count rather than claiming zero when the directory is unknown', () => {
+    expect(roleMemberCounts({ kind: 'unavailable', reason: 'x' })).toBeUndefined()
+    const rows = groupHoldingsByRole(
+      [grant({ id: 'g1', principalType: 'role', principalId: '管理员', action: 'read' })],
+      {},
+      roleMemberCounts({ kind: 'unavailable', reason: 'x' }),
+    )
+    expect(rows[0]?.memberCount).toBeUndefined()
+  })
+
+  it('does not invent a row for a directory account that holds nothing', () => {
+    const rows = groupHoldingsByAccount(
+      [grant({ id: 'g1', principalType: 'user', principalId: 'u-1', action: 'read' })],
+      directory,
+    )
+    // u-2 has no grants and no roles, so it is not a permission row.
+    expect(rows.map(row => row.userId)).toEqual(['u-1'])
   })
 })

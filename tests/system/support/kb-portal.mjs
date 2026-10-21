@@ -132,7 +132,10 @@ export async function clickSection(frame, label) {
   const asButton = frame.getByRole('button', { name: label, exact: true }).first()
   const target = (await asButton.count()) > 0 ? asButton : frame.getByText(label, { exact: true }).first()
   await expect(target).toBeVisible({ timeout: 25_000 })
-  await target.click()
+  // `force` 是必要的：DSH 外壳会在这一行上方留一个透明层（onboarding 的捕获层、
+  // 或刚挂载时的布局占位），Playwright 的命中测试认为按钮被挡住就永远不点。实测把
+  // 这个点击改成 force 才稳定，而按钮本身确实是可见、可用、稳定的。
+  await target.click({ force: true })
 }
 
 /**

@@ -23,6 +23,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
+import { isFileDrag, planDrop, readDroppedFiles, summarizeDrop } from './useFileDrop.ts'
 import {
   FileTypeIcon,
   IconFolderOpenRegular,
@@ -108,6 +109,17 @@ export interface KnowledgeListingProps {
    * row is the tree's root, which has no parent to paste beside.
    */
   pasteTargetFor?: (relPath: string, isDir: boolean) => string | null
+  /**
+   * Upload external files dropped onto a directory row.
+   *
+   * Distinct from the row-to-row move handled above: a file dragged in from the
+   * desktop carries no `KB_DRAG_MIME`, so it is the only case this callback serves.
+   * Omitted by a read-only caller, which keeps the rows from accepting a drop that
+   * would then be refused on the Host.
+   * @param relPath - the directory the files were dropped onto.
+   * @param files - the dropped files with paths relative to that directory.
+   */
+  onUpload?: (relPath: string, files: readonly { file: unknown; relativePath: string }[]) => void
   /**
    * Called after a menu-driven delete or paste succeeded.
    *
@@ -246,6 +258,8 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   /** The path a drag is currently hovering, so the row can show the drop target. */
   const [dropTarget, setDropTarget] = useState<string | undefined>(undefined)
+  /** Whether this listing accepts files dragged in from outside the page. */
+  const uploadable = props.onUpload !== undefined
   // The open context menu: which row, and where the pointer was. Both are needed because
   // the menu is positioned from the pointer, not from the row's own control.
   const [menu, setMenu] = useState<{ target: ContextTarget; at: { x: number; y: number } } | null>(null)
@@ -398,7 +412,17 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
         dragSource.current = undefined
         setDropTarget(undefined)
       } : undefined}
-      onDragOver={entry.isDir && draggable ? (event) => {
+      onDragOver={(entry.isDir && (draggable || uploadable)) ? (event) => {
+        // An external file drag (a desktop file) and an in-list row drag arrive on the
+        // same row. `Files` in `types` is what separates them: only the external one
+        // has it, and only during `dragover` is `types` readable at all.
+        if (isFileDrag(event.dataTransfer?.types)) {
+          if (!uploadable) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+          if (dropTarget !== entry.relPath) setDropTarget(entry.relPath)
+          return
+        }
         const source = dragSource.current
         // A folder cannot be dropped into itself, and dropping a path back into
         // its own parent is a no-op that would still cost a round trip.
@@ -414,9 +438,24 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
         // unconditionally would flicker the highlight off.
         setDropTarget(current => (current === entry.relPath ? undefined : current))
       } : undefined}
-      onDrop={entry.isDir && draggable ? (event) => {
-        event.preventDefault()
+      onDrop={(entry.isDir && (draggable || uploadable)) ? (event) => {
         setDropTarget(undefined)
+        // An external file drop uploads; anything else is the in-list move below.
+        if (isFileDrag(event.dataTransfer?.types)) {
+          if (!uploadable) return
+          event.preventDefault()
+          // `readDroppedFiles` must be called from the drop handler itself: the
+          // dataTransfer enters protected mode once this dispatch ends.
+          void readDroppedFiles(event.dataTransfer).then((files) => {
+            const plan = planDrop({ relativePath: entry.relPath, isDirectory: true, drops: true }, {
+              hasFiles: files.length > 0,
+              files,
+            })
+            if (plan.kind === 'upload') props.onUpload?.(plan.directory, plan.files)
+          })
+          return
+        }
+        event.preventDefault()
         const payload = readDragPayload(event.dataTransfer)
         dragSource.current = undefined
         if (payload === null) return

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -77,8 +77,7 @@ const EMPTY_DRAFT: StorageDraft = {
 /** What a save attempt ended as. */
 type SaveState =
   | { kind: 'idle' }
-  | { kind: 'saving' }
-  | { kind: 'saved'; restartRequired: boolean; saved: string[] }
+  | { kind: 'saved' }
   | { kind: 'failed'; message: string }
 
 /** Seed the draft from what the deployment reports. */
@@ -118,12 +117,19 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
   // 知识库自己的偏好（当前只有 MinerU 地址与 review 开关）与部署配置是两条读路径：
   // 前者是每个 caller 的 view 目录里的文件，后者是部署级配置。分开加载，互不阻塞。
-  const [mineru, setMineru] = useState<{ stored: string; canEdit: boolean } | undefined>(undefined)
+  /**
+   * MinerU settings: the stored address, the address this deployment derives when
+   * none is stored, and whether the caller may write either.
+   *
+   * `stored === ''` is what "derive it" looks like, so the derived address is a
+   * separate field rather than a client-side guess: it is computed by the Host from
+   * the live config and sent back with the settings.
+   */
+  const [mineru, setMineru] = useState<
+    { stored: string; derived: string; canEdit: boolean } | undefined
+  >(undefined)
   const [mineruDraft, setMineruDraft] = useState<string | undefined>(undefined)
-  const [mineruBusy, setMineruBusy] = useState(false)
-  const [mineruNotice, setMineruNotice] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
   // What the reader is editing, seeded from the server and saved by an explicit action.
   // Deliberately NOT applied on change: the deployment's storage shape is decided when the
   // workspace container is created, so a radio button that silently rewrote it would be
@@ -131,6 +137,14 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
   // save means for the running deployment.
   const [draft, setDraft] = useState<StorageDraft>(EMPTY_DRAFT)
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' })
+  /**
+   * The stored review flag, held for the merged write.
+   *
+   * `settings.set` replaces one record that also carries the review switch, and that
+   * switch belongs to another page. Sending the stored value keeps this page's save
+   * from silently flipping a setting it does not show.
+   */
+  const reviewRequiredRef = useRef(false)
 
   const load = useCallback(async () => {
     setState({ kind: 'loading' })
@@ -142,14 +156,23 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
       // 设置读取失败不能拖垮整个分节：地址是附加配置，读不到就按"未配置"显示，
       // 用户可以照样改存储模式与部署。
       try {
-        const reply = await postJson<{ settings?: { mineruBaseUrl?: string }; canEdit?: boolean }>(KB_API.settingsGet)
+        const reply = await postJson<{
+          settings?: { mineruBaseUrl?: string }
+          canEdit?: boolean
+          // The address in effect, derived by the Host when nothing is stored. Absent
+          // when the deployment has no usable port, in which case there is nothing to
+          // show and the field stays empty.
+          mineruUrl?: string
+        }>(KB_API.settingsGet)
         setMineru({
           stored: typeof reply.settings?.mineruBaseUrl === 'string' ? reply.settings.mineruBaseUrl : '',
+          derived: typeof reply.mineruUrl === 'string' ? reply.mineruUrl : '',
           canEdit: reply.canEdit === true,
         })
+        reviewRequiredRef.current = (reply.settings as { reviewRequired?: boolean } | undefined)?.reviewRequired === true
         setMineruDraft(undefined)
       } catch {
-        setMineru({ stored: '', canEdit: false })
+        setMineru({ stored: '', derived: '', canEdit: false })
       }
       setDraft(draftOf(config, status))
       setSaveState({ kind: 'idle' })
@@ -160,34 +183,38 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
 
   useEffect(() => { void load() }, [load])
 
-  const buildIndex = useCallback(async () => {
-    setBusy(true)
-    setNotice(undefined)
-    try {
-      await postJson(KB_API.index)
-      setNotice(t('indexStarted'))
-    } catch {
-      setNotice(t('indexFailed'))
-    } finally {
-      setBusy(false)
-    }
-  }, [t])
-
   /**
-   * Persist the edited storage settings.
+   * Persist everything this section edits, in one action.
    *
-   * A port that is not a number is refused here rather than sent: the server would reject it
-   * anyway, and the reader deserves the answer next to the field they typed in.
+   * One button rather than one per group: the two groups are two halves of the same
+   * settings record and the reader edits them as one page, so two buttons made every
+   * visit a question of which one to press. Both writes are the same click.
+   *
+   * The two writes are issued together but reported apart, because they can fail
+   * apart: `config.set` writes the deployment's storage shape and `settings.set` writes
+   * the caller's MinerU address, and a partial failure has to name which half landed.
+   *
+   * A port that is not a number is refused before the round trip: the server would
+   * reject it anyway, and the answer belongs beside the field that was typed in.
    */
-  const saveStorage = useCallback(async () => {
-    setSaveState({ kind: 'saving' })
+  const save = useCallback(async () => {
+    setBusy(true); setSaveState({ kind: 'idle' })
     const port = Number(draft.sshPort)
     if (draft.protocol === 'sshfs' && (!Number.isInteger(port) || port <= 0 || port > 65_535)) {
       setSaveState({ kind: 'failed', message: t('saveBadPort') })
+      setBusy(false)
       return
     }
+
+    // Only an edited field is written. Untouched, the input shows the derived address,
+    // and sending that back would freeze today's derivation into an explicit setting --
+    // so a deployment that only follows its configured port would acquire a stored
+    // address the moment someone pressed save for an unrelated reason.
+    const mineruChanged = mineruDraft !== undefined && mineru !== undefined && mineruDraft !== mineru.stored
+
+    let storageFailure: string | undefined
     try {
-      const result = await postJson<KnowledgeConfigWriteResult>(KB_API.configSet, {
+      await postJson<KnowledgeConfigWriteResult>(KB_API.configSet, {
         storageMode: draft.mode,
         storageProtocol: draft.protocol,
         nfsServer: draft.nfsServer,
@@ -198,11 +225,51 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
         sshMountOptions: draft.sshMountOptions,
         sshKeyRef: draft.sshKeyRef,
       })
-      setSaveState({ kind: 'saved', restartRequired: result.restartRequired, saved: result.saved })
     } catch (error) {
-      setSaveState({ kind: 'failed', message: error instanceof Error ? error.message : String(error) })
+      storageFailure = error instanceof Error ? error.message : String(error)
     }
-  }, [draft, t])
+
+    let settingsFailure: string | undefined
+    if (mineruChanged) {
+      try {
+        const reply = await postJson<{
+          settings?: { mineruBaseUrl?: string }
+          mineruUrl?: string
+        }>(KB_API.settingsSet, {
+          // The review switch lives in this record but belongs to another page; sent as
+          // the value already stored so this write cannot change it.
+          reviewRequired: reviewRequiredRef.current,
+          mineruBaseUrl: mineruDraft,
+        })
+        const stored = typeof reply.settings?.mineruBaseUrl === 'string' ? reply.settings.mineruBaseUrl : ''
+        setMineru(current => (current === undefined ? current : {
+          ...current,
+          stored,
+          derived: typeof reply.mineruUrl === 'string' ? reply.mineruUrl : current.derived,
+        }))
+        setMineruDraft(undefined)
+      } catch (error) {
+        settingsFailure = error instanceof Error ? error.message : String(error)
+      }
+    }
+
+    // Re-read both sources: the Host normalises what it stores, and the restart flag
+    // below is about the deployment, not about what this page asked for.
+    try {
+      const status = await postJson<KnowledgeStatusView>(KB_API.status)
+      setState(current => (current.kind === 'ready' ? { ...current, status } : current))
+    } catch {
+      // A status read is only used for the restart hint; a failure here must not report
+      // a save that succeeded as broken.
+    }
+
+    if (storageFailure !== undefined || settingsFailure !== undefined) {
+      setSaveState({ kind: 'failed', message: (storageFailure ?? settingsFailure) as string })
+    } else {
+      setSaveState({ kind: 'saved' })
+    }
+    setBusy(false)
+  }, [draft, mineru, mineruDraft, t])
 
   if (state.kind === 'loading') {
     return (
@@ -226,43 +293,25 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
     )
   }
 
-  /**
-   * 保存 MinerU 服务地址。
-   *
-   * review 开关与地址是同一条设置记录，所以一起提交：只发地址会让 Host 认为调用方
-   * 要清空 review，只发 review 则会清空地址（Host 侧对缺省字段的处理是"保留原值"，
-   * 但这里显式带上更清楚）。保存后重新读回，显示的永远是已存值而不是输入值。
-   */
-  const saveMineru = async (): Promise<void> => {
-    if (mineruDraft === undefined || mineru === undefined) return
-    setMineruBusy(true); setMineruNotice(undefined)
-    try {
-      const reply = await postJson<{ settings?: { mineruBaseUrl?: string } }>(KB_API.settingsSet, {
-        reviewRequired: false,
-        mineruBaseUrl: mineruDraft,
-      })
-      setMineru({
-        stored: typeof reply.settings?.mineruBaseUrl === 'string' ? reply.settings.mineruBaseUrl : '',
-        canEdit: mineru.canEdit,
-      })
-      setMineruDraft(undefined)
-      setMineruNotice(t('settingsSaved'))
-    } catch (error: unknown) {
-      setMineruNotice(error instanceof Error ? error.message : t('settingsSaveFailed'))
-    } finally {
-      setMineruBusy(false)
-    }
-  }
-
   const { config, status } = state
+
+  /**
+   * Whether the save changed the shape the running deployment was started with.
+   *
+   * The mount is a bind decided at container create, so a stored change to it cannot
+   * take effect until the workspace container is recreated. Comparing the draft with
+   * what `status` reports is the only honest way to know: the write succeeded either
+   * way, and saying nothing would leave the reader waiting for an effect that is not
+   * coming.
+   */
+  const restartNeeded = draft.mode !== (status.storageMode === 'remote' ? 'remote' : 'local')
+    || draft.protocol !== (status.storageProtocol ?? config.storageProtocol ?? 'nfs')
 
   return (
     <section className={styles.section}>
       <h2 className={styles.title}>{t('title')}</h2>
 
       <div className={styles.body}>
-        <p className={styles.description}>{t('description')}</p>
-
           {/* Storage: what decides the rest of this section. The reader edits and presses
               save; nothing here is applied on change, because the shape is fixed when the
               workspace container is created. */}
@@ -289,9 +338,6 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
               <span>{t('storageModeRemote')}</span>
             </label>
           </div>
-          <p className={styles.detail}>
-            {draft.mode === 'local' ? t('storageModeLocalHint') : t('storageModeRemoteHint')}
-          </p>
 
           {draft.mode === 'remote' && (<>
             {/* The transport decides which fields matter, so it is asked for before them. */}
@@ -417,28 +463,6 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
 
           </>)}
 
-          {/* Outside the remote branch on purpose: switching BACK to local is equally a
-              change, and a save control that vanishes with the choice it would record
-              leaves the reader unable to return. */}
-          <div className={styles.saveRow}>
-            <Button
-              variant="primary"
-              disabled={saveState.kind === 'saving'}
-              onClick={() => { void saveStorage() }}
-            >
-              {saveState.kind === 'saving' ? t('saving') : t('save')}
-            </Button>
-            {saveState.kind === 'saved' && (
-              <p className={styles.notice} role="status">
-                {t('savedOk')}
-                {saveState.restartRequired ? ' ' + t('savedRestart') : ''}
-              </p>
-            )}
-            {saveState.kind === 'failed' && (
-              <p className={styles.error} role="alert">{saveState.message}</p>
-            )}
-          </div>
-
           {/* Where the tree is mounted, and the resolved paths it points at: facts about
               the running deployment rather than settings, so they read as values. */}
           <h3 className={styles.groupTitle}>{t('connection')}</h3>
@@ -469,11 +493,16 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
 
         <DeploymentWizard t={t} storageMode={status.storageMode} />
 
-          {/* MinerU 的地址。端口只能表达"本机"，所以服务在隧道、网关或另一台机器后面时
-              没有地方填。留空即按部署配置的端口推导，因此这是一项可选覆盖而不是必填项。
-              本地与远程模式都显示：文档解析与存储形态无关。 */}
+          {/* MinerU's address. A port can only ever mean this machine, so a service
+              behind a tunnel, a gateway or another host has nowhere to be named; this
+              field is that override, and the stored value is empty when it is unused.
+
+              The field shows the address IN EFFECT, not the stored one. When nothing is
+              stored the deployment derives the address from its configured port -- a
+              working configuration -- and showing that as a blank box claimed there was
+              nothing to see. The caption underneath says which of the two it is, so the
+              reader is never left thinking a derived value was saved. */}
           <h3 className={styles.groupTitle}>{t('settingsMineruHeading')}</h3>
-          <p className={styles.detail}>{t('settingsMineruHint')}</p>
           {mineru === undefined
             ? <p className={styles.detail}>{t('settingsLoading')}</p>
             : (
@@ -487,39 +516,56 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
                     className={styles.input}
                     type="url"
                     inputMode="url"
-                    value={mineruDraft ?? mineru.stored}
-                    placeholder={t('settingsMineruPlaceholder')}
+                    // Untouched, this is the effective address: the stored one when there
+                    // is one, otherwise what the deployment derives.
+                    value={mineruDraft ?? (mineru.stored !== '' ? mineru.stored : mineru.derived)}
+                    // An empty box would fall back to this, which says where the value
+                    // comes from rather than promising a blank state that cannot happen.
+                    placeholder={mineru.derived !== '' ? mineru.derived : t('settingsMineruPlaceholder')}
                     // 没有授权的人看到的是已配置值，但改不了：这是部署级行为，不是
                     // 个人偏好，所以按 canEdit 禁用而不是隐藏。
-                    disabled={!mineru.canEdit || mineruBusy}
+                    disabled={!mineru.canEdit || busy}
                     onChange={(event) => { setMineruDraft(event.target.value) }}
                   />
                 </div>
-                <div className={styles.actions}>
-                  <Button
-                    variant="primary"
-                    disabled={!mineru.canEdit || mineruBusy || mineruDraft === undefined}
-                    onClick={() => { void saveMineru() }}
-                  >
-                    {mineruBusy ? t('settingsSaving') : t('settingsSave')}
-                  </Button>
-                  {/* 说清当前生效来源比只显示原始值重要：空值不是"没配置"，而是
-                      "按端口推导"，那是能工作的配置。 */}
-                  <span className={styles.detail}>
-                    {mineru.stored === '' ? t('settingsMineruDerived') : t('settingsMineruExplicit')}
-                  </span>
-                </div>
+                {/* Which address is in effect, and why. The derived case names the
+                    source rather than the value the field already shows. */}
+                <p className={styles.detail}>
+                  {mineru.stored !== '' || (mineruDraft !== undefined && mineruDraft !== '')
+                    ? t('settingsMineruExplicit')
+                    : t('settingsMineruDerived')}
+                </p>
                 {!mineru.canEdit && <p className={styles.detail}>{t('settingsReadOnly')}</p>}
-                {mineruNotice !== undefined && <p className={styles.notice} role="status">{mineruNotice}</p>}
               </>
             )}
+
+          {/* One save for the whole section, last: both groups are one settings record
+              edited on one page, and two buttons made every visit a question of which to
+              press. Storage is written by `config.set` and the address by `settings.set`;
+              the button submits whichever of them the reader actually changed. */}
+          <div className={styles.saveRow}>
+            <Button
+              variant="primary"
+              disabled={busy}
+              onClick={() => { void save() }}
+            >
+              {busy ? t('saving') : t('save')}
+            </Button>
+            {saveState.kind === 'saved' && (
+              <p className={styles.notice} role="status">
+                {t('savedOk')}
+                {restartNeeded ? ' ' + t('savedRestart') : ''}
+              </p>
+            )}
+            {saveState.kind === 'failed' && (
+              <p className={styles.error} role="alert">{saveState.message}</p>
+            )}
+          </div>
 
           {/* Runtime state (idle/indexing, visible count, last sync, the read-only grant
               list) deliberately stays off this page: a settings surface answers "what can
               I change", while those answer "what is happening right now". They live on the
               Home and Permissions pages, which is where a reader goes to look at them. */}
-
-        {notice !== undefined && <p className={styles.notice} role="status">{notice}</p>}
 
       </div>
     </section>
@@ -637,34 +683,13 @@ function DeploymentWizard({ t, storageMode }: { t: KnowledgeSettingsInjected['t'
   // shape (see `hostsLoaded`).
   if (!hostsLoaded) return null
 
-  /**
-   * The local shape: one sentence and a way to learn what the block is for.
-   *
-   * Not the disabled buttons with an explanation attached: a control that cannot act
-   * is not made acceptable by explaining it, and the reader who is local has no
-   * decision to make here. The pointer keeps the capability findable for the reader
-   * who is about to switch this deployment to a remote store, which is the one
-   * question the absence would otherwise leave open. It is a disclosure rather than
-   * a link because the plugin owns no documentation URL, and inventing one would be
-   * worse than not offering it.
-   */
-  if (!hasRemoteTarget) {
-    return (
-      <div className={styles.wizard} data-testid="kb-deploy-local-note">
-        <h3 className={styles.groupTitle}>{t('deploy')}</h3>
-        <p className={styles.detail}>{t('deployLocalOnly')}</p>
-        {/* Plain text, not a link and not a disclosure. The plugin owns no
-            documentation URL, and inventing one would send the reader to a 404; a
-            `details` element would also be a control, and the whole point of this
-            branch is that there is nothing here to operate. When a real page exists
-            this becomes the one place to attach it. */}
-        <div className={styles.deployAbout}>
-          <p className={styles.deployAboutLabel}>{t('deployAboutRemote')}</p>
-          <p className={styles.detail}>{t('deployAboutRemoteBody')}</p>
-        </div>
-      </div>
-    )
-  }
+  // No remote target: nothing here can act, and the explanation that used to fill
+  // this branch is gone (the reader struck it out), which would leave the heading
+  // `Deployment` standing over emptiness. A lone heading is a promise of controls
+  // that are not there, so the whole block disappears instead. `hasRemoteTarget`
+  // still gates the wizard: with a host or a remote mode the steps below render as
+  // before.
+  if (!hasRemoteTarget) return null
 
   return (
     <div className={styles.wizard}>

@@ -1,0 +1,128 @@
+/*
+ * The progress strip at the bottom of the knowledge base panel.
+ *
+ * A resident strip rather than an overlay: it sits in the panel's own flow so it never
+ * covers the tree, and it is bounded in height so a long batch scrolls inside itself
+ * instead of pushing the tree away. Ink and type come from theme tokens; the only
+ * geometry here is spacing, so the strip follows the product's scale.
+ */
+
+/* The strip itself: a hairline above it is what separates it from the tree without
+   drawing a card that competes with the content. */
+.strip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* Summary line and the fold control. It stays one line at every width; the summary
+   truncates rather than wrapping, because a wrapped header changes the strip's height
+   every time a count changes. */
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+}
+
+.summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* The scrolling body. `max-height` keeps a 500-file drop from owning the panel: the
+   tree stays reachable and the list scrolls within itself. */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.groupTitle {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-strong-11);
+  font-variant-numeric: tabular-nums;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One task per row: name, destination, state, and the bar. The name gets the free
+   space and truncates, so the state column never shifts as names differ in length. */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+.dir {
+  flex: 0 1 auto;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+.state {
+  flex: 0 1 auto;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxxs-11);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A 3px bar: enough to read a column of them at a glance, thin enough not to look
+   like a control. `--dsw-alias-bg-layer-3` is the track so it recedes on every theme. */
+.bar {
+  flex: 0 0 40px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-3);
+  overflow: hidden;
+}
+
+.barFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--dsw-alias-brand-primary);
+  transition: width 200ms ease;
+}

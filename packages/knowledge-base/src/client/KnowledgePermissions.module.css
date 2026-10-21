@@ -355,3 +355,58 @@
   color: var(--dsw-alias-label-tertiary);
   cursor: default;
 }
+
+/* ---- The pager under each of the three permission tables ----
+
+   One strip for all three views, so the count, the navigation and the size control
+   cannot drift between them. It mirrors the audit table's pager: the count answers
+   "how much am I reading", the previous/next pair only exists when there is somewhere
+   to go, and the size control sits at the far end because it is a setting rather than
+   something a reader clicks repeatedly. */
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  justify-content: flex-start;
+}
+
+/* Tertiary ink and tabular figures: this line is orientation, not content, and the
+   fixed-width digits keep the row from shifting as the count crosses 9 -> 10 -> 100. */
+.pagerStatus {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Pushed to the far end: choosing a page size is a preference, not part of the
+   previous/next gesture the reader repeats. */
+.pageSize {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* ---- Where a principal's access comes from ----
+
+   A cell can hold one tag ("direct") or several ("via role A", "via role B"), so it
+   sits as a small flex column rather than inheriting the chip row's wrapping. */
+
+.sourceCell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+/* The explanatory line under a source or an unknown permission. Deliberately the same
+   tertiary 11px the rest of the table's secondary text uses: it must be readable
+   without competing with the tag it qualifies. */
+.sourceHint {
+  flex-basis: 100%;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}

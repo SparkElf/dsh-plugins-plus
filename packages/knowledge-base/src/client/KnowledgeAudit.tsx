@@ -18,13 +18,21 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useState } from 'react'
-import { Button, SegmentedTabs, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Button, SegmentedControl, SegmentedTabs, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath } from '../api.ts'
 import type {
   KnowledgeAuditEntryView,
   PendingWriteView,
 } from './KnowledgeSettings.tsx'
+import { sortAuditRows } from './auditPaging.ts'
+import {
+  DEFAULT_PAGE_SIZE,
+  PAGE_SIZES,
+  needsPager,
+  pageAfterSizeChange,
+  paginate,
+} from './paging.ts'
 import tableStyles from './KnowledgePermissions.module.css'
 import styles from './KnowledgeAudit.module.css'
 import panelStyles from './KnowledgePanel.module.css'
@@ -52,6 +60,15 @@ type LoadState =
   | { kind: 'loading' }
   | { kind: 'ready'; data: AuditData }
   | { kind: 'error'; message: string }
+
+/**
+ * The rows the ordering hooks read before the first successful load.
+ *
+ * A module constant rather than an inline `[]`: a fresh array literal on every render
+ * would be a new dependency identity, so the `useMemo` below would recompute on every
+ * pass while the page is loading or failed.
+ */
+const EMPTY_ENTRIES: KnowledgeAuditEntryView[] = []
 
 /**
  * Format an audit instant for a table cell.
@@ -125,6 +142,18 @@ export function KnowledgeAudit(props: KnowledgeAuditProps) {
   const [tab, setTab] = useState<AuditTab>('review')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | undefined>(undefined)
+  /**
+   * Which page of the trail is shown, and how big a page is.
+   *
+   * Local state on purpose: a page position is where this reader is in a list right
+   * now, not a document-level preference like the list/grid choice. Persisting it
+   * would reopen the page on page 7 of a trail that has since grown.
+   *
+   * They live here rather than inside `renderTrail` because that function runs on
+   * every render and a hook inside it would change the hook count.
+   */
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -164,6 +193,27 @@ export function KnowledgeAudit(props: KnowledgeAuditProps) {
     }
   }
 
+  /**
+   * The trail in display order, computed rather than inherited.
+   *
+   * The Host appends newest-last, and the previous version of this table simply drew
+   * the array in the order it received. That is an accident of the writer, not a
+   * promise: `sortAuditRows` states the order the reader is being shown and keeps it
+   * stable when several rows share an instant.
+   *
+   * Read from `state` defensively rather than from a destructured `entries`, because
+   * these hooks must sit ABOVE the early returns: a hook below them changes the hook
+   * count between renders and aborts the subtree.
+   */
+  const entries = state.kind === 'ready' ? state.data.entries : EMPTY_ENTRIES
+  const ordered = useMemo(() => sortAuditRows(entries), [entries])
+
+  /** The visible page of the trail, clamped into range. */
+  const trailPage = useMemo(
+    () => paginate(ordered, page, pageSize),
+    [ordered, page, pageSize],
+  )
+
   if (state.kind === 'loading') {
     return <div className={panelStyles.notice}>{c('settingsLoading')}</div>
   }
@@ -171,7 +221,18 @@ export function KnowledgeAudit(props: KnowledgeAuditProps) {
     return <div className={panelStyles.notice}>{c('settingsLoadFailed')}</div>
   }
 
-  const { pending, canDecide, entries } = state.data
+  const { pending, canDecide } = state.data
+
+  // A size change keeps the row the reader was looking at in view: switching 20 -> 50
+  // while reading row 41 should land on the page that still contains row 41, not on
+  // page 1 (which would throw away their position) nor on the old page number (which
+  // now points somewhere else). `paginate` clamps the answer if the list is shorter.
+  const changePageSize = (next: string): void => {
+    const parsed = Number(next)
+    const size = PAGE_SIZES.includes(parsed as (typeof PAGE_SIZES)[number]) ? parsed : DEFAULT_PAGE_SIZE
+    setPage(pageAfterSizeChange(page, pageSize, size))
+    setPageSize(size)
+  }
 
   return (
     <div className={styles.audit}>
@@ -289,13 +350,13 @@ export function KnowledgeAudit(props: KnowledgeAuditProps) {
             </tr>
           </thead>
           <tbody>
-            {entries.length === 0
+            {trailPage.rows.length === 0
               ? (
                 <tr className={tableStyles.emptyRow} role="status">
                   <td colSpan={5}>{c('settingsAuditEmpty')}</td>
                 </tr>
               )
-              : entries.map(entry => (
+              : trailPage.rows.map(entry => (
                 <tr key={entry.at + entry.action + entry.relPath}>
                   <td>{formatAuditWhen(entry.at)}</td>
                   {/*
@@ -324,6 +385,58 @@ export function KnowledgeAudit(props: KnowledgeAuditProps) {
               ))}
           </tbody>
         </table>
+        {/* The pager is drawn only when there is something to page through. A trail
+            that fits on one page has no navigation to offer, and an empty one would
+            otherwise have to say "page 1 of 1" about nothing. */}
+        {needsPager(trailPage.total, pageSize) && (
+          <div className={styles.pager} data-kb-audit-pager>
+            <span className={styles.pagerTotal}>
+              {c('auditPageTotal').replace('{total}', String(trailPage.total))}
+            </span>
+            {trailPage.pageCount > 1 && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={trailPage.page <= 1}
+                  onClick={() => { setPage(trailPage.page - 1) }}
+                  aria-label={c('auditPagePrev')}
+                >
+                  {c('auditPagePrev')}
+                </Button>
+                <span className={styles.pagerPosition} data-kb-audit-position>
+                  {c('auditPageOf')
+                    .replace('{page}', String(trailPage.page))
+                    .replace('{pages}', String(trailPage.pageCount))}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={trailPage.page >= trailPage.pageCount}
+                  onClick={() => { setPage(trailPage.page + 1) }}
+                  aria-label={c('auditPageNext')}
+                >
+                  {c('auditPageNext')}
+                </Button>
+              </>
+            )}
+            {/* The page size is a setting about the table, so it sits at the right
+                end of the strip, away from the navigation a reader clicks repeatedly. */}
+            <span className={styles.pagerSize}>
+              <span className={styles.pagerSizeLabel}>{c('auditPageSize')}</span>
+              <SegmentedControl
+                id="kb-audit-page-size"
+                value={String(pageSize)}
+                label={c('auditPageSize')}
+                options={PAGE_SIZES.map(size => ({
+                  value: String(size),
+                  label: c('auditPageSizeOption').replace('{size}', String(size)),
+                }))}
+                onChange={changePageSize}
+              />
+            </span>
+          </div>
+        )}
       </>
     )
   }

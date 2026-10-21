@@ -1,0 +1,13 @@
+/**
+ * The wrapper around the borrowed explorer.
+ *
+ * It exists so the plugin has one element it owns above the explorer's rows: the star
+ * and the row context menu are applied from outside (`useRowDecoration`), since the
+ * explorer exposes neither as a prop. The wrapper must not change the tree's own layout,
+ * so it carries no padding, border or height of its own -- a full-width box that lets the
+ * explorer lay itself out exactly as it did before.
+ */
+.treeFrame {
+  display: block;
+  min-width: 0;
+}
