@@ -54,6 +54,8 @@ import {
   type DeployPlanContext,
 } from '../src/deploy.ts'
 import { RemoteError, originFrom, sshManagerRunner } from '../src/remote.ts'
+// The wizard's visibility gate is a pure function, so it is tested by calling it.
+import { hasDeployTarget } from '../src/client/deployTarget.ts'
 // The outline's heading extraction is pure, so it is tested by calling it. The
 // rendering rules around it (the two-heading floor, the observer) are asserted
 // against the source, since neither has a route to drive from node.
@@ -63,6 +65,7 @@ import {
   isPendingName,
   isSafeUserId,
   listPendingWrites,
+  copyEntry,
   moveEntry,
   parkPendingWrite,
   pinsPathFor,
@@ -74,8 +77,10 @@ import {
   isMountPoint,
   readSettings,
   readStorageSettings,
+  readTreeState,
   readViewMode,
   storageSettingsPathFor,
+  treeStatePathFor,
   writeStorageSettings,
     bucketOf,
     departmentPrefixMatches,
@@ -83,6 +88,7 @@ import {
   viewPathFor,
   writePins,
   writeSettings,
+  writeTreeState,
   writeViewMode,
 } from '../src/views.ts'
 
@@ -1961,7 +1967,7 @@ describe('management page layout', () => {
     expect(source).toMatch(/catch \{/u)
   })
 
-  it('orders the menu home, permissions, indexing, trash', async () => {
+  it('orders the menu home, permissions, indexing, trash, audit', async () => {
     const source = await read('KnowledgePanel.tsx')
     const order = [...source.matchAll(/key: '(menu\.[a-z]+)'/gu)].map(m => m[1])
     expect(order).toEqual([
@@ -1969,11 +1975,14 @@ describe('management page layout', () => {
       'menu.permissions',
       'menu.indexing',
       'menu.trash',
+      'menu.audit',
       'menu.settings',
     ])
-    // Permissions is still gated on the Host's answer, so the five rows above are
-    // the maximum and the fail-closed condition is unchanged. Settings sits last
-    // because it is configuration rather than a place content lives.
+    // Permissions is still gated on the Host's answer, so the rows above are the
+    // maximum and the fail-closed condition is unchanged. Audit sits among the
+    // content surfaces rather than last, because a review queue is a worklist an
+    // operator opens to get through, not configuration; settings stays last for
+    // exactly that reason.
     expect(source).toMatch(/canManageGrants \? \[\{ kind: 'permissions'/u)
   })
 
@@ -2630,6 +2639,365 @@ describe('view mode preference routes', () => {
   })
 })
 
+describe('expanded-folder state', () => {
+  /**
+   * The explorer's expansion state is a preference like the layout, so it lives
+   * beside `.view-mode.json` in the caller's view. What matters is that it survives
+   * a page, that it drops rather than stores anything that is not a plausible path,
+   * and that every failure mode answers "all collapsed" instead of throwing -- the
+   * tree has to render even when this file is missing or corrupt.
+   */
+  const callerFetch = (userId: string) =>
+    (async (input: RequestInfo | URL) => {
+      if (String(input).includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: userId } }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+  /** A config whose storage roots are inside a fresh temporary directory. */
+  const isolatedConfig = (root: string) => ({
+    ...CONFIG,
+    actualRoot: join(root, 'actual'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'mnt'),
+  })
+
+  it('answers an empty set when nothing has ever been stored', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-default-'))
+    try {
+      await expect(readTreeState(root)).resolves.toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('round-trips the expanded set through the route', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-roundtrip-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await mkdir(join(root, 'mnt'), { recursive: true })
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const written = await callRoute(routes, 'treeState.set', {
+        expanded: ['/workspace/kb/department', '/workspace/kb/department/platform'],
+      })
+      expect(written.expanded).toEqual([
+        '/workspace/kb/department',
+        '/workspace/kb/department/platform',
+      ])
+      const readBack = await callRoute(routes, 'treeState.get', {})
+      expect(readBack.expanded).toEqual([
+        '/workspace/kb/department',
+        '/workspace/kb/department/platform',
+      ])
+      // It landed in the mount point, which is the caller's own view.
+      await expect(readTreeState(join(root, 'mnt'))).resolves.toEqual([
+        '/workspace/kb/department',
+        '/workspace/kb/department/platform',
+      ])
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to all-collapsed when the file is missing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-missing-'))
+    try {
+      await mkdir(root, { recursive: true })
+      await expect(readTreeState(root)).resolves.toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to all-collapsed when the file is corrupt', async () => {
+    // Truncated JSON is what a crash mid-write would have left before the atomic
+    // rename; it must read as "nothing stored", not as a page failure.
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-corrupt-'))
+    try {
+      await mkdir(root, { recursive: true })
+      await writeFile(treeStatePathFor(root), '{"expanded":["/workspace/kb/de', 'utf8')
+      await expect(readTreeState(root)).resolves.toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to all-collapsed when the JSON is not the shape it expects', async () => {
+    // Three shapes a hand-edited file takes: a bare array, an object whose
+    // `expanded` is not an array, and a JSON scalar. None is an error.
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-shape-'))
+    try {
+      await mkdir(root, { recursive: true })
+      for (const body of ['[]', '{"expanded":"nope"}', '{"expanded":null}', '42', 'null']) {
+        await writeFile(treeStatePathFor(root), body, 'utf8')
+        await expect(readTreeState(root)).resolves.toEqual([])
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('drops entries that are not plausible absolute paths and duplicates them once', async () => {
+    // A stored path has to survive a hand-edited file and a browser posting junk:
+    // relative paths, empty strings, control characters, and repeats are all
+    // discarded rather than stored forever.
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-junk-'))
+    try {
+      await mkdir(root, { recursive: true })
+      const written = await writeTreeState(root, [
+        '/workspace/kb/department',
+        'relative/path',
+        '',
+        '/workspace/kb/bad\u0000path',
+        '/workspace/kb/department',
+        42 as unknown as string,
+        '/workspace/kb/personal',
+      ])
+      expect(written).toEqual(['/workspace/kb/department', '/workspace/kb/personal'])
+      await expect(readTreeState(root)).resolves.toEqual([
+        '/workspace/kb/department',
+        '/workspace/kb/personal',
+      ])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('writes atomically, leaving no temporary file behind', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-atomic-'))
+    try {
+      await writeTreeState(root, ['/workspace/kb/department'])
+      const entries = await readdir(root)
+      expect(entries).toContain('.kb-tree-state.json')
+      expect(entries.filter(name => name.endsWith('.tmp'))).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('survives a view sync instead of being deleted as a stale grant', async () => {
+    // The sync walk unlinks every file it walks that the resolved set does not
+    // name. A preference file missing from its metadata set is silently deleted
+    // on the next sync -- which reads as a setting that will not stick rather than
+    // as a bug. This is the regression that would be invisible without a test.
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-sync-'))
+    try {
+      const viewRoot = join(root, 'views')
+      // The walk visits `<viewRoot>/<userId>`, so the preference is written where a
+      // real caller's view lives rather than at the view root.
+      const viewDir = viewPathFor({ actualRoot: join(root, 'actual'), viewRoot, userId: 'u-1' })
+      await mkdir(viewDir, { recursive: true })
+      await writeTreeState(viewDir, ['/workspace/kb/department'])
+      await syncView(
+        { actualRoot: join(root, 'actual'), viewRoot, userId: 'u-1' } as never,
+        [],
+      )
+      await expect(readTreeState(viewDir)).resolves.toEqual(['/workspace/kb/department'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a payload that is not an array rather than storing nothing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-badbody-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await mkdir(join(root, 'mnt'), { recursive: true })
+      await apply(ctx as never, isolatedConfig(root) as never)
+      const reply = await callRoute(routes, 'treeState.set', { expanded: 'nope' })
+      expect(reply.error).toMatch(/array of strings/u)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to write before a mount point exists in remote mode, and creates nothing', async () => {
+    // In remote/NAS storage the mount point is a SYMLINK a sync installs, so
+    // creating it here would manufacture a real directory where that link belongs
+    // -- and the next sync would have to refuse it as non-empty. This mirrors
+    // `viewMode.set`, and it is the one case where a preference does not get
+    // written through a missing path.
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-nasmode-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, {
+        ...isolatedConfig(root),
+        storageMode: 'remote' as const,
+      } as never)
+      const reply = await callRoute(routes, 'treeState.set', {
+        expanded: ['/workspace/kb/department'],
+      })
+      expect(reply.error).toMatch(/not mounted yet/u)
+      // Nothing was created: the mount point is still absent.
+      await expect(stat(join(root, 'mnt'))).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('still reads an empty set in remote mode, so the tree renders', async () => {
+    // A read must never fail the page: an unmounted remote share answers the
+    // collapsed default rather than an error the tree would have to render.
+    const root = await mkdtemp(join(tmpdir(), 'kb-treestate-nasread-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: callerFetch('u-1') })
+    try {
+      await apply(ctx as never, {
+        ...isolatedConfig(root),
+        storageMode: 'remote' as const,
+      } as never)
+      const reply = await callRoute(routes, 'treeState.get', {})
+      expect(reply.expanded).toEqual([])
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('copy duplicates a subtree and keeps the source', () => {
+  /** The view options every copy test passes; only actualRoot matters to a copy. */
+  const options = (root: string) => ({ actualRoot: root, viewRoot: join(root, 'views'), userId: 'u-1' })
+
+  it('keeps the source and writes an independent copy', async () => {
+    // The whole reason this route exists: a paste that removes the source is a move,
+    // and a reader who asked to copy did not ask to lose the original.
+    const root = await mkdtemp(join(tmpdir(), 'kb-copy-'))
+    try {
+      await writeFile(join(root, 'a.md'), 'hello', 'utf8')
+      const copied = await copyEntry(options(root), 'a.md', 'docs/a.md')
+      expect(copied).toMatchObject({ from: 'a.md', to: 'docs/a.md', entries: 1, bytes: 5 })
+      // Both survive, with equal content but distinct inodes: a real second file, not a
+      // hardlink, so editing one cannot change the other.
+      await expect(readFile(join(root, 'a.md'), 'utf8')).resolves.toBe('hello')
+      await expect(readFile(join(root, 'docs/a.md'), 'utf8')).resolves.toBe('hello')
+      const source = await stat(join(root, 'a.md'))
+      const target = await stat(join(root, 'docs/a.md'))
+      expect(target.ino).not.toBe(source.ino)
+      // Writing through one leaves the other alone.
+      await writeFile(join(root, 'docs/a.md'), 'changed', 'utf8')
+      await expect(readFile(join(root, 'a.md'), 'utf8')).resolves.toBe('hello')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses an existing destination instead of overwriting or renaming', async () => {
+    // Silent overwrite destroys a file the reader never named; an automatic rename makes
+    // the paste "succeed" under a name they never typed. Both are worse than a refusal.
+    const root = await mkdtemp(join(tmpdir(), 'kb-copy-'))
+    try {
+      await writeFile(join(root, 'a.md'), 'source', 'utf8')
+      await mkdir(join(root, 'docs'), { recursive: true })
+      await writeFile(join(root, 'docs/a.md'), 'occupied', 'utf8')
+      await expect(copyEntry(options(root), 'a.md', 'docs/a.md'))
+        .rejects.toThrow(/destination already exists/u)
+      // Nothing moved, nothing changed, and no third name appeared.
+      await expect(readFile(join(root, 'docs/a.md'), 'utf8')).resolves.toBe('occupied')
+      await expect(readFile(join(root, 'a.md'), 'utf8')).resolves.toBe('source')
+      const names = (await readdir(join(root, 'docs'))).sort()
+      expect(names).toEqual(['a.md'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('copies a directory with its whole subtree', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-copy-'))
+    try {
+      await mkdir(join(root, 'src/nested/deep'), { recursive: true })
+      await writeFile(join(root, 'src/one.md'), '1', 'utf8')
+      await writeFile(join(root, 'src/nested/two.md'), '22', 'utf8')
+      await writeFile(join(root, 'src/nested/deep/three.md'), '333', 'utf8')
+      const copied = await copyEntry(options(root), 'src', 'dst')
+      // Six entries: three directories (src, nested, deep) plus three files. The count
+      // is what catches a walk that silently stops at the first nesting level.
+      expect(copied.entries).toBe(6)
+      expect(copied.bytes).toBe(6)
+      await expect(readFile(join(root, 'dst/one.md'), 'utf8')).resolves.toBe('1')
+      await expect(readFile(join(root, 'dst/nested/two.md'), 'utf8')).resolves.toBe('22')
+      await expect(readFile(join(root, 'dst/nested/deep/three.md'), 'utf8')).resolves.toBe('333')
+      // The source tree is untouched.
+      await expect(readFile(join(root, 'src/nested/deep/three.md'), 'utf8')).resolves.toBe('333')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a destination containing a parent segment', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-copy-'))
+    try {
+      await writeFile(join(root, 'a.md'), 'x', 'utf8')
+      await expect(copyEntry(options(root), 'a.md', '../escape/a.md'))
+        .rejects.toThrow(/not contained/u)
+      await expect(copyEntry(options(root), '../outside.md', 'a.md'))
+        .rejects.toThrow(/not contained/u)
+      // An absolute destination is refused the same way a relative escape is.
+      await expect(copyEntry(options(root), 'a.md', '/tmp/absolute.md'))
+        .rejects.toThrow(/not contained/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to copy a directory into its own subtree', async () => {
+    // This cannot terminate, so it must be refused before the walk rather than by it.
+    const root = await mkdtemp(join(tmpdir(), 'kb-copy-'))
+    try {
+      await mkdir(join(root, 'src/inner'), { recursive: true })
+      await writeFile(join(root, 'src/inner/a.md'), 'x', 'utf8')
+      await expect(copyEntry(options(root), 'src', 'src/inner/src'))
+        .rejects.toThrow(/into itself/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('copies a symlink as a link rather than following it', async () => {
+    // Following could copy something outside the export, or loop forever through a
+    // link back to an ancestor.
+    const root = await mkdtemp(join(tmpdir(), 'kb-copy-'))
+    try {
+      const outside = await mkdtemp(join(tmpdir(), 'kb-copy-outside-'))
+      try {
+        await writeFile(join(outside, 'secret.md'), 'outside', 'utf8')
+        await symlink(join(outside, 'secret.md'), join(root, 'link.md'))
+        await copyEntry(options(root), 'link.md', 'copied-link.md')
+        const info = await lstat(join(root, 'copied-link.md'))
+        expect(info.isSymbolicLink()).toBe(true)
+        // The copied link still points where the original pointed; its bytes were not
+        // read into the knowledge tree.
+        const linkTarget = await readlink(join(root, 'copied-link.md'))
+        expect(linkTarget).toBe(join(outside, 'secret.md'))
+      } finally {
+        await rm(outside, { recursive: true, force: true })
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a copy larger than the entry ceiling before writing anything', async () => {
+    // Pre-validation is the assertion: a refusal must leave NO partial subtree behind.
+    const root = await mkdtemp(join(tmpdir(), 'kb-copy-'))
+    try {
+      await mkdir(join(root, 'many'), { recursive: true })
+      for (let index = 0; index < 205; index += 1) {
+        await writeFile(join(root, 'many', 'f' + String(index) + '.md'), 'x', 'utf8')
+      }
+      await expect(copyEntry(options(root), 'many', 'dst'))
+        .rejects.toThrow(/more than 200 entries/u)
+      // Nothing was written, so there is no half-tree to clean up.
+      await expect(stat(join(root, 'dst'))).rejects.toThrow()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('move is a rename, not a copy', () => {
   it('moves an entry with rename and keeps its inode', async () => {
     // The inode is the assertion that matters: every user's view holds hardlinks to
@@ -2978,6 +3346,10 @@ describe('the template read cannot leave the surface spinning', () => {
    * abort had been requested and the request simply did not care, so a surface
    * whose whole reason for a timeout is "never spin" was spinning. The race makes
    * the deadline authoritative whatever the transport does.
+   *
+   * The race moved into the module-level loader when the library gained a
+   * maintenance pane (one reader serves both tabs); the properties below are the
+   * ones that matter and are asserted against wherever they now live.
    */
   const source = async (): Promise<string> =>
     readFile(new URL('../src/client/KnowledgeTemplates.tsx', import.meta.url), 'utf8')
@@ -2996,53 +3368,67 @@ describe('the template read cannot leave the surface spinning', () => {
     // The two are different facts: one says "the source has no templates", the
     // other says "this could not be asked". Only the first may claim emptiness.
     const text = await source()
-    const race = text.slice(text.indexOf('Promise.race'))
-    expect(race.slice(0, 400)).toMatch(/outcome === 'timeout'/u)
-    expect(race.slice(0, 400)).toMatch(/setState\('unavailable'\)/u)
+    expect(text).toMatch(/result === 'timeout'/u)
+    // The timeout branch sets `unavailable` and returns BEFORE the rows are adopted,
+    // so an unanswered read cannot leave an empty grid claiming there are none.
+    const branch = text.slice(text.indexOf("result === 'timeout'"))
+    expect(branch.slice(0, 260)).toMatch(/setState\('unavailable'\)/u)
+    expect(branch.slice(0, 260)).toMatch(/return/u)
   })
 
   it('does not set state after unmount', async () => {
     // A read that lands after the dialog closed must not write to a dead component.
     const text = await source()
-    expect(text).toMatch(/let live = true/u)
-    expect(text).toMatch(/live = false/u)
-    expect(text).toMatch(/if \(!live\) return/u)
+    expect(text).toMatch(/const live = useRef\(true\)/u)
+    expect(text).toMatch(/live\.current = false/u)
+    // Both the success and the failure path consult it before touching state.
+    expect(text).toMatch(/if \(!live\.current\) return/u)
+    const guards = (text.match(/if \(!live\.current\) return/gu) ?? []).length
+    expect(guards).toBeGreaterThanOrEqual(2)
   })
 })
 
 describe('uploading a folder is really a folder', () => {
   /**
-   * The menu offers "Upload folder", so the behaviour has to be a folder: the
-   * picker returns the chosen subtree and each file keeps its place inside it. A row
-   * whose label promises a folder while the code sends one file is worse than a
-   * disabled row, because the reader believes their folder arrived.
+   * The create dialog offers "Upload folder", so the behaviour has to be a folder:
+   * the picker returns the chosen subtree and each file keeps its place inside it. A
+   * control whose label promises a folder while the code sends one file is worse than
+   * a disabled one, because the reader believes their folder arrived.
+   *
+   * The behaviour moved out of `KnowledgeHome` and into `KnowledgeCreateDialog` when
+   * the dropdown became a modal (the dialog is where the destination is chosen, so it
+   * is also where the files are read). These assertions follow it there rather than
+   * being dropped: the property under test is the upload's, not the component's.
    */
-  const home = async (): Promise<string> =>
-    readFile(new URL('../src/client/KnowledgeHome.tsx', import.meta.url), 'utf8')
+  const dialog = async (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeCreateDialog.tsx', import.meta.url), 'utf8')
 
   it('asks the picker for a directory', async () => {
-    const source = await home()
-    expect(source).toMatch(/input\.setAttribute\('webkitdirectory', ''\)/u)
-    // Removed for the file row, or the next single-file pick would ask for a folder.
-    expect(source).toMatch(/input\.removeAttribute\('webkitdirectory'\)/u)
+    const source = await dialog()
+    // `webkitdirectory` is what makes the folder row's promise true: the picker
+    // returns the whole subtree, each file carrying its path relative to the root.
+    // It is applied per mode rather than by mutating one shared input, so a folder
+    // pick cannot leave the attribute behind for the next single-file pick.
+    expect(source).toMatch(/webkitdirectory/u)
+    expect(source).toMatch(/mode === 'upload-folder'/u)
   })
 
   it('keeps each file in its place inside the picked folder', async () => {
-    const source = await home()
-    // `webkitRelativePath` is the folder plus the file's position in it, so the
+    const source = await dialog()
+    // `webkitRelativePath` is the picked root plus the file's position in it, so the
     // upload recreates the shape instead of flattening it into one level.
     expect(source).toMatch(/webkitRelativePath/u)
-    expect(source).toMatch(/const relPath = \(file as File & \{ webkitRelativePath\?: string \}\)\.webkitRelativePath \|\| file\.name/u)
+    expect(source).toMatch(/relative:\s*\(file as File & \{ webkitRelativePath\?: string \}\)\.webkitRelativePath \|\| file\.name/u)
   })
 
   it('attempts every file and names the failures', async () => {
-    const source = await home()
+    const source = await dialog()
     // One request per file, so a rejection is per path rather than for the batch.
-    expect(source).toMatch(/for \(const file of files\)/u)
+    expect(source).toMatch(/for \(const item of pending\)/u)
     // The loop does not break on failure: the reader chose a folder, and stopping at
     // the first collision would leave them guessing which files made it.
-    const loop = source.slice(source.indexOf('for (const file of files)'))
-    expect(loop.slice(0, 900)).not.toMatch(/\bbreak\b/u)
+    const loop = source.slice(source.indexOf('for (const item of pending)'))
+    expect(loop.slice(0, 1200)).not.toMatch(/\bbreak\b/u)
     // The summary carries counts AND names, and both sentences exist.
     expect(source).toMatch(/uploadPartial/u)
     expect(source).toMatch(/uploadDone/u)
@@ -3054,9 +3440,17 @@ describe('uploading a folder is really a folder', () => {
     // A batch body would force the Host to define what a partly-authorized upload
     // means. One request per path keeps the refusal per path, which is the honest
     // answer and the one the endpoint already gives.
-    const source = await home()
-    expect(source).toMatch(/body: JSON\.stringify\(\{ relPath, content \}\)/u)
+    const source = await dialog()
+    expect(source).toMatch(/body: JSON\.stringify\(\{ relPath: joinRel\(destination, item\.relative\), content \}\)/u)
     expect(source).not.toMatch(/body: JSON\.stringify\(\{ files/u)
+  })
+
+  it('shows every file its own landing path before the upload starts', async () => {
+    // The whole point of the dialog: the reader sees where each file goes, including
+    // the folder shape a directory upload recreates.
+    const source = await dialog()
+    expect(source).toMatch(/joinRel\(destination, item\.relative\)/u)
+    expect(source).toMatch(/fileTarget/u)
   })
 })
 
@@ -3655,21 +4049,21 @@ describe('the review queue can be worked', () => {
   })
 })
 
-describe('the settings page wires the review queue to the Host', () => {
+describe('the audit page wires the review queue to the Host', () => {
   const readClient = async (name: string): Promise<string> =>
     readFile(new URL(`../src/client/${name}`, import.meta.url), 'utf8')
 
   it('calls all three queue routes rather than showing a static table', async () => {
     // A table with no data source reads as "nothing to review" forever, which is the
     // failure mode this asserts against.
-    const source = await readClient('KnowledgeSettings.tsx')
+    const source = await readClient('KnowledgeAudit.tsx')
     expect(source).toContain('KB_API.pendingList')
     expect(source).toContain('KB_API.pendingApprove')
     expect(source).toContain('KB_API.pendingReject')
   })
 
   it('gives each queued row both decisions', async () => {
-    const source = await readClient('KnowledgeSettings.tsx')
+    const source = await readClient('KnowledgeAudit.tsx')
     expect(source).toMatch(/decide\(entry\.name, 'approve'\)/u)
     expect(source).toMatch(/decide\(entry\.name, 'reject'\)/u)
   })
@@ -3677,9 +4071,22 @@ describe('the settings page wires the review queue to the Host', () => {
   it('disables the decisions instead of hiding them when the caller cannot act', async () => {
     // Hiding the buttons would make the page look like review is not a thing here;
     // disabling them with an explanation says the queue exists and why it is read-only.
-    const source = await readClient('KnowledgeSettings.tsx')
+    const source = await readClient('KnowledgeAudit.tsx')
     expect(source).toMatch(/disabled=\{!canDecide \|\| busy\}/u)
     expect(source).toContain("c('pendingReadOnly')")
+  })
+
+  it('moved the queue off the settings page rather than duplicating it there', async () => {
+    // Two entry points to the same two tables was the defect: the audit page is now
+    // the only one, so settings must no longer carry the routes or the decisions.
+    const settings = await readClient('KnowledgeSettings.tsx')
+    expect(settings).not.toContain('KB_API.pendingList')
+    expect(settings).not.toContain('KB_API.auditList')
+    expect(settings).not.toContain("c('settingsPendingHeading')")
+    expect(settings).not.toContain("c('settingsAuditHeading')")
+    // The switch it still owns is untouched.
+    expect(settings).toContain('KB_API.settingsGet')
+    expect(settings).toContain('KB_API.settingsSet')
   })
 })
 
@@ -3732,21 +4139,100 @@ describe('approving re-checks authority at the submitted path', () => {
   })
 })
 
+describe('the audit page is the one entry point for review and trail', () => {
+  const readClient = async (name: string): Promise<string> =>
+    readFile(new URL(`../src/client/${name}`, import.meta.url), 'utf8')
+
+  /**
+   * The page exists so the queue and the trail stop being two sections of Settings.
+   * These pin the structure that makes that true: real tabs from the primitives
+   * package, one panel that the tabs swap, and no hand-rolled markup.
+   */
+  it('uses the primitives tab strip over one caller-owned panel', async () => {
+    const source = await readClient('KnowledgeAudit.tsx')
+    // The shared component, not a pair of styled buttons: the strip owns the roving
+    // tab stop and the arrow-key behaviour, and a copy of it would drift.
+    expect(source).toContain('SegmentedTabs')
+    expect(source).toMatch(/role="tabpanel"/u)
+    // Both tab ids point at that one panel, so switching cannot orphan a panel.
+    expect(source).toMatch(/panelId: 'kb-audit-panel'/u)
+    expect(source).toMatch(/id="kb-audit-panel"/u)
+  })
+
+  it('renders both readings as real tables, not as lists', async () => {
+    const source = await readClient('KnowledgeAudit.tsx')
+    expect(source).toMatch(/<table className=\{tableStyles\.table\}/u)
+    // The review reading carries the queue; the log reading carries the trail. The
+    // data attributes are what the deployed page is checked against.
+    expect(source).toContain("data-kb-audit=\"pending\"")
+    expect(source).toContain("data-kb-audit=\"log\"")
+    expect(source).not.toMatch(/<ul className=\{tableStyles/u)
+  })
+
+  it('keeps every column the two old sections showed', async () => {
+    const source = await readClient('KnowledgeAudit.tsx')
+    // Relocating the tables must not cost a fact. These are the five columns each
+    // one had under Settings.
+    for (const key of ['colPendingWhen', 'colPendingSubmitter', 'colPendingTarget', 'colPendingSize', 'colPendingDecision']) {
+      expect(source).toContain("c('" + key + "')")
+    }
+    for (const key of ['colAuditWhen', 'colAuditActor', 'colAuditAction', 'colAuditTarget', 'colAuditOutcome']) {
+      expect(source).toContain("c('" + key + "')")
+    }
+  })
+
+  it('keeps the outcome badge and the actor tooltip', async () => {
+    const source = await readClient('KnowledgeAudit.tsx')
+    // The result is a tag, not a word: the old table classified it and that reading
+    // survives the move.
+    expect(source).toMatch(/<Tag tone=\{/u)
+    // The id stays on the cell even though the name is what a reader sees: the trail
+    // is checked against the id, so it must not be lost.
+    expect(source).toMatch(/title=\{entry\.actor\}/u)
+    expect(source).toMatch(/entry\.actorLabel \?\? entry\.actor/u)
+  })
+
+  it('survives an action the locale table does not know', async () => {
+    // A newer Host may record an action this build has no word for. A blank cell
+    // would hide that a change happened, so the raw value is shown instead.
+    const source = await readClient('KnowledgeAudit.tsx')
+    expect(source).toMatch(/label === key \? action : label/u)
+  })
+
+  it('keeps the count of what is waiting on the review tab', async () => {
+    const source = await readClient('KnowledgeAudit.tsx')
+    // "Is anything waiting for me" is the question the page is opened with; putting
+    // the number on the tab answers it without a click.
+    expect(source).toMatch(/c\('auditTabReview'\) \+ ' \(' \+ String\(pending\.length\)/u)
+  })
+
+  it('is reachable from the rail and dispatches to the page', async () => {
+    const panel = await readClient('KnowledgePanel.tsx')
+    expect(panel).toContain("key: 'menu.audit'")
+    expect(panel).toMatch(/rendered\.kind === 'audit' && <KnowledgeAudit t=\{t\} \/>/u)
+    // The title band comes from the same map the other rows use.
+    expect(panel).toContain("if (selection.kind === 'audit') return t('menu.audit')")
+    const glyphs = await readClient('MenuGlyphs.tsx')
+    expect(glyphs).toContain("'home' | 'permissions' | 'indexing' | 'trash' | 'audit' | 'settings'")
+    expect(glyphs).toMatch(/if \(kind === 'audit'\) return <IconChecklistOutlineRegular/u)
+  })
+})
+
 describe('the settings page degrades one section at a time', () => {
   const readClient = async (name: string): Promise<string> =>
     readFile(new URL(`../src/client/${name}`, import.meta.url), 'utf8')
 
-  it('keeps the review switch usable when the queue cannot be read', async () => {
-    // The switch is what the operator came for. A 401 on the queue must cost the queue,
-    // not the whole page: throwing on any failed request would blank the surface and
-    // make the token problem look like a broken plugin.
-    const source = await readClient('KnowledgeSettings.tsx')
-    // Only the settings response is allowed to throw.
-    const throws = [...source.matchAll(/if \(!(settings|audit|pending)Response\.ok\) throw/gu)].map((m) => m[1])
-    expect(throws).toEqual(['settings'])
-    // The other two fall back to empty instead.
-    expect(source).toMatch(/if \(auditResponse\.ok\) \{/u)
+  it('keeps one audit tab usable when the other route cannot be read', async () => {
+    // The queue and the trail come from different stores. A 401 that reaches one must
+    // cost that tab, not the page: throwing on any failed request would blank both and
+    // make a token problem look like a broken plugin.
+    const source = await readClient('KnowledgeAudit.tsx')
+    // Each response is allowed to fall back on its own...
     expect(source).toMatch(/if \(pendingResponse\.ok\) \{/u)
+    expect(source).toMatch(/if \(auditResponse\.ok\) \{/u)
+    // ...and the page only refuses when BOTH failed, where two empty tables would
+    // otherwise assert that nothing is queued and nothing ever happened.
+    expect(source).toMatch(/if \(!pendingResponse\.ok && !auditResponse\.ok\) \{/u)
   })
 })
 
@@ -4589,4 +5075,1103 @@ describe('bucketed view sync', () => {
       await rm(views, { recursive: true, force: true })
     }
   })
+})
+
+describe('the @-mention target picker', () => {
+  /**
+   * The explorer row's `@` button used to answer `if (sessionId === undefined) return`,
+   * which is the page's NORMAL state -- it is a management surface, not a chat -- so
+   * the button looked broken. The click now asks which conversation the reference
+   * should land in. These pin the three properties that make that fix real rather than
+   * cosmetic: the dialog exists and is a primitive dialog (not a native prompt), the
+   * insertion still goes through `referenceInChat` rather than a second write path,
+   * and the empty states are stated instead of left blank.
+   */
+  const read = (name: string): Promise<string> => readFile(new URL('../src/client/' + name, import.meta.url), 'utf8')
+
+  it('no longer drops the click when no conversation is open', async () => {
+    const source = await read('KnowledgePanel.tsx')
+    // The old one-line early return is gone from every `@` handler; each one now
+    // opens the picker instead. Count the handlers that mention `setReferencing`.
+    const handlers = source.match(/onReference(?:File)?=\{/gu) ?? []
+    expect(handlers.length).toBeGreaterThanOrEqual(4)
+    for (const match of source.matchAll(/onReference(?:File)?=\{[\s\S]{0,400}?\}\}/gu)) {
+      expect(match[0]).toMatch(/setReferencing/u)
+    }
+  })
+
+  it('renders a primitive Modal rather than a native prompt or a hand-built layer', async () => {
+    const source = await read('KnowledgeReferencePicker.tsx')
+    // The dialog, its title and its close affordance all come from the primitive.
+    expect(source).toMatch(/from '@deepseek-ai\/dsh-client-ui-primitives'/u)
+    expect(source).toMatch(/<Modal\b/u)
+    expect(source).toMatch(/closeLabel=\{/u)
+    // No browser-native blocking dialogs: they cannot be styled, cannot be tokenized
+    // and cannot list sessions.
+    expect(source).not.toMatch(/\bwindow\.(?:prompt|confirm|alert)\b/u)
+    expect(source).not.toMatch(/\bprompt\(/u)
+  })
+
+  it('reuses the shared referenceInChat contract instead of a second write path', async () => {
+    const source = await read('KnowledgeReferencePicker.tsx')
+    expect(source).toMatch(/from 'dsh-better-sidebar\/src\/client\/reference-in-chat\.ts'/u)
+    expect(source).toMatch(/referenceInChat\(/u)
+  })
+
+  it('offers a new-conversation row and lists existing conversations', async () => {
+    const source = await read('KnowledgeReferencePicker.tsx')
+    // The new-conversation door is the first row of the list, not a footer afterthought.
+    expect(source).toMatch(/refPickerNew\b/u)
+    expect(source).toMatch(/MenuItemButton/u)
+    // Each row shows a title and a timestamp.
+    expect(source).toMatch(/displayTitle \?\? row\.title \?\? row\.id/u)
+    expect(source).toMatch(/formatWhen\(/u)
+  })
+
+  it('filters locally over title and id', async () => {
+    const source = await read('KnowledgeReferencePicker.tsx')
+    // The needle is lower-cased once and matched against the display name and the id;
+    // no second request per keystroke.
+    expect(source).toMatch(/toLocaleLowerCase\(\)/u)
+    expect(source).toMatch(/name\.includes\(needle\) \|\| id\.includes\(needle\)/u)
+  })
+
+  it('states both empty states instead of leaving the list blank', async () => {
+    const source = await read('KnowledgeReferencePicker.tsx')
+    // Nothing matches the filter is the reader's own typing; an empty catalog means
+    // there is nothing to choose from yet. Two different sentences.
+    expect(source).toMatch(/refPickerNoMatch/u)
+    expect(source).toMatch(/refPickerNoSessions/u)
+  })
+
+  it('declares every string it uses in both locales', async () => {
+    const picker = await read('KnowledgeReferencePicker.tsx')
+    const locales = await read('locales.ts')
+    const keys = [...new Set([...picker.matchAll(/t\('(refPicker[A-Za-z]+)'\)/gu)].map(match => match[1]))]
+    expect(keys.length).toBeGreaterThan(0)
+    for (const key of keys) {
+      // Both the en and the zh object must carry the key. The file declares exactly
+      // two objects, so two occurrences is the complete requirement.
+      const occurrences = (locales.match(new RegExp('\\b' + key + ':', 'gu')) ?? []).length
+      expect(occurrences, key + ' must be declared in both locales').toBe(2)
+    }
+  })
+
+  it('uses only design tokens, never raw pixel font sizes or hex colours', async () => {
+    const css = await readFile(new URL('../src/client/KnowledgeReferencePicker.module.css', import.meta.url), 'utf8')
+    expect(css).not.toMatch(/font-size:\s*\d+px/u)
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/u)
+    expect(css).not.toMatch(/\b(?:rgb|hsl)a?\(/u)
+    // Every font shorthand resolves through a token.
+    for (const match of css.matchAll(/font:\s*([^;]+);/gu)) {
+      expect(match[1]).toMatch(/var\(--dsw-font-/u)
+    }
+  })
+})
+
+describe('the deployment wizard only appears where a step can run', () => {
+  /**
+   * The bug this pins: a local workspace showed seven disabled buttons whose target
+   * host read "no SSH hosts are configured". Every step in the plan executes on a
+   * REMOTE host -- the Host's `deploy.run` refuses a request without a `hostId` --
+   * so with no host there is nothing that can run and the controls are dead.
+   *
+   * The gate is tested by CALLING it. An earlier version of this suite matched the
+   * component source instead, and that assertion passed even after the branch was
+   * inverted: a string test cannot see behaviour.
+   */
+  const settings = async (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeSettingsSection.tsx', import.meta.url), 'utf8')
+
+  it('keeps the wizard only when a remote host or a remote mode exists', () => {
+    // A configured host is the primary signal: it is what makes a step runnable.
+    expect(hasDeployTarget([{ id: 'h1' }], 'local')).toBe(true)
+    expect(hasDeployTarget([{ id: 'h1' }], undefined)).toBe(true)
+    // A remote deployment keeps the wizard even before a host row exists, because
+    // that wizard is the only place that tells the reader a host is missing.
+    expect(hasDeployTarget([], 'remote')).toBe(true)
+  })
+
+  it('collapses the block when nothing can run', () => {
+    // The reported situation: local mode, no SSH host.
+    expect(hasDeployTarget([], 'local')).toBe(false)
+    // A missing mode is local: conservative, because local is the shape where the
+    // seven buttons would be a lie.
+    expect(hasDeployTarget([], undefined)).toBe(false)
+  })
+
+  it('reads the decision from real state rather than a guess', async () => {
+    const source = await settings()
+    // `storageMode` comes from the `status` reply, threaded down from the loaded state.
+    expect(source).toMatch(/storageMode=\{status\.storageMode\}/u)
+    // And the host list comes from the `deploy.hosts` route.
+    expect(source).toMatch(/KB_API\.deployHosts/u)
+  })
+
+  it('renders one explanation instead of the dead controls', async () => {
+    const source = await settings()
+    const localBranch = source.slice(source.indexOf('if (!hasRemoteTarget)'))
+    // The early return sits ABOVE the wizard's markup, so the step list is
+    // unreachable when the branch is taken.
+    expect(source.indexOf('if (!hasRemoteTarget)')).toBeLessThan(source.indexOf('{steps.map('))
+    expect(localBranch).toMatch(/data-testid="kb-deploy-local-note"/u)
+    // Text only: no link and no disclosure, because the plugin owns no documentation
+    // URL and a control here would be one more thing that cannot act.
+    expect(localBranch).not.toMatch(/<a\b/u)
+    expect(localBranch).not.toMatch(/<details/u)
+  })
+
+  it('does not fetch the step plan when the block will not draw it', async () => {
+    const source = await settings()
+    const effect = source.slice(source.indexOf('Read the plan only once'), source.indexOf('}, [hostsLoaded, hosts.length'))
+    expect(effect).toMatch(/if \(!hostsLoaded\) return/u)
+    expect(effect).toMatch(/if \(hosts\.length === 0 && storageMode !== 'remote'\) return/u)
+  })
+
+  it('holds the section until the host list answers, rather than flashing a shape', async () => {
+    const source = await settings()
+    expect(source).toMatch(/const \[hostsLoaded, setHostsLoaded\] = useState\(false\)/u)
+    expect(source).toMatch(/if \(!hostsLoaded\) return null/u)
+    expect(source).toMatch(/\} finally \{\n\s+setHostsLoaded\(true\)/u)
+  })
+
+  it('leaves the remote shape untouched', async () => {
+    const source = await settings()
+    expect(source).toMatch(/htmlFor="kb-deploy-host"/u)
+    expect(source).toMatch(/steps\.map\(step =>/u)
+  })
+})
+
+describe('the create/upload dialog', () => {
+  /**
+   * The three create/upload actions used to open a dropdown, ask for a name through a
+   * browser `window.prompt`, and drop the result into `global/`. Both halves of that
+   * were wrong: a prompt cannot show where the file lands, and `global` is the bucket
+   * everyone reads, so a private draft published by default.
+   *
+   * The fix is one official `Modal` that asks for a name AND a destination. These pin
+   * the properties that make it a fix rather than a restyle.
+   */
+  const dialog = (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeCreateDialog.tsx', import.meta.url), 'utf8')
+  const home = (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeHome.tsx', import.meta.url), 'utf8')
+
+  it('is an official Modal, not a hand-built layer or a native prompt', async () => {
+    const source = await dialog()
+    expect(source).toMatch(/<Modal\b/u)
+    expect(source).toMatch(/from '@deepseek-ai\/dsh-client-ui-primitives'/u)
+    // The browser's blocking dialogs cannot be styled, cannot be tokenized and cannot
+    // offer a destination, which is the whole reason this dialog exists. The literal
+    // appears in the module's own prose explaining that history, so the assertion
+    // looks for a CALL rather than for the bare word.
+    expect(source).not.toMatch(/\bwindow\.(?:prompt|confirm|alert)\s*\(/u)
+    // And the Home surface no longer asks through one either.
+    expect(await home()).not.toMatch(/\bwindow\.prompt\s*\(/u)
+  })
+
+  it('defaults the destination away from the shared bucket', async () => {
+    // The order is the requirement: the directory being browsed, then the reader's own
+    // personal folder, and only then `global`. A test that only checked "not global"
+    // would pass on a default of `''`.
+    const source = await dialog()
+    expect(source).toMatch(/if \(currentDir !== undefined && currentDir !== ''\) return currentDir/u)
+    expect(source).toMatch(/return 'personal\/' \+ userId/u)
+    expect(source).toMatch(/return 'global'/u)
+    // And in that order: current, then personal, then global.
+    const body = source.slice(source.indexOf('export function defaultDestination'))
+    const current = body.indexOf('return currentDir')
+    const personal = body.indexOf("'personal/' + userId")
+    const global = body.indexOf("return 'global'")
+    expect(current).toBeGreaterThan(-1)
+    expect(personal).toBeGreaterThan(current)
+    expect(global).toBeGreaterThan(personal)
+  })
+
+  it('offers a destination picker fed by the existing listing route', async () => {
+    const source = await dialog()
+    // No new Host channel: the picker reads the tree through the route the listing
+    // already uses.
+    expect(source).toMatch(/KB_API\.list/u)
+    expect(source).toMatch(/KnowledgeDestinationPicker/u)
+    // The chosen path is shown, not merely held in state.
+    expect(source).toMatch(/createDestination/u)
+  })
+
+  it('rejects a name the tree cannot store, inline and before submitting', async () => {
+    const source = await dialog()
+    expect(source).toMatch(/export function validateEntryName/u)
+    // Empty, a separator (which would silently make the "name" a path), and the two
+    // traversal segments.
+    expect(source).toMatch(/createNameEmpty/u)
+    expect(source).toMatch(/createNameSeparator/u)
+    expect(source).toMatch(/createNameTraversal/u)
+    // The primary button is disabled on an invalid name, so the refusal is visible
+    // before the request rather than as a server error afterwards.
+    expect(source).toMatch(/disabled=\{disabled\}/u)
+  })
+
+  it('adds the markdown extension without doubling it', async () => {
+    const source = await dialog()
+    expect(source).toMatch(/trimmed\.endsWith\('\.md'\) \? trimmed : trimmed \+ '\.md'/u)
+  })
+
+  it('sends a document and a folder through the existing create route', async () => {
+    const source = await dialog()
+    expect(source).toMatch(/KB_API\.create/u)
+    // One route, two kinds: the folder case is the create route told `directory`.
+    expect(source).toMatch(/kind: isFolder \? 'directory' : 'file'/u)
+  })
+
+  it('uses only design tokens, never raw pixel font sizes or hex colours', async () => {
+    const css = await readFile(new URL('../src/client/KnowledgeCreateDialog.module.css', import.meta.url), 'utf8')
+    expect(css).not.toMatch(/font-size:\s*\d+px/u)
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/u)
+    expect(css).not.toMatch(/\b(?:rgb|hsl)a?\(/u)
+    for (const match of css.matchAll(/font:\s*([^;]+);/gu)) {
+      expect(match[1]).toMatch(/var\(--dsw-font-/u)
+    }
+  })
+
+  it('names every string through the locale resolver rather than a literal', async () => {
+    // The dialog is bilingual by construction: every user-visible string goes through
+    // `t`, so the locale table is the only place copy lives. This catches a hardcoded
+    // sentence creeping in during a later edit.
+    const source = await dialog()
+    const literals = [...source.matchAll(/>\s*([A-Za-z][A-Za-z ,.'!?-]{6,})\s*</gu)].map(match => match[1].trim())
+    expect(literals).toEqual([])
+  })
+})
+
+describe('the create dialog copy is complete in both locales', () => {
+  /**
+   * The dialog asks for a name and a destination in every language the product
+   * offers. A key present in `en` but missing from `zh` renders as the raw key
+   * string, which is how a half-translated dialog ships without anyone noticing.
+   *
+   * Every key the dialog asks for is checked against both objects. The list is
+   * derived from the source rather than written out, so a key added to the dialog
+   * and forgotten in the locale table fails here instead of in front of a reader.
+   */
+  const keysIn = async (): Promise<string[]> => {
+    const dialog = await readFile(new URL('../src/client/KnowledgeCreateDialog.tsx', import.meta.url), 'utf8')
+    const found = new Set<string>()
+    for (const match of dialog.matchAll(/\bt\('([A-Za-z][A-Za-z0-9]*)'\)/gu)) found.add(match[1])
+    return [...found].sort()
+  }
+
+  it('declares every key the dialog uses, once per locale', async () => {
+    const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    const keys = await keysIn()
+    expect(keys.length).toBeGreaterThan(10)
+    const missing: string[] = []
+    for (const key of keys) {
+      const occurrences = (locales.match(new RegExp('\\b' + key + ':', 'gu')) ?? []).length
+      if (occurrences !== 2) missing.push(key + ' (' + String(occurrences) + ')')
+    }
+    expect(missing).toEqual([])
+  })
+
+  it('keeps the placeholders the dialog substitutes', async () => {
+    // A message whose placeholder name drifts from the code shows `{path}` to the
+    // reader, so the four that are substituted are pinned by name.
+    const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    expect(locales).toMatch(/createWillCreate: '[^']*\{path\}/u)
+    expect(locales).toMatch(/createDone: '[^']*\{path\}/u)
+    expect(locales).toMatch(/createProgress: '[^']*\{done\}[^']*\{total\}/u)
+    expect(locales).toMatch(/createMoreFiles: '[^']*\{n\}/u)
+  })
+})
+
+describe('the template library is a card dialog with maintenance', () => {
+  /**
+   * The library was a full-surface sheet that could only READ DataOps wiki pages, so
+   * it was permanently empty and its cards did nothing. A template is a document plus
+   * a few facts about it, so it is now stored as exactly that and the dialog can add,
+   * edit and take one offline.
+   *
+   * These pin the three properties that make it a real library rather than a viewer:
+   * the card grid with a working primary action, maintenance in the same dialog, and
+   * a store that is one document directory plus one index.
+   */
+  const templates = (): Promise<string> =>
+    readFile(new URL('../src/client/KnowledgeTemplates.tsx', import.meta.url), 'utf8')
+
+  it('renders a card grid inside an official Modal', async () => {
+    const source = await templates()
+    expect(source).toMatch(/<Modal\b/u)
+    expect(source).toMatch(/from '@deepseek-ai\/dsh-client-ui-primitives'/u)
+    // Cards, not rows: a grid with a floor width that wraps.
+    expect(source).toMatch(/styles\.grid/u)
+    expect(source).toMatch(/styles\.card\b/u)
+    // Each card carries the facts the task names.
+    expect(source).toMatch(/template\.title/u)
+    expect(source).toMatch(/template\.description/u)
+    expect(source).toMatch(/template\.updatedAt/u)
+    expect(source).toMatch(/sizeText\(template\.bytes\)/u)
+    // And its primary action.
+    expect(source).toMatch(/templatePick/u)
+  })
+
+  it('offers maintenance in the same dialog, behind a tab', async () => {
+    const source = await templates()
+    expect(source).toMatch(/SegmentedTabs/u)
+    expect(source).toMatch(/templateTabLibrary/u)
+    expect(source).toMatch(/templateTabManage/u)
+    // Add, edit and remove all exist, and remove asks first.
+    expect(source).toMatch(/templateAdd/u)
+    expect(source).toMatch(/templateEdit/u)
+    expect(source).toMatch(/c\('templateRemoveBody'\)\.replace/u)
+    expect(source).toMatch(/setConfirming/u)
+  })
+
+  it('collects the document plus its metadata as one record', async () => {
+    const source = await templates()
+    // The form is one document picker and four metadata fields. Nothing more: the
+    // task's "template = a document + metadata, do not invent a data model".
+    expect(source).toMatch(/type="file"/u)
+    expect(source).toMatch(/accept="\.md,\.markdown,\.txt,\.docx,\.pdf"/u)
+    expect(source).toMatch(/setField\('title'/u)
+    expect(source).toMatch(/setField\('description'/u)
+    expect(source).toMatch(/setField\('category'/u)
+    expect(source).toMatch(/setField\('tags'/u)
+  })
+
+  it('uses the existing routes, adding no new channel for the copy or the store', async () => {
+    const source = await templates()
+    // Reading a stored template and writing the copy reuse `read` and `upload`; the
+    // store itself is the two new methods on the same prefix.
+    expect(source).toMatch(/KB_API\.read/u)
+    expect(source).toMatch(/KB_API\.upload/u)
+    expect(source).toMatch(/KB_API\.templates/u)
+    expect(source).toMatch(/KB_API\.templateSave/u)
+    expect(source).toMatch(/KB_API\.templateRemove/u)
+  })
+
+  it('keeps the read bound rather than trusting the transport', async () => {
+    const source = await templates()
+    // A race, so a fetch that ignores its abort still cannot leave the dialog
+    // spinning -- the property the previous sheet already had and this one keeps.
+    expect(source).toMatch(/Promise\.race\(\[read, deadline\]\)/u)
+    expect(source).toMatch(/TEMPLATE_TIMEOUT_MS/u)
+  })
+
+  it('says "empty" and "could not read" differently', async () => {
+    const source = await templates()
+    expect(source).toMatch(/templateEmpty/u)
+    expect(source).toMatch(/templateUnavailable/u)
+    // And a filtered miss is a third state, not the same sentence as an empty library.
+    expect(source).toMatch(/templateNoMatch/u)
+  })
+
+  it('uses only design tokens in its stylesheet', async () => {
+    const css = await readFile(new URL('../src/client/KnowledgeTemplates.module.css', import.meta.url), 'utf8')
+    expect(css).not.toMatch(/font-size:\s*\d+px/u)
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/u)
+    expect(css).not.toMatch(/\b(?:rgb|hsl)a?\(/u)
+    for (const match of css.matchAll(/font:\s*([^;]+);/gu)) {
+      expect(match[1]).toMatch(/var\(--dsw-font-/u)
+    }
+  })
+})
+
+describe('the template store is one document directory plus one index', () => {
+  /**
+   * The model, asserted where it lives. A template is a document file next to a JSON
+   * index that names it; there is no table, no database, and no second copy in
+   * DataOps. These pin that shape so a later edit cannot quietly grow one.
+   */
+  const views = (): Promise<string> =>
+    readFile(new URL('../src/views.ts', import.meta.url), 'utf8')
+
+  it('keeps the documents under a dot-directory in the authoritative tree', async () => {
+    const source = await views()
+    // The authoritative tree, not the caller's view: a template is shared content and
+    // a view is rewritten by the next sync.
+    expect(source).toMatch(/const TEMPLATE_DIR = '\.kb-templates'/u)
+    expect(source).toMatch(/export function templateDirFor\(actualRoot: string\)/u)
+    expect(source).toMatch(/const TEMPLATE_INDEX = '\.kb-templates\.json'/u)
+  })
+
+  it('reads and writes the index atomically, tolerating a broken one', async () => {
+    const source = await views()
+    expect(source).toMatch(/export async function readTemplates/u)
+    expect(source).toMatch(/export async function saveTemplate/u)
+    expect(source).toMatch(/export async function removeTemplate/u)
+    // A corrupt index reads as an empty library rather than throwing: a broken
+    // metadata file must not take the whole page down.
+    const read = source.slice(source.indexOf('export async function readTemplates'))
+    expect(read.slice(0, 1200)).toMatch(/catch \{[\s\S]{0,200}return \[\]/u)
+    // The write is temp-plus-rename.
+    expect(source).toMatch(/const temporary = target \+ '\.tmp'/u)
+  })
+
+  it('rejects a file name that would escape the template directory', async () => {
+    const source = await views()
+    expect(source).toMatch(/function isStorableTemplateFileName/u)
+    const guard = source.slice(source.indexOf('function isStorableTemplateFileName'))
+    expect(guard.slice(0, 500)).toMatch(/includes\('\/'\)/u)
+    expect(guard.slice(0, 500)).toMatch(/includes\('\\\\'\)/u)
+    expect(guard.slice(0, 500)).toMatch(/startsWith\('\.'\)/u)
+  })
+})
+
+describe('the template dialog copy is complete in both locales', () => {
+  /**
+   * The template dialog gained a maintenance form, which is a lot of copy: labels,
+   * placeholders, three validation sentences, four outcome sentences and a
+   * confirmation. A key present in `en` but missing from `zh` renders as the raw key,
+   * which is how a half-translated dialog ships unnoticed.
+   *
+   * The key list is derived from the source, so a key added there and forgotten in
+   * the locale table fails here instead of in front of a reader.
+   */
+  it('declares every key the dialog uses, once per locale', async () => {
+    const dialog = await readFile(new URL('../src/client/KnowledgeTemplates.tsx', import.meta.url), 'utf8')
+    const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    const found = new Set<string>()
+    for (const match of dialog.matchAll(/\bc\('([A-Za-z][A-Za-z0-9]*)'\)/gu)) found.add(match[1])
+    expect(found.size).toBeGreaterThan(30)
+    const missing: string[] = []
+    for (const key of found) {
+      const occurrences = (locales.match(new RegExp('\\b' + key + ':', 'gu')) ?? []).length
+      if (occurrences !== 2) missing.push(key + ' (' + String(occurrences) + ')')
+    }
+    expect(missing).toEqual([])
+  })
+
+  it('keeps the placeholders the dialog substitutes', async () => {
+    const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    expect(locales).toMatch(/templateUsed: '[^']*\{path\}/u)
+    expect(locales).toMatch(/templateUnavailableReason: '[^']*\{reason\}/u)
+    expect(locales).toMatch(/templateFileChosen: '[^']*\{name\}/u)
+    expect(locales).toMatch(/templateFileKept: '[^']*\{name\}/u)
+    expect(locales).toMatch(/templateRemoveBody: '[^']*\{name\}/u)
+  })
+})
+
+describe('every UI string resolves to a locale key', () => {
+  /**
+   * A missing locale key does not fail anything at runtime: `t()` returns the key it
+   * was given, so the reader sees `step.nfs-mount` or `grantFailed` rendered as if it
+   * were a sentence. That is how three deploy-step labels and three permission
+   * failure messages shipped broken without a single test going red.
+   *
+   * This walks every STATIC key literal in the client half and requires each one to
+   * exist in both locale objects. Dynamic construction is excluded by design -- a
+   * pattern like `c('subject.' + kind)` names a key that only exists at runtime, so
+   * scanning it as a literal would report a key no author ever wrote. The three
+   * dynamic families this package actually uses are covered separately below, where
+   * their value space is finite and can be enumerated.
+   */
+  const readClient = async (): Promise<Array<{ file: string; source: string }>> => {
+    const dir = new URL('../src/client/', import.meta.url)
+    const names = (await readdir(dir)).filter(name => name.endsWith('.tsx') || name.endsWith('.ts'))
+    return Promise.all(names.map(async name => ({
+      file: name,
+      source: await readFile(new URL(name, dir), 'utf8'),
+    })))
+  }
+
+  /**
+   * Every static `c('key')` / `t('key')` literal in one source text.
+   *
+   * The pattern deliberately requires the closing quote immediately after the key, so
+   * a concatenation (`c('subject.' + kind)`) and a template literal
+   * (`` t(`step.${id}`) ``) are not matched: neither names a complete key.
+   * @param source - one client file's text.
+   * @returns The literal keys it asks for, de-duplicated.
+   */
+  const staticKeysIn = (source: string): string[] => {
+    const found = new Set<string>()
+    for (const match of source.matchAll(/\b[ct]\('([A-Za-z][A-Za-z0-9_.-]*)'\)/gu)) found.add(match[1])
+    return [...found]
+  }
+
+  /**
+   * The locale table split into its two objects, so "in en" and "in zh" are separate
+   * questions rather than one count that a duplicated key could satisfy.
+   */
+  const localeObjects = async (): Promise<{ en: string; zh: string }> => {
+    const source = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
+    // The file declares exactly `en` then `zh`; splitting on the second object's
+    // opening brace is brittle, so the boundary is the `zh` declaration itself.
+    const zhAt = source.indexOf('const zh')
+    expect(zhAt).toBeGreaterThan(0)
+    return { en: source.slice(0, zhAt), zh: source.slice(zhAt) }
+  }
+
+  /**
+   * Whether one key is declared in a locale object.
+   *
+   * Both spellings the table uses are accepted: a bare identifier
+   * (`referenceFile:`) and a quoted one (`'step.nfs-mount':`), because a dotted or
+   * hyphenated key cannot be a bare identifier. Plain `includes` rather than a
+   * RegExp: the keys themselves contain dots and hyphens, and escaping them into a
+   * pattern is exactly where a guard like this goes wrong.
+   * @param object - one locale object's text.
+   * @param key - the key to look for.
+   * @returns Whether the key is declared.
+   */
+  const declares = (object: string, key: string): boolean =>
+    object.includes("'" + key + "':") || new RegExp('\\n\\s*' + key + '\\s*:', 'u').test(object)
+
+  it('declares every static key in both locales', async () => {
+    const { en, zh } = await localeObjects()
+    const missing: string[] = []
+    let checked = 0
+    for (const { file, source } of await readClient()) {
+      for (const key of staticKeysIn(source)) {
+        checked += 1
+        if (!declares(en, key)) missing.push(file + ': ' + key + ' (missing en)')
+        if (!declares(zh, key)) missing.push(file + ': ' + key + ' (missing zh)')
+      }
+    }
+    // A guard over zero keys would pass silently, which is the failure mode this
+    // whole test exists to prevent one level up.
+    expect(checked).toBeGreaterThan(200)
+    expect(missing).toEqual([])
+  })
+
+  it('declares a label for every deploy step id', async () => {
+    // `t(\`step.${step.id}\`)` is the one dynamic key whose value space the Host owns.
+    // A step added to `deploy.ts` without a `step.<id>` label renders as its raw id.
+    const client = await readClient()
+    const settings = client.find(entry => entry.file === 'KnowledgeSettingsSection.tsx')
+    expect(settings).toBeDefined()
+    // The dynamic form is what makes this family need its own check; a static scan
+    // cannot see it.
+    expect(settings?.source).toMatch(/t\(`step\.\$\{step\.id\}`/u)
+
+    const deploy = await readFile(new URL('../src/deploy.ts', import.meta.url), 'utf8')
+    const ids = [...deploy.matchAll(/^\s+id: '([a-z0-9-]+)'/gmu)].map(match => match[1])
+    expect(ids.length).toBeGreaterThan(5)
+
+    const { en, zh } = await localeObjects()
+    const missing: string[] = []
+    for (const id of ids) {
+      expect(declareStepKey(en, id), 'step.' + id + ' (missing en)').toBe(true)
+      expect(declareStepKey(zh, id), 'step.' + id + ' (missing zh)').toBe(true)
+    }
+    expect(missing).toEqual([])
+  })
+
+  it('declares a label for every grant subject kind', async () => {
+    // `c('subject.' + kind)` over the grant subject union: a new principal kind
+    // without a label would render as `subject.role` to a reader.
+    const client = await readClient()
+    const permissions = client.find(entry => entry.file === 'KnowledgePermissions.tsx')
+    expect(permissions).toBeDefined()
+    expect(permissions?.source).toMatch(/c\('subject\.' \+ kind\)/u)
+
+    // The kinds come from the API contract, which is where the union is declared.
+    const api = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8')
+    const union = api.match(/KnowledgeGrantSubjectType = ([^\n]+)/u)
+    expect(union).not.toBeNull()
+    const kinds = [...(union?.[1] ?? '').matchAll(/'([a-z-]+)'/gu)].map(match => match[1])
+    expect(kinds.length).toBeGreaterThan(0)
+
+    const { en, zh } = await localeObjects()
+    for (const kind of kinds) {
+      expect(declares(en, 'subject.' + kind), 'subject.' + kind + ' (missing en)').toBe(true)
+      expect(declares(zh, 'subject.' + kind), 'subject.' + kind + ' (missing zh)').toBe(true)
+    }
+  })
+
+  it('declares a label for every audit outcome', async () => {
+    // `c('auditOutcome' + Capitalised(outcome))`: the union lives in views.ts, so a new
+    // outcome without a label shows the reader `auditOutcomeRolledBack`.
+    const audit = await readFile(new URL('../src/client/KnowledgeAudit.tsx', import.meta.url), 'utf8')
+    expect(audit).toMatch(/c\('auditOutcome' \+/u)
+
+    const views = await readFile(new URL('../src/views.ts', import.meta.url), 'utf8')
+    const union = views.match(/outcome: ([^\n]+)/u)
+    expect(union).not.toBeNull()
+    const outcomes = [...(union?.[1] ?? '').matchAll(/'([a-z]+)'/gu)].map(match => match[1])
+    expect(outcomes.length).toBeGreaterThan(0)
+
+    const { en, zh } = await localeObjects()
+    for (const outcome of outcomes) {
+      const key = 'auditOutcome' + outcome.charAt(0).toUpperCase() + outcome.slice(1)
+      expect(declares(en, key), key + ' (missing en)').toBe(true)
+      expect(declares(zh, key), key + ' (missing zh)').toBe(true)
+    }
+  })
+
+  it('reports a missing key instead of passing over it', async () => {
+    // The guard has to be able to fail. This feeds the same predicate a key that is
+    // certainly absent, which is how the reverse test in the task description was
+    // performed by hand (delete one key, watch this suite go red).
+    const { en, zh } = await localeObjects()
+    expect(declares(en, 'thisKeyDoesNotExistAnywhere')).toBe(false)
+    expect(declares(zh, 'thisKeyDoesNotExistAnywhere')).toBe(false)
+    // And a key that is present is seen in both.
+    expect(declares(en, 'referenceFile')).toBe(true)
+    expect(declares(zh, 'referenceFile')).toBe(true)
+  })
+})
+
+/**
+ * Whether a `step.<id>` label is declared in one locale object.
+ *
+ * Quoted, always: a key containing a hyphen cannot be a bare identifier.
+ * @param object - one locale object's text.
+ * @param id - the deploy step id.
+ * @returns Whether the label exists.
+ */
+function declareStepKey(object: string, id: string): boolean {
+  return object.includes("'step." + id + "':")
+}
+
+describe('a write must leave the view showing it', () => {
+  /**
+   * The bug these pin: `create` answered 200 while the view stayed empty, so the
+   * reader was told "saved" and could not find the document. The write had succeeded
+   * and the refresh had failed silently, and the two outcomes were indistinguishable
+   * from the page. These assert the DISK, not the status code, because a 200 was
+   * exactly what the broken version returned.
+   */
+  const CONFIG_FOR_WRITE = {
+    ...CONFIG,
+  }
+
+  /**
+   * A stub whose `resolve` answers from a table, and that can break the SYNC only.
+   *
+   * `failAfter` counts resolves and starts failing the call after it, so the write
+   * permission check (the first resolve) still succeeds: the scenario under test is
+   * "the document was written, then the view refresh could not resolve it", not
+   * "the write was refused".
+   */
+  function writeStub(options: {
+    table: Record<string, { canRead?: boolean; canWrite?: boolean }>
+    /**
+     * 1-based resolve call numbers that answer 500.
+     *
+     * A count-from-here rule cannot express "fail once, then recover": call 1 is the
+     * write's own permission check, so the retry test needs exactly call 2 to fail.
+     */
+    failOn?: readonly number[]
+  }) {
+    let seen = 0
+    const calls: string[] = []
+    const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1', displayName: 'Tester' } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        seen += 1
+        if (options.failOn?.includes(seen) === true) {
+          return new Response(JSON.stringify({ error: 'backend unavailable' }), { status: 500 })
+        }
+        const sent = JSON.parse(String(init?.body ?? '{}')) as { resourceId?: string }
+        return new Response(
+          JSON.stringify(options.table[sent.resourceId ?? ''] ?? { canRead: false, canWrite: false }),
+          { status: 200 },
+        )
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+    return { impl, calls }
+  }
+
+  /** A root with both trees, plus the mount point the view is pointed at. */
+  async function writeWorkspace(): Promise<{ root: string; config: typeof CONFIG; viewDir: string }> {
+    const root = await mkdtemp(join(tmpdir(), 'kb-sync-'))
+    const actual = join(root, 'actual')
+    await mkdir(actual, { recursive: true })
+    const config = {
+      ...CONFIG_FOR_WRITE,
+      actualRoot: actual,
+      viewRoot: join(root, 'views'),
+      mountPoint: join(root, 'mnt'),
+    }
+    return { root, config, viewDir: join(config.viewRoot, 'u-1') }
+  }
+
+  it('links a created document into the view, on disk, before answering', async () => {
+    const { root, config, viewDir } = await writeWorkspace()
+    const stub = writeStub({ table: { 'notes/a.md': { canRead: true, canWrite: true } } })
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: stub.impl })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'create', { relPath: 'notes/a.md', kind: 'file', content: '# hi' })
+      expect(reply.error).toBeUndefined()
+      // The decisive assertion: the reader opens the tree and the row is there.
+      await expect(readFile(join(viewDir, 'global', 'notes', 'a.md'), 'utf8')).resolves.toBe('# hi')
+      // A hardlink, not a copy: the view and the authoritative tree are one inode, so
+      // a later edit in place is visible without another sync.
+      const linked = await stat(join(viewDir, 'global', 'notes', 'a.md'))
+      const authoritative = await stat(join(config.actualRoot, 'notes', 'a.md'))
+      expect(linked.ino).toBe(authoritative.ino)
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('answers 207 with a reason when the view could not be refreshed', async () => {
+    const { root, config, viewDir } = await writeWorkspace()
+    // Every resolve after the write permission check fails, so no retry can succeed.
+    const stub = writeStub({ table: { 'notes/a.md': { canRead: true, canWrite: true } }, failOn: [2, 3] })
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: stub.impl })
+    try {
+      apply(ctx as never, config as never)
+      const route = routes.find(candidate => candidate.path === '/knowledge-base/api')
+      if (route === undefined) throw new Error('route not registered')
+      let reply: Record<string, unknown> = {}
+      let status = 0
+      const req = {
+        url: '/knowledge-base/api/create',
+        on(event: string, handler: (chunk?: Buffer) => void) {
+          if (event === 'data') handler(Buffer.from(JSON.stringify({ relPath: 'notes/a.md', kind: 'file', content: 'x' })))
+          if (event === 'end') handler()
+          return req
+        },
+      }
+      const res = {
+        statusCode: 0,
+        setHeader: () => undefined,
+        end: (text: string) => { reply = JSON.parse(text) as Record<string, unknown>; status = (res as { statusCode: number }).statusCode },
+      }
+      await route.handler(req, res)
+      // The document WAS saved; the answer must not claim a clean success.
+      await expect(readFile(join(config.actualRoot, 'notes/a.md'), 'utf8')).resolves.toBe('x')
+      expect(status).toBe(207)
+      expect(reply.created).toBeDefined()
+      const warning = reply.viewSyncWarning as { message?: string; reason?: string } | undefined
+      expect(warning?.reason).toBeTruthy()
+      // And the tree really is missing it, which is what the warning is about.
+      await expect(readFile(join(viewDir, 'global', 'notes', 'a.md'), 'utf8')).rejects.toThrow()
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('retries a failed refresh once, so a transient resolve failure still links the file', async () => {
+    const { root, config, viewDir } = await writeWorkspace()
+    // One failure: the write gate resolves first, then the first sync attempt fails
+    // and the retry succeeds. This is the race a write actually produces.
+    const stub = writeStub({ table: { 'notes/a.md': { canRead: true, canWrite: true } }, failOn: [2] })
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: stub.impl })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'create', { relPath: 'notes/a.md', kind: 'file', content: 'x' })
+      expect(reply.error).toBeUndefined()
+      // The first sync attempt was denied, the retry succeeded, so the write is a
+      // clean success and the tree shows the document.
+      expect(reply.viewSyncWarning).toBeUndefined()
+      await expect(readFile(join(viewDir, 'global', 'notes', 'a.md'), 'utf8')).resolves.toBe('x')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports the last refresh failure through status, so it is not invisible', async () => {
+    const { root, config } = await writeWorkspace()
+    // Calls: 1 = write gate (ok), 2 and 3 = the two sync attempts (fail).
+    const stub = writeStub({ table: { 'notes/a.md': { canRead: true, canWrite: true } }, failOn: [2, 3] })
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: stub.impl })
+    try {
+      apply(ctx as never, config as never)
+      const created = await callRoute(routes, 'create', { relPath: 'notes/a.md', kind: 'file', content: 'x' })
+      expect(created.viewSyncWarning).toBeDefined()
+      // The page reads status on its next load; the failure has to still be there,
+      // or the reader sees a created-but-missing document with no explanation.
+      const status = await callRoute(routes, 'status', {})
+      expect(typeof status.lastSyncFailure).toBe('string')
+      expect(status.lastSyncFailure as string).toContain('notes/a.md')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+})
+
+describe('the tree never offers a state file as a document', () => {
+  /**
+   * `create` used to be able to write `.kb-favorites.json` into the view, and the
+   * tree's exclusion list was a hand-maintained second copy that lost it: the reader
+   * saw a bookkeeping file offered as a document, with rename and delete controls.
+   * These pin the single source and the drift check that keeps it honest.
+   */
+  it('excludes every state file the Host writes into a view, favourites included', async () => {
+    const views = await import('../src/views.ts')
+    const names = views.VIEW_METADATA_NAMES
+    expect(names).toContain('.kb-favorites.json')
+    expect(names).toContain('.pinned.json')
+    expect(names).toContain('.kb-trash.json')
+    // The client filters with `**/<name>` patterns built from this same list.
+    const tree = await readFile(new URL('../src/client/KnowledgeFileTree.tsx', import.meta.url), 'utf8')
+    expect(tree).toMatch(/VIEW_METADATA_FILENAMES/u)
+    // The old hand-maintained copy must not come back.
+    expect(tree).not.toMatch(/const METADATA_NAMES = \[/u)
+  })
+
+  it('does not exclude a file nothing writes into a view', async () => {
+    // `.kb-pending` lives under the authoritative root, so an exclusion entry for it
+    // could never match and only misled the next reader of the list.
+    const views = await import('../src/views.ts')
+    expect(views.VIEW_METADATA_NAMES).not.toContain('.kb-pending')
+  })
+
+  it('fails loudly when a state file is written but not listed', async () => {
+    // The load-time check is what makes the list self-maintaining: a new `*PathFor`
+    // that nobody adds to the shared list must not reach the reader's tree silently.
+    const source = await readFile(new URL('../src/views.ts', import.meta.url), 'utf8')
+    expect(source).toMatch(/assertViewMetadataNames\(\)/u)
+    const names = await readFile(new URL('../src/viewMetadata.ts', import.meta.url), 'utf8')
+    // Every helper the Host uses to place a state file is represented here.
+    for (const file of ['kb-audit.jsonl', 'kb-settings.json', 'kb-tree-state.json', 'kb-favorites.json', 'kb-trash.json', 'pinned.json', 'view-mode.json']) {
+      expect(names).toContain(file)
+    }
+  })
+})
+
+describe('a refused grant explains itself', () => {
+  /**
+   * `callGrantApi` read `payload.error.message`, but the Host answers
+   * `{ error: string }`. Every refusal therefore showed "HTTP 403" instead of the
+   * reason, which is the one sentence an operator needs when a grant is rejected.
+   * Both shapes are accepted because DataOps' own admin API nests the message.
+   */
+  it('reads a string reason and a nested one', async () => {
+    const source = await readFile(
+      new URL('../src/client/KnowledgePermissions.tsx', import.meta.url),
+      'utf8',
+    )
+    // The bug: only the nested shape was understood.
+    expect(source).not.toMatch(/payload\.error\?\.message/u)
+    // Both shapes now resolve through one helper.
+    expect(source).toMatch(/function grantFailureMessage/u)
+    expect(source).toMatch(/typeof reason === 'string'/u)
+    expect(source).toMatch(/\.message/u)
+  })
+})
+
+describe('a full scan that resolved nothing leaves the view alone', () => {
+  /**
+   * SIMULATED, NOT OBSERVED IN PRODUCTION.
+   *
+   * The live deployment answers `considered: 5, resolved: 5`; an empty resolved set
+   * has only ever been produced here with a stub. These tests exist because the
+   * failure mode is cheap to guard and expensive to suffer -- pruning on an empty set
+   * deletes every link a reader has -- not because the behaviour was seen on a real
+   * system. Do not read them as evidence of a reproducible bug.
+   *
+   * `canReadPath` fails closed, so a backend that is down, a credential that expired,
+   * or a resolve racing a deploy all yield an empty resolved set with no error
+   * anywhere. Without the guard, the next routine sync would treat that as "every
+   * grant was revoked".
+   */
+  it('keeps existing links when a full scan resolves zero paths', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-noprune-'))
+    const actual = join(root, 'actual')
+    const views = join(root, 'views')
+    await mkdir(join(actual, 'personal', 'u-1'), { recursive: true })
+    await writeFile(join(actual, 'personal', 'u-1', 'keep.md'), 'kept', 'utf8')
+    const options = { actualRoot: actual, viewRoot: views, userId: 'u-1' }
+    try {
+      // First sync: the file resolves, so it is linked and the view is populated.
+      const first = await syncView(options, [{ relPath: 'personal/u-1/keep.md' }])
+      expect(first.linked).toEqual(['personal/keep.md'])
+      const viewFile = join(views, 'u-1', 'personal', 'keep.md')
+      await expect(readFile(viewFile, 'utf8')).resolves.toBe('kept')
+
+      // Second sync is a FULL scan that resolved nothing -- the simulated failure.
+      const second = await syncView({ ...options, fullScan: true, trustResolvedSet: false }, [])
+      expect(second.pruneSkipped).toBe('no-path-resolved')
+      // The link survives. This is the whole point: a reader keeps their documents
+      // even when the permission backend answers nothing.
+      await expect(readFile(viewFile, 'utf8')).resolves.toBe('kept')
+      expect(second.unlinked).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('still prunes when a full scan resolved some paths', async () => {
+    // The guard must not disable pruning generally: a real revoke is exactly a full
+    // scan that resolves a non-empty set not containing this file.
+    const root = await mkdtemp(join(tmpdir(), 'kb-prune-'))
+    const actual = join(root, 'actual')
+    const views = join(root, 'views')
+    await mkdir(join(actual, 'personal', 'u-1'), { recursive: true })
+    await writeFile(join(actual, 'personal', 'u-1', 'gone.md'), 'x', 'utf8')
+    await writeFile(join(actual, 'personal', 'u-1', 'stays.md'), 'y', 'utf8')
+    const options = { actualRoot: actual, viewRoot: views, userId: 'u-1' }
+    try {
+      await syncView(options, [
+        { relPath: 'personal/u-1/gone.md' },
+        { relPath: 'personal/u-1/stays.md' },
+      ])
+      // `gone.md` was revoked; `stays.md` still resolves, so the set is non-empty.
+      const after = await syncView({ ...options, fullScan: true }, [{ relPath: 'personal/u-1/stays.md' }])
+      expect(after.pruneSkipped).toBeUndefined()
+      expect(after.unlinked).toEqual(['personal/gone.md'])
+      await expect(readFile(join(views, 'u-1', 'personal', 'gone.md'), 'utf8')).rejects.toThrow()
+      await expect(readFile(join(views, 'u-1', 'personal', 'stays.md'), 'utf8')).resolves.toBe('y')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not apply the guard to a targeted sync', async () => {
+    // A write asking about one path resolves an empty set when that path is denied.
+    // That says nothing about the rest of the tree, so the guard must not label it a
+    // wholesale failure -- but it must not prune the other links either.
+    const root = await mkdtemp(join(tmpdir(), 'kb-target-'))
+    const actual = join(root, 'actual')
+    const views = join(root, 'views')
+    await mkdir(join(actual, 'personal', 'u-1'), { recursive: true })
+    await writeFile(join(actual, 'personal', 'u-1', 'a.md'), 'a', 'utf8')
+    const options = { actualRoot: actual, viewRoot: views, userId: 'u-1' }
+    try {
+      await syncView(options, [{ relPath: 'personal/u-1/a.md' }])
+      const targeted = await syncView({ ...options, fullScan: false }, [])
+      expect(targeted.pruneSkipped).toBeUndefined()
+      await expect(readFile(join(views, 'u-1', 'personal', 'a.md'), 'utf8')).resolves.toBe('a')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports the refusal through status so a deployment can see it', async () => {
+    // The observable half is worth more than the test: on a real system this field is
+    // how "the backend answered nothing this round" becomes visible at all.
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).toMatch(/pruneSkipped: lastPruneSkipped/u)
+    expect(source).toMatch(/lastPruneSkipped = result\.pruneSkipped/u)
+  })
+})
+
+describe('a sync whose resolves all fail reports itself', () => {
+  /**
+   * SIMULATED, NOT OBSERVED IN PRODUCTION.
+   *
+   * The live deployment answers `considered: 5, resolved: 5`. This drives the Host
+   * function with every resolve failing, which is the shape a backend outage or an
+   * expired credential produces, and pins that it (a) keeps the view and (b) says so.
+   */
+  it('keeps the reader links and reports pruneSkipped when every resolve fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-syncfail-'))
+    const actual = join(root, 'actual')
+    await mkdir(join(actual, 'personal', 'u-1'), { recursive: true })
+    await writeFile(join(actual, 'personal', 'u-1', 'keep.md'), 'kept', 'utf8')
+    const config = {
+      ...CONFIG,
+      actualRoot: actual,
+      viewRoot: join(root, 'views'),
+      mountPoint: join(root, 'mnt'),
+    }
+    // First: a healthy resolve populates the view.
+    let failing = false
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/auth/me')) {
+        return new Response(JSON.stringify({ user: { id: 'u-1', displayName: 'Tester' } }), { status: 200 })
+      }
+      if (url.includes('/resource-permissions/resolve')) {
+        if (failing) return new Response(JSON.stringify({ error: 'unavailable' }), { status: 500 })
+        return new Response(JSON.stringify({ canRead: true, canWrite: true }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      apply(ctx as never, config as never)
+      const first = await callRoute(routes, 'views.sync', {})
+      expect(first.error).toBeUndefined()
+      const viewFile = join(config.viewRoot, 'u-1', 'personal', 'keep.md')
+      await expect(readFile(viewFile, 'utf8')).resolves.toBe('kept')
+
+      // Now every resolve fails, and a FULL scan runs.
+      failing = true
+      const out = await callRoute(routes, 'views.sync', {})
+      expect(out.pruneSkipped).toBe('no-path-resolved')
+      // The link is still there: this is the guard's whole purpose.
+      await expect(readFile(viewFile, 'utf8')).resolves.toBe('kept')
+      expect(out.unlinked).toEqual([])
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('a targeted sync must not touch the rest of the view', () => {
+  /**
+   * Measured on the live deployment, not speculated: `views.sync` with
+   * `paths: ['global/definitely-not-there.md']` unlinked every other document in the
+   * view, because a non-empty requested set that resolved to nothing made the whole
+   * existing view look like an orphan set. The reader loses their tree for asking
+   * about one path.
+   *
+   * The rule: a sync that was given specific paths knows nothing about the paths it
+   * was not asked about, so it must never prune.
+   */
+  it('leaves untouched documents alone when asked about unrelated paths', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-target-'))
+    const actual = join(root, 'actual')
+    await mkdir(join(actual, 'global'), { recursive: true })
+    await writeFile(join(actual, 'global', 'a.md'), 'a', 'utf8')
+    await writeFile(join(actual, 'global', 'b.md'), 'b', 'utf8')
+    const views = join(root, 'views')
+    const options = { actualRoot: actual, viewRoot: views, userId: 'u-1' }
+    try {
+      // A full sync links both.
+      await syncView({ ...options, fullScan: true }, [
+        { relPath: 'global/a.md' },
+        { relPath: 'global/b.md' },
+      ])
+      await expect(readFile(join(views, 'u-1', 'global', 'a.md'), 'utf8')).resolves.toBe('a')
+      await expect(readFile(join(views, 'u-1', 'global', 'b.md'), 'utf8')).resolves.toBe('b')
+
+      // A targeted sync about a path that does not exist resolves nothing, and must
+      // not take the other two with it.
+      const targeted = await syncView({ ...options, fullScan: false }, [])
+      expect(targeted.unlinked).toEqual([])
+      expect(targeted.pruned).toEqual([])
+      await expect(readFile(join(views, 'u-1', 'global', 'a.md'), 'utf8')).resolves.toBe('a')
+      await expect(readFile(join(views, 'u-1', 'global', 'b.md'), 'utf8')).resolves.toBe('b')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('is additive: a targeted sync never unlinks, even for a path it names', async () => {
+    // Deliberate. A targeted sync exists for a write to verify its own result, so it
+    // is authoritative about what it may ADD and silent about everything else --
+    // including removals. Making it authoritative for removals would mean a write's
+    // own verification could delete links, which is the opposite of why it is called.
+    //
+    // Nothing depends on the removal case: the only caller that passes `paths` is the
+    // `views.sync` route, which has no client caller at all. A revoke is expressed by
+    // a FULL sync, which is authoritative and prunes normally.
+    const root = await mkdtemp(join(tmpdir(), 'kb-target2-'))
+    const actual = join(root, 'actual')
+    await mkdir(join(actual, 'global'), { recursive: true })
+    await writeFile(join(actual, 'global', 'a.md'), 'a', 'utf8')
+    const views = join(root, 'views')
+    const options = { actualRoot: actual, viewRoot: views, userId: 'u-1' }
+    try {
+      await syncView({ ...options, fullScan: true }, [{ relPath: 'global/a.md' }])
+      await expect(readFile(join(views, 'u-1', 'global', 'a.md'), 'utf8')).resolves.toBe('a')
+      // Naming the path as hidden does nothing in a targeted sync; the link stays.
+      const targeted = await syncView({ ...options, fullScan: false, hidden: ['global/a.md'] }, [])
+      expect(targeted.unlinked).toEqual([])
+      await expect(readFile(join(views, 'u-1', 'global', 'a.md'), 'utf8')).resolves.toBe('a')
+      // A full sync is what applies the revoke.
+      const full = await syncView({ ...options, fullScan: true, hidden: ['global/a.md'] }, [])
+      expect(full.unlinked).toEqual(['global/a.md'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
 })

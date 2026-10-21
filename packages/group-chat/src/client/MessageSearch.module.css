@@ -1,0 +1,139 @@
+/*
+ * The message search field and its results.
+ *
+ * Sized like the room filter above so the two read as siblings rather than as two different
+ * toolbars; the results list is capped in height because it shares the sidebar footer with the
+ * room rows and must not push them off screen.
+ */
+
+.root {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
+.bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 12px;
+}
+
+.toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.toggle:hover,
+.toggle[aria-expanded='true'] {
+  opacity: 1;
+  background: var(--dsw-alias-bg-l2, rgb(255 255 255 / 8%));
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, currentcolor);
+  outline-offset: 1px;
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-l2, rgb(255 255 255 / 6%));
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: 12px;
+  outline: none;
+}
+
+.input::placeholder {
+  color: var(--dsw-alias-label-secondary, inherit);
+  opacity: 0.7;
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  padding: 2px 8px 4px;
+  overflow-y: auto;
+}
+
+.hint {
+  margin: 6px 4px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary, inherit);
+  opacity: 0.75;
+}
+
+.hit {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hit:hover,
+.hit:focus-visible {
+  background: var(--dsw-alias-bg-l2, rgb(255 255 255 / 8%));
+  outline: none;
+}
+
+.hitHead {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+
+.hitRoom {
+  flex: none;
+  font-weight: 500;
+}
+
+.hitAuthor {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.hitText {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+}

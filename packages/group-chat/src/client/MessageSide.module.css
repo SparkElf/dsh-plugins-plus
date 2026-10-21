@@ -78,3 +78,159 @@
   align-items: flex-start;
   max-width: 100%;
 }
+
+/* ── quoted message bar ──────────────────────────────────────────────────────── */
+
+/*
+ * The bar sits above the bubble and outside it, so the reply keeps the official layout and the
+ * quote reads as a pointer rather than as part of what was said. Narrower than the bubble and
+ * clipped to one line: it is attribution, not content.
+ */
+.quoteBar {
+  box-sizing: border-box;
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  max-width: min(420px, 100%);
+  margin-bottom: 4px;
+  padding: 4px 8px 4px 0;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-l2, rgb(255 255 255 / 4%));
+  overflow: hidden;
+}
+
+/* The accent rule, drawn as a stretched column so it matches the bar's height. */
+.quoteMark {
+  flex: none;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--dsw-alias-brand-primary, currentcolor);
+  opacity: 0.6;
+}
+
+.quoteBody {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+
+.quoteAuthor {
+  flex: none;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.quoteText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+/* A reply I wrote keeps the bar on the right with the bubble it belongs to. */
+.selfRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* ── reply control on a message ─────────────────────────────────────────────── */
+
+/*
+ * The bubble and its action share one row so the button can be placed against it. Without this
+ * wrapper the button would have to be positioned against the flow item, which also contains the
+ * author header and the quoted bar.
+ */
+.rowBody {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/*
+ * Always present, just quiet, and fully opaque on hover or focus.
+ *
+ * A control that only exists while hovered cannot be reached by keyboard, and the reveal here
+ * depends on the official row's own hover behaviour — which this plugin does not own.
+ */
+.rowActions {
+  position: absolute;
+  /* Always visible, just quiet: the pointer reveal depends on the official row's own hover
+     behaviour, which this plugin does not own, and a control that only exists while hovered is
+     easy to miss and impossible to reach by keyboard. */
+  opacity: 0.45;
+  top: 0;
+  right: -28px;
+  display: flex;
+  align-items: center;
+  transition: opacity 120ms ease;
+}
+
+.otherRow:hover .rowActions,
+.rowActions:focus-within {
+  opacity: 1;
+}
+
+.replyButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  cursor: pointer;
+}
+
+.replyButton:hover {
+  background: var(--dsw-alias-bg-l2, rgb(255 255 255 / 8%));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+
+.replyButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, currentcolor);
+  outline-offset: 1px;
+}
+
+/*
+ * The reply control on a message I wrote.
+ *
+ * The bubble is right-aligned, so the control goes on its left: that is where the pointer comes
+ * from when reaching back into the conversation, and it never covers the trailing timestamp the
+ * official row puts on the right.
+ */
+.selfBody {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.rowActionsSelf {
+  position: absolute;
+  top: 0;
+  left: -28px;
+  display: flex;
+  align-items: center;
+  opacity: 0.45;
+  transition: opacity 120ms ease;
+}
+
+.selfRow:hover .rowActionsSelf,
+.rowActionsSelf:focus-within {
+  opacity: 1;
+}

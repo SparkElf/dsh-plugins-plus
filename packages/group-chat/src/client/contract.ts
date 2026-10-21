@@ -41,6 +41,39 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
       hookContext: unknown
       inject: unknown
     }
+
+    /**
+     * The bar above the composer, where a pending reply shows what it answers.
+     *
+     * `list` rather than `single`, which is the whole reason this seat is usable: the official
+     * queue and todo docks already occupy it, and a `single` seat would replace one of them
+     * instead of adding a row beside them. Mirrors the official declaration
+     * (`dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts:214`).
+     */
+    'conversation.input.dock': {
+      kind: 'list'
+      scope: 'session'
+      owner: {
+        /** The session this composer belongs to, which is what identifies the room. */
+        readonly session: { readonly sessionId?: unknown }
+        readonly [key: string]: unknown
+      }
+    }
+
+    /**
+     * The compact controls at the left of the composer's tool row.
+     *
+     * Also a `list`, so this plugin adds a control beside the official ones (the `+` command
+     * menu and the permission selector) rather than displacing any of them.
+     */
+    'conversation.input.left': {
+      kind: 'list'
+      scope: 'session'
+      owner: {
+        readonly session: { readonly sessionId?: unknown }
+        readonly [key: string]: unknown
+      }
+    }
   }
 
   interface LocaleNamespaceMap {

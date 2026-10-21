@@ -23,7 +23,6 @@ import {
   Input,
   Modal,
   SegmentedControl,
-  Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   KB_API,
@@ -93,32 +92,6 @@ type LoadState =
   | { kind: 'ready'; grants: GrantView[]; supported: boolean }
   | { kind: 'error'; message: string }
 
-/** One principal and every grant it holds, in a stable order. */
-interface PrincipalGroup {
-  /** Principal kind, as the grant names it. */
-  principalType: KnowledgeGrantSubjectType
-  /** Principal id within its kind. */
-  principalId: string
-  /** Every grant this principal holds, newest first. */
-  grants: GrantView[]
-  /** Distinct paths, in first-seen order, so a directory reads before its files. */
-  paths: string[]
-  /** Distinct actions, in the fixed read → write → manage order. */
-  actions: string[]
-}
-
-/** The order actions read in: least to most capability. */
-const ACTION_ORDER = ['read', 'write', 'manage']
-
-/**
- * Format a grant instant the way the reference table does.
- *
- * DataOps' permission preview prints `YYYY/MM/DD HH:mm` and a dash for a missing
- * value, so a reader comparing the two surfaces sees the same date. The raw
- * ISO-8601 string the API returns is not that.
- * @param value - ISO-8601 instant, or an empty string when the backend sent none.
- * @returns The formatted instant, or a dash when there is nothing to show.
- */
 /**
  * Flatten the four principal directories into one label lookup.
  *
@@ -141,66 +114,27 @@ function labelsFromDirectory(
   return labels
 }
 
-function formatGrantedAt(value: string): string {
-  if (value === '') return '-'
-  const time = new Date(value)
-  if (Number.isNaN(time.getTime())) return value
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${String(time.getFullYear())}/${pad(time.getMonth() + 1)}/${pad(time.getDate())} ${pad(time.getHours())}:${pad(time.getMinutes())}`
-}
-
 /**
- * Group a flat grant list by the principal it names.
+ * Read the reason out of a failed grant reply.
  *
- * This is the whole of the one-to-many shape: the backend answers one row per
- * (principal, path, action) grant, and an operator reading that flat list cannot
- * answer "what may this person see". Grouping here rather than on the Host keeps
- * the plugin's single authority for the data where it already is -- the grants
- * query -- and adds no endpoint.
+ * The Host answers `{ error: string }` on every rejection. A nested
+ * `{ error: { message } }` is also accepted because it is the shape the DataOps admin
+ * API uses and this surface relays either: reading only one of the two silently
+ * replaced the backend's own explanation with a bare status code, which is exactly the
+ * text an operator needs when a grant is refused.
  *
- * Sorting is total so the table does not reshuffle between reads: principals by
- * kind then id; a group's grants newest first; paths and actions in a fixed
- * order.
- * @param grants - the flat grant list as the Host relays it.
- * @param locale - optional locale tag, so ids compare under the reader's
- *   collation; the runtime default is used when the slot passes none.
- * @returns One entry per principal, sorted.
+ * @param payload - the parsed reply.
+ * @param status - the HTTP status, used when the reply carries no reason.
+ * @returns The message to show.
  */
-export function groupGrantsByPrincipal(grants: GrantView[], locale?: string): PrincipalGroup[] {
-  const groups = new Map<string, PrincipalGroup>()
-  for (const grant of grants) {
-    // A kind and id pair identifies a principal across kinds, since a role code
-    // and a user UUID are drawn from different spaces.
-    const key = grant.principalType + '\u0000' + grant.principalId
-    let group = groups.get(key)
-    if (group === undefined) {
-      group = {
-        principalType: grant.principalType,
-        principalId: grant.principalId,
-        grants: [],
-        paths: [],
-        actions: [],
-      }
-      groups.set(key, group)
-    }
-    group.grants.push(grant)
-    if (!group.paths.includes(grant.relPath)) group.paths.push(grant.relPath)
-    if (!group.actions.includes(grant.action)) group.actions.push(grant.action)
+function grantFailureMessage(payload: { error?: unknown }, status: number): string {
+  const reason = payload.error
+  if (typeof reason === 'string' && reason.trim() !== '') return reason
+  if (reason !== null && typeof reason === 'object') {
+    const message = (reason as { message?: unknown }).message
+    if (typeof message === 'string' && message.trim() !== '') return message
   }
-  for (const group of groups.values()) {
-    group.grants.sort((a, b) => b.grantedAt.localeCompare(a.grantedAt))
-    group.actions.sort((a, b) => {
-      const ai = ACTION_ORDER.indexOf(a)
-      const bi = ACTION_ORDER.indexOf(b)
-      // An action the backend adds later sorts after the known ones rather than
-      // jumping the queue at index -1.
-      return (ai === -1 ? ACTION_ORDER.length : ai) - (bi === -1 ? ACTION_ORDER.length : bi)
-    })
-  }
-  return [...groups.values()].sort((a, b) => {
-    if (a.principalType !== b.principalType) return a.principalType.localeCompare(b.principalType)
-    return a.principalId.localeCompare(b.principalId, locale)
-  })
+  return 'HTTP ' + String(status)
 }
 
 /**
@@ -216,8 +150,8 @@ async function callGrantApi<T>(method: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
     cache: 'no-store',
   })
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } }
-  if (!response.ok) throw new Error(payload.error?.message ?? 'HTTP ' + String(response.status))
+  const payload = (await response.json().catch(() => ({}))) as T & { error?: unknown }
+  if (!response.ok) throw new Error(grantFailureMessage(payload, response.status))
   return payload
 }
 
@@ -240,8 +174,14 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
   const [notice, setNotice] = useState<string | undefined>(undefined)
   const [grantOpen, setGrantOpen] = useState(false)
   const [grantNotice, setGrantNotice] = useState<string | undefined>(undefined)
-  /** The group a confirmation is currently asking about, if any. */
-  const [confirming, setConfirming] = useState<PrincipalGroup | undefined>(undefined)
+  /**
+   * The revoke a confirmation is currently asking about, if any.
+   *
+   * Holds the grants to remove and the name to print rather than a grouped
+   * principal: the overview renders two row grains (a person, a resource), and the
+   * dialog only needs "what will disappear" and what to call it.
+   */
+  const [confirming, setConfirming] = useState<{ grants: GrantView[]; label: string } | undefined>(undefined)
   /**
    * One directory per principal kind, so a row can print a name rather than the
    * id the grant stores.
@@ -342,10 +282,10 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
    * a time, and a partial failure is the useful outcome -- the rows that did
    * remove are gone, and the message says so instead of claiming a clean sweep.
    */
-  const revokeGroup = async (group: PrincipalGroup): Promise<void> => {
+  const revokeGrants = async (grants: readonly GrantView[]): Promise<void> => {
     setBusy(true); setNotice(undefined)
     let failed: unknown
-    for (const entry of group.grants) {
+    for (const entry of grants) {
       try {
         await callGrantApi(KB_API.revoke, {
           mountPoint: props.mountPoint,
@@ -368,13 +308,14 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
     setConfirming(undefined)
   }
 
-  // Grouped once per render: the group list is a pure function of the loaded
-  // grants, so a second copy in state could drift from them.
-  const groups = state.kind === 'ready' ? groupGrantsByPrincipal(state.grants) : []
-  const confirmingName = confirming === undefined
-    ? ''
-    : ((directory[confirming.principalType] ?? []).find(option => option.id === confirming.principalId)?.label
-      ?? confirming.principalId)
+  /**
+   * Directory labels, flattened once per render.
+   *
+   * The overview prints names for every principal kind at once, so it needs one
+   * map rather than four lists. Keys carry the kind because an id is only unique
+   * within its kind: a role and a user could otherwise collide.
+   */
+  const labels = labelsFromDirectory(directory)
 
   // Hoisted so the dependency list names a plain boolean instead of the whole
   // discriminated union (which would republish on every unrelated field change).
@@ -398,160 +339,73 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
 
   return (
     <div className={styles.surface}>
-      {/* The header above already names this surface, so the page opens on its
-          summary line rather than repeating the title. The one action is published
-          to that header instead of sitting in a band of its own. */}
-      <p className={tableStyles.pageHint}>
-        {state.kind === 'ready'
-          ? c('permCount').replace('{count}', String(groups.length))
-          : c('loading')}
-      </p>
-
       {notice !== undefined && <p className={styles.notice}>{notice}</p>}
 
-      {/* Both readings of the same grant table, above the table itself: an
-          administrator opens this page with either "what does this person have"
-          or "who can see this file" in mind, and one row-per-grant layout answers
-          neither without being read line by line. Derived from the grants already
-          loaded rather than fetched again, so it cannot disagree with the table
-          below it. */}
-      {state.kind === 'ready' && state.grants.length > 0 && (
-        <section className={tableStyles.overviewBand} data-kb-section="overview">
-          <KnowledgePermissionOverview
-            grants={state.grants}
-            labels={labelsFromDirectory(directory)}
-            copy={{
-              tabByPerson: c('overviewByPerson'),
-              tabByResource: c('overviewByResource'),
-              empty: c('overviewEmpty'),
-              pathsHeld: (count: number) => c('overviewHeld').replace('{count}', String(count)),
-              rolesHeld: c('overviewRoles'),
-              actionsHeld: c('overviewActions'),
-              builtInRoles: c('overviewRolesHeading'),
-              noActions: c('overviewNoActions'),
-            }}
-          />
-        </section>
-      )}
+      {/* The overview IS the page body, not a summary above a second body.
+          It carries both readings of one grant payload under tabs: "what does this
+          person have" and "who can reach this path" are the two questions this
+          surface is opened to answer, and an operator asks one of them, not both.
+          The stat cards above the tabs are the same numbers in one line.
 
+          Loading, error and unsupported keep their own message instead of letting
+          the overview render: an empty table before the read returns would assert
+          an empty authorization set the surface has not seen. */}
+      {state.kind === 'loading' && (
+        <p className={styles.muted} role="status">{c('loading')}</p>
+      )}
+      {state.kind === 'error' && (
+        <p className={styles.notice} role="alert">
+          <IconWarningOutlineRegular size={16} className={styles.emptyGlyph} />
+          {state.message}
+        </p>
+      )}
       {state.kind === 'ready' && !state.supported && (
         <p className={styles.muted}>{c('grantsManaged')}</p>
       )}
 
-      {/* One row per principal, its grants listed inside it.
-          The shape follows DataOps' permission preview (the application-detail
-          table in `PermissionsPrototypePage.vue`): a heavier name with dimmer
-          supporting lines in the first cell, tags for the classification, and a
-          `<br>`-separated multi-target block. Reading a flat grant list could not
-          answer "what may this person see", which is the question this page is
-          opened for. */}
-      <table className={tableStyles.table}>
-        <thead>
-          <tr>
-            <th>{c('colPrincipal')}</th>
-            <th>{c('colKind')}</th>
-            <th>{c('colPermission')}</th>
-            <th>{c('colResources')}</th>
-            <th>{c('colExpiry')}</th>
-            <th>{c('actions')}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {/* "No grants" is only true once the read came back. While the grants
-              are still loading, or after the read failed, the same row would
-              assert an empty authorization set the surface has not seen -- so it
-              says which state it is in instead. */}
-          {state.kind === 'loading' && (
-            <tr className={tableStyles.emptyRow} role="status">
-              <td colSpan={6}>{c('loading')}</td>
-            </tr>
-          )}
-          {state.kind === 'error' && (
-            <tr className={tableStyles.emptyRow}>
-              <td colSpan={6} role="alert">
-                <IconWarningOutlineRegular size={16} className={styles.emptyGlyph} />
-                {state.message}
-              </td>
-            </tr>
-          )}
-          {state.kind === 'ready' && groups.length === 0 && (
-            <tr className={tableStyles.emptyRow}>
-              {/* The reference's centered muted empty row. */}
-              <td colSpan={6}>{c('grantsEmpty')}</td>
-            </tr>
-          )}
-          {groups.map((group) => {
-            const named = (directory[group.principalType] ?? [])
-              .find(option => option.id === group.principalId)
-            const latest = group.grants[0]?.grantedAt ?? ''
-            return (
-              <tr key={group.principalType + '\u0000' + group.principalId}>
-                <td>
-                  {/* A directory hit prints the human name; without one the id
-                      still shows, so a principal outside the directory stays
-                      legible rather than blank. */}
-                  <div className={tableStyles.principalName}>{named?.label ?? group.principalId}</div>
-                  {/* Both counts are labelled: a bare "4 · 3 个路径" made the
-                      reader guess what the 4 counted. */}
-                  <div className={tableStyles.principalMeta}>
-                    {c('grantsUnit').replace('{count}', String(group.grants.length))}
-                    {' · '}
-                    {c('resourcesUnit').replace('{count}', String(group.paths.length))}
-                  </div>
-                  <div className={tableStyles.principalId}>{group.principalId}</div>
-                </td>
-                <td>
-                  <div className={tableStyles.kinds}>
-                    <Tag tone="neutral">{c('subject.' + group.principalType)}</Tag>
-                  </div>
-                </td>
-                <td>
-                  <div className={tableStyles.actions}>
-                    {group.actions.map(action => (
-                      <Tag key={action} tone="info">
-                        {action === 'read' ? c('actionRead')
-                          : action === 'write' ? c('actionWrite')
-                            : action === 'manage' ? c('actionManage') : action}
-                      </Tag>
-                    ))}
-                  </div>
-                </td>
-                <td>
-                  {/* The multi-target block: one path per line, as the
-                      reference's `<br>`-joined targets read. */}
-                  <ul className={tableStyles.paths}>
-                    {group.paths.map(path => (
-                      <li key={path} className={tableStyles.path}>{path}</li>
-                    ))}
-                  </ul>
-                </td>
-                <td>
-                  {/* A grant carries no end date anywhere in the backend model, so
-                      the honest value is the one the schema implies. An expiry the
-                      store cannot express must not be invented as a date. */}
-                  <span className={tableStyles.placeholder}>{c('expiryNever')}</span>
-                </td>
-                <td className={tableStyles.actionCell}>
-                  <div className={tableStyles.rowActions}>
-                    {/* Revoking stays per-grant, because a grant is what the
-                        endpoint removes; the group only makes the set readable.
-                        It confirms first: this row can cover several grants at
-                        once, so a single click would remove more than it shows. */}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => { setConfirming(group) }}
-                    >
-                      {c('revoke')}
-                    </Button>
-                  </div>
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+      {state.kind === 'ready' && state.supported && (
+        <KnowledgePermissionOverview
+          grants={state.grants}
+          labels={labels}
+          copy={{
+            tabByPerson: c('overviewByPerson'),
+            tabByResource: c('overviewByResource'),
+            empty: c('grantsEmpty'),
+            pathsHeld: (count: number) => c('overviewHeld').replace('{count}', String(count)),
+            rolesHeld: c('overviewRoles'),
+            actionsHeld: c('overviewActions'),
+            builtInRoles: c('overviewRolesHeading'),
+            noActions: c('overviewNoActions'),
+            tabsLabel: c('overviewTabsLabel'),
+            statPrincipals: c('overviewStatPrincipals'),
+            statResources: c('overviewStatResources'),
+            statGrants: c('overviewStatGrants'),
+            statRoles: c('overviewStatRoles'),
+            colPrincipal: c('colPrincipal'),
+            colKind: c('colKind'),
+            colPermission: c('colPermission'),
+            colResources: c('colResources'),
+            colExpiry: c('colExpiry'),
+            colActions: c('actions'),
+            colResource: c('overviewColResource'),
+            colHolders: c('overviewColHolders'),
+            colKindOfResource: c('overviewColKindOfResource'),
+            revoke: c('revoke'),
+            revokeBusy: c('revoking'),
+            expiryNever: c('expiryNever'),
+            kindFile: c('overviewKindFile'),
+            kindDirectory: c('overviewKindDirectory'),
+            grantsUnit: (count: number) => c('grantsUnit').replace('{count}', String(count)),
+            resourcesUnit: (count: number) => c('resourcesUnit').replace('{count}', String(count)),
+            kindLabel: (kind: KnowledgeGrantSubjectType) => c('subject.' + kind),
+            actionLabel: (value: string) => (value === 'read' ? c('actionRead')
+              : value === 'write' ? c('actionWrite')
+                : value === 'manage' ? c('actionManage') : value),
+          }}
+          onRevoke={(grants: GrantView[], label: string) => { setConfirming({ grants: [...grants], label }) }}
+          busy={busy}
+        />
+      )}
 
       {/* The create form, raised rather than parked above the data. */}
       <Modal
@@ -657,7 +511,7 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
             <Button
               variant="primary"
               disabled={busy}
-              onClick={() => { if (confirming !== undefined) void revokeGroup(confirming) }}
+              onClick={() => { if (confirming !== undefined) void revokeGrants(confirming.grants) }}
             >
               {busy ? c('revoking') : c('confirm')}
             </Button>
@@ -668,7 +522,7 @@ export function KnowledgePermissions(props: KnowledgePermissionsProps) {
           {confirming === undefined
             ? c('revokeConfirmNeeds')
             : c('revokeConfirmBody')
-              .replace('{name}', confirmingName)
+              .replace('{name}', confirming.label)
               .replace('{count}', String(confirming.grants.length))}
         </p>
       </Modal>

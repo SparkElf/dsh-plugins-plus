@@ -332,6 +332,23 @@ export class GroupChatBackend {
    * Pull events after `cursor`. Omitting the cursor asks for the room from the start,
    * which is what a fresh container does on its first sync.
    */
+  /**
+   * Searches message text across the rooms this account can read.
+   *
+   * The visibility rule lives on the room server: it decides which rooms the caller may read and
+   * narrows the query there. Forwarding the words alone is deliberate — a copy of that rule in
+   * the plugin would be a second place to get authorization wrong.
+   */
+  async searchMessages(query: string, signal?: AbortSignal): Promise<readonly unknown[]> {
+    const params = new URLSearchParams({ query })
+    return this.request<readonly unknown[]>(
+      'GET',
+      `/api/ai/chat/rooms/messages/search?${params.toString()}`,
+      undefined,
+      signal,
+    )
+  }
+
   async listEvents(roomId: string, cursor?: string, limit?: number, signal?: AbortSignal): Promise<EventPage> {
     const query = new URLSearchParams()
     if (cursor !== undefined) query.set('cursor', cursor)

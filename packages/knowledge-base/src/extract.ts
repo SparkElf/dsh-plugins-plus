@@ -187,40 +187,78 @@ export function looksTooThinToSearch(markdown: string): boolean {
   return text.length < 40
 }
 
+/** Quality tier the extractor asks MinerU for. */
+const MINERU_TIER = 'basic'
+
+/**
+ * Where the 4.x synchronous parse lives.
+ *
+ * MinerU 4.x mounts its routes under `/v1` (`APIRouter(prefix="/v1")`), so the
+ * synchronous parse is `/v1/file_parse`. 3.4.x served `/file_parse` at the root and
+ * cannot answer the query-parameter contract this function sends, so pointing at the
+ * version this deployment installs (`mineru>=4.0,<5`) is the honest choice rather
+ * than carrying two request shapes.
+ */
+const MINERU_PARSE_PATH = '/v1/file_parse'
+
 async function viaMineru(
   baseUrl: string,
   fullPath: string,
   fileName: string,
-  parseMethod: 'auto' | 'ocr' = 'auto',
+  mode: 'auto' | 'ocr' = 'auto',
 ): Promise<string | undefined> {
   try {
     const bytes = await readFile(fullPath)
-    const form = new FormData()
-    form.append('file', new Blob([new Uint8Array(bytes)]), fileName)
+    const url = new URL(MINERU_PARSE_PATH, baseUrl)
+    // MinerU 4.x reads every parse option from the QUERY STRING and accepts exactly
+    // one multipart field, `files`. Sending options as form fields is rejected with
+    // `Too many fields. Maximum number of fields is 0.` -- the body parser runs with
+    // `max_fields=0`. `output_formats` has no default and is required; `tier` is
+    // named because the server otherwise resolves it to `standard`, which measured
+    // 17.8 s against 2.0 s for `basic` on the same one-page PDF.
+    url.searchParams.set('tier', MINERU_TIER)
+    url.searchParams.append('output_formats', 'markdown')
     // `auto` lets the parser classify the document itself: it samples pages and
     // switches to OCR when a page carries too little extractable text, which is what
     // a scan looks like. Forcing `ocr` everywhere would run OCR over born-digital
     // PDFs too -- slower, and worse on text that was already perfect.
-    form.append('parse_method', parseMethod)
-    const response = await fetch(baseUrl + '/file_parse', {
+    url.searchParams.set('ocr_mode', mode === 'ocr' ? 'ocr' : 'auto')
+    const form = new FormData()
+    form.append('files', new Blob([new Uint8Array(bytes)], { type: 'application/pdf' }), fileName)
+    const response = await fetch(url, {
       method: 'POST',
       body: form,
       signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
     })
     if (!response.ok) return undefined
     const body = await response.json() as Record<string, unknown>
-    // Direct answer: { markdown: "…" } or { md_content: "…" }.
+    // A 4.x task result carries the text inline per file: files[0].content.markdown.
+    const files = body.files
+    if (Array.isArray(files)) {
+      for (const entry of files) {
+        if (typeof entry !== 'object' || entry === null) continue
+        const content = (entry as { content?: unknown }).content
+        if (typeof content !== 'object' || content === null) continue
+        const markdown = (content as { markdown?: unknown }).markdown
+        if (typeof markdown === 'string' && markdown.trim() !== '') return markdown
+      }
+      // The task answered but produced no Markdown: not a parser-shaped reply, so
+      // there is nothing to poll for either.
+      return undefined
+    }
+    // Tolerate the shapes an older deployment answered with, so a server that was
+    // not upgraded degrades to "no text" rather than to a thrown request.
     for (const key of ['markdown', 'md_content', 'mdContent']) {
       const value = body[key]
       if (typeof value === 'string' && value.trim() !== '') return value
     }
-    // Task answer: poll the result route.
+    // Task answer without inline content: poll the result route.
     const taskId = typeof body.task_id === 'string' ? body.task_id
       : (typeof body.taskId === 'string' ? body.taskId : undefined)
     if (taskId === undefined) return undefined
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 2000))
-      const poll = await fetch(baseUrl + '/tasks/' + encodeURIComponent(taskId) + '/result', {
+      const poll = await fetch(new URL('/v1/tasks/' + encodeURIComponent(taskId) + '/result', baseUrl), {
         signal: AbortSignal.timeout(30_000),
       })
       if (!poll.ok) continue

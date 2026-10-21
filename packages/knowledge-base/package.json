@@ -41,7 +41,11 @@
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "SKILL.md",
+    "i18n/*.json",
+    "skills/**/SKILL.md",
+    "skills/**/i18n/*.json"
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",

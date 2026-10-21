@@ -17,7 +17,7 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { referenceInChat } from 'dsh-better-sidebar/src/client/reference-in-chat.ts'
 import {
   IconCheckOutlineRegular,
@@ -70,13 +70,16 @@ import { publishActor, setMountPointResolver } from './saveAudit.ts'
 import { KnowledgeHome } from './KnowledgeHome.tsx'
 import { KnowledgeTrash } from './KnowledgeTrash.tsx'
 import { KnowledgeMenuBrand, sectionGlyph } from './MenuGlyphs.tsx'
+import { KnowledgeAudit } from './KnowledgeAudit.tsx'
 import { KnowledgeSettings } from './KnowledgeSettings.tsx'
 import { KnowledgeSearch, useKnowledgeSearch } from './KnowledgeSearch.tsx'
 import { KB_DRAG_MIME, KnowledgeListing } from './KnowledgeListing.tsx'
 import { KnowledgeIconButton, KnowledgeSectionHeader } from './KnowledgeSectionHeader.tsx'
 import { usePinnedPaths } from './usePinnedPaths.ts'
+import { useTreeState } from './useTreeState.ts'
 import { useViewMode } from './useViewMode.ts'
 import { KnowledgeFileTree } from './KnowledgeFileTree.tsx'
+import { KnowledgeReferencePicker } from './KnowledgeReferencePicker.tsx'
 import { KnowledgeSelectionBar } from './KnowledgeSelectionBar.tsx'
 import { Button, Menu, MenuItemButton } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './KnowledgePanel.module.css'
@@ -164,6 +167,7 @@ function sectionTitle(t: (key: string) => string, selection: Selection): string 
   if (selection.kind === 'indexing') return t('menu.indexing')
   if (selection.kind === 'home') return t('menu.home')
   if (selection.kind === 'trash') return t('menu.trash')
+  if (selection.kind === 'audit') return t('menu.audit')
   if (selection.kind === 'settings') return t('menu.settings')
   if (selection.kind === 'file') {
     const path = selection.path
@@ -179,6 +183,7 @@ type Selection =
   | { kind: 'permissions' }
   | { kind: 'indexing' }
   | { kind: 'trash' }
+  | { kind: 'audit' }
   | { kind: 'settings' }
   | { kind: 'file'; path: string }
 
@@ -193,6 +198,17 @@ type Selection =
  * should show.
  */
 const RAIL_FOLDED_KEY = 'dsh-knowledge-rail-folded'
+
+/**
+ * The session key this page scopes host requests by when no conversation is open.
+ *
+ * The knowledge page has no conversation of its own, so `sessionId` is undefined on a
+ * fresh visit -- exactly when a reader browses the tree or clicks a document. The host
+ * routes only require a stable non-empty key (they do not verify that a conversation
+ * with that id exists), so an absent one gets this placeholder: stable so caches hold
+ * between renders, and distinct from any real session id so it cannot collide with one.
+ */
+const KB_EXPLORER_SESSION = '@kb-explorer'
 
 /** Read the stored fold state, tolerating storage that is unavailable or corrupt. */
 function readFolded(): boolean {
@@ -282,7 +298,17 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const openDocument = (path: string): void => {
     // The address is built from the session's workspace root so the host can shorten
     // it to a session-relative one and dedupe against a tab the chat already opened.
-    const outcome = openInSidebar(props.ctx, sessionId, '/workspace', joinPath(config.mountPoint, path))
+    // This page has no conversation of its own, so `sessionId` is undefined on a fresh
+    // visit -- exactly when a reader clicks a document. The host route only needs a stable
+    // non-empty key (it does not verify the conversation exists), so an absent one gets the
+    // same placeholder the explorer branch uses. Passing the bare value made this answer
+    // `no-context` and the reader silently never opened.
+    const outcome = openInSidebar(
+      props.ctx,
+      sessionId ?? KB_EXPLORER_SESSION,
+      '/workspace',
+      joinPath(config.mountPoint, path),
+    )
       // Remember where the reader came from before the document replaces the selection.
       setLastNonFile(current => (selection.kind === 'file' ? current : selection))
     setSelection({ kind: 'file', path })
@@ -301,10 +327,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * switch to another surface cannot inherit the previous page's button.
    */
   const [pageAction, setPageAction] = useState<ReactNode>(undefined)
-  // Directories the product's explorer has open, by absolute path. Kept here rather than
-  // in the explorer so switching to the listing and back does not collapse the reader's
-  // tree; the listing has its own expansion state for the same reason.
-  const [explorerExpanded, setExplorerExpanded] = useState<readonly string[]>([])
 
   /**
    * Whether a dropped file must be sent as base64 rather than as text.
@@ -431,7 +453,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * placeholder: stable so the tree keeps its cache between renders, and distinct from any
    * real session id so it can never collide with one.
    */
-  const explorerSessionId = sessionId ?? '@kb-explorer'
+  const explorerSessionId = sessionId ?? KB_EXPLORER_SESSION
 
   /**
    * The knowledge root as an absolute path, for the surfaces that speak absolute paths.
@@ -441,6 +463,27 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * to gate a render.
    */
   const kbRoot = state.kind === 'ready' ? state.config.mountPoint : ''
+
+  // Directories the product's explorer has open, by absolute path.
+  //
+  // Kept by a hook rather than a `useState` here because the set has to survive the
+  // page: it is stored in the caller's view directory beside `.view-mode.json`, so a
+  // reader who opened `department/platform` finds it open after a reload or on another
+  // machine. The hook also coalesces saves -- opening one deep path toggles once per
+  // level, and each toggle must not become its own round trip. It stays disabled until
+  // the root is known, which is the only state with no view directory to read.
+  const treeState = useTreeState(kbRoot !== '', kbRoot)
+  const explorerExpanded = treeState.expanded
+
+  /**
+   * The entry whose `@` button is asking which conversation to land in.
+   *
+   * Null while nothing is being referenced. Set only when there is no conversation
+   * otherwise: with one open, `@` stays a one-click insert as it is in the sidebar.
+   */
+  const [referencing, setReferencing] = useState<{ path: string; isDir: boolean } | undefined>(undefined)
+  /** The only feedback a reader gets when the target conversation is not on screen. */
+  const [referenceNote, setReferenceNote] = useState<string | undefined>(undefined)
 
   // Publish the knowledge root and the caller identity to the plugin-scope save-audit
   // registration. The registration exists before any page mounts (an edit in the
@@ -487,6 +530,26 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * between renders and abort the subtree.
    */
   const canManageGrants = state.kind === 'ready' && state.status.canManageGrants === true
+
+  /**
+   * The caller's own organization chain, for labelling the department folders.
+   *
+   * Resolved once here rather than inside the tree: the tree is a pure renderer over
+   * paths, and the profile lives on the status the page already loaded. Kept as a
+   * single object (rather than two separate values) so the tree receives one optional
+   * prop and an un-upgraded backend — which reports neither array — simply omits it,
+   * leaving the folders to print their codes exactly as before.
+   */
+  const callerPath = useMemo((): { codes: readonly string[]; names: readonly string[] } | undefined => {
+    const caller = state.kind === 'ready' ? state.status.caller : undefined
+    const codes = caller?.departmentPathCodes
+    const names = caller?.departmentPathNames
+    if (codes === undefined || names === undefined) return undefined
+    // Index-aligned by contract; a mismatch would label a row with another
+    // department's name, so it is treated as "no translation" instead.
+    if (codes.length === 0 || codes.length !== names.length) return undefined
+    return { codes, names }
+  }, [state])
 
   /**
    * The caller's pins, read from their own view directory through the Host.
@@ -736,6 +799,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
     ...(canManageGrants ? [{ kind: 'permissions', key: 'menu.permissions' }] as const : []),
     { kind: 'indexing', key: 'menu.indexing' },
     { kind: 'trash', key: 'menu.trash' },
+    { kind: 'audit', key: 'menu.audit' },
     { kind: 'settings', key: 'menu.settings' },
   ] as const
 
@@ -939,7 +1003,12 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   onOpen={(path) => { openDocument(path) }}
                   onGrant={(path) => { openPermissions(path) }}
                   onReference={(path, isDir) => {
-                    if (sessionId === undefined) return
+                    // No conversation open: ask which one to use rather than dropping
+                    // the click. See the file-tree handler for the full reasoning.
+                    if (sessionId === undefined) {
+                      setReferencing({ path: joinPath(config.mountPoint, path), isDir })
+                      return
+                    }
                     referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
                   }}
                 />
@@ -1069,13 +1138,25 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                       department: t('bucketDepartment'),
                       personal: t('bucketPersonal'),
                     }}
+                    // The department bucket's folders are named on disk by CODE, which
+                    // is what makes a department rename unable to move a document. The
+                    // reader knows their organization by NAME, so the caller's own chain
+                    // is translated for display. This is passed only when the backend
+                    // reported a usable chain: without it the folders keep showing their
+                    // codes, which is the pre-hierarchy behaviour rather than a broken
+                    // label. The root row is not in the map, so 「部门」 keeps its
+                    // audience name.
+                    departmentPath={callerPath === undefined
+                      ? undefined
+                      : { codes: callerPath.codes, names: callerPath.names }}
                     root={kbRoot}
                     expanded={explorerExpanded}
                     revealed={[]}
                     onToggle={(path) => {
-                      setExplorerExpanded(current => current.includes(path)
-                        ? current.filter(entry => entry !== path)
-                        : [...current, path])
+                      // The hook owns both halves: it updates what the tree renders and
+                      // coalesces the save, so a reader opening four levels produces one
+                      // write rather than four.
+                      treeState.toggle(path)
                     }}
                     onOpenFile={(path) => {
                       // The explorer speaks absolute paths; the page keys previews by the
@@ -1083,11 +1164,17 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                       openDocument(relativeToRoot(kbRoot, path))
                     }}
                     onReferenceFile={(path, isDir) => {
-                      // A reference belongs to a conversation, so there is nowhere to put it
-                      // without one. The explorer still browses; the action is simply absent
-                      // until a session exists.
-                      if (sessionId === undefined) return
-                      referenceInChat(props.ctx as never, sessionId, path, isDir)
+                      // With a conversation open the reference goes straight into it --
+                      // the same one-click gesture the sidebar explorer has.
+                      if (sessionId !== undefined) {
+                        referenceInChat(props.ctx as never, sessionId, path, isDir)
+                        return
+                      }
+                      // No conversation open is the NORMAL state here: this page is a
+                      // management surface, not a chat. The click used to `return` and
+                      // the button looked broken. Ask where the reference should go
+                      // instead, then insert through the same contract.
+                      setReferencing({ path, isDir })
                     }}
                     onUploadRequest={(dir, items) => { void uploadInto(kbRoot, dir, items) }}
                     busy={false}
@@ -1119,7 +1206,10 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     onOpen={(path) => { openDocument(path) }}
                     onGrant={(path) => { openPermissions(path) }}
                     onReference={(path, isDir) => {
-                      if (sessionId === undefined) return
+                      if (sessionId === undefined) {
+                        setReferencing({ path: joinPath(config.mountPoint, path), isDir })
+                        return
+                      }
                       referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
                     }}
                     // An empty tree offers the way to make a document. It does not
@@ -1231,9 +1321,13 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 mountPoint={config.mountPoint}
                 focusNew={focusNew}
                 onOpen={(path) => { openDocument(path) }}
+                // Where a create lands when the reader has not opened a directory:
+                // their own personal bucket rather than the shared one.
+                callerId={state.kind === 'ready' ? state.status.caller?.userId : undefined}
               />
             )}
             {rendered.kind === 'trash' && <KnowledgeTrash t={t} />}
+            {rendered.kind === 'audit' && <KnowledgeAudit t={t} />}
             {rendered.kind === 'settings' && <KnowledgeSettings t={t} />}
             {rendered.kind === 'search' && (
               <KnowledgeSearch
@@ -1251,7 +1345,10 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   // filled in: a row is where an operator has a path in mind.
                   onGrant={canManageGrants ? (path) => { openPermissions(path) } : undefined}
                   onReference={(path, isDir) => {
-                    if (sessionId === undefined) return
+                    if (sessionId === undefined) {
+                      setReferencing({ path: joinPath(config.mountPoint, path), isDir })
+                      return
+                    }
                     referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
                   }}
                 />}
@@ -1292,6 +1389,42 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
         </div>
       )}
       </div>
+
+      {/* The `@`-mention target picker. Mounted here rather than inside the tree so
+          it survives a view switch -- a reader who opens the dialog, changes their
+          mind about the layout, and comes back finds it still asking the same
+          question instead of quietly losing the click. */}
+      <KnowledgeReferencePicker
+        open={referencing !== undefined}
+        onClose={() => { setReferencing(undefined) }}
+        path={referencing?.path ?? ''}
+        isDir={referencing?.isDir ?? false}
+        ctx={props.ctx}
+        t={t}
+        locale={props.locale}
+        selectedSessionId={() => sessionSource?.getSnapshot().key as string | undefined}
+        onReferenced={() => {
+          // Name the destination, because the conversation this landed in is
+          // usually not the one on screen: the page has no chat of its own.
+          setReferenceNote(t('refPickerDone'))
+        }}
+      />
+
+      {referenceNote !== undefined && (
+        // A dismissible line rather than a toast: the note has to outlive a glance
+        // for a reader who was looking at the tree, and it must not stack up.
+        <p className={styles.referenceNote} role="status">
+          <span>{referenceNote}</span>
+          <button
+            type="button"
+            className={styles.referenceNoteDismiss}
+            aria-label={t('refPickerDismiss')}
+            onClick={() => { setReferenceNote(undefined) }}
+          >
+            ×
+          </button>
+        </p>
+      )}
     </div>
   )
 }

@@ -456,6 +456,77 @@ export const dissolveRoom = (roomId: string): Promise<unknown> =>
  * `rpcId` is the idempotency key: the server keys a retry on it, so a send that
  * succeeded but whose response was lost does not post twice.
  */
+/** One content block, as the room server stores it. */
+export interface ContentBlock {
+  readonly type: string
+  readonly [key: string]: unknown
+}
+
+/**
+ * Sends a message that carries more than text.
+ *
+ * The server's block type is open (`{ type: string; ... }`), so a quote rides through as its own
+ * block instead of being flattened into the text — flattening would lose the message id the
+ * renderer needs to draw the bar, and would make the quote look like something the author typed.
+ */
+/** One message the room search matched, with enough context to open it. */
+export interface MessageHit {
+  readonly eventId: string
+  readonly roomId: string
+  readonly roomName: string
+  readonly authorName: string | null
+  readonly authorKind: 'human' | 'agent' | null
+  readonly text: string
+  readonly createdAt: string
+}
+
+/**
+ * Searches message text across the rooms this account can read.
+ *
+ * The room server owns the visibility rule; this only passes the words. An empty query is not
+ * sent at all — every message would match it.
+ */
+export const searchMessages = (query: string): Promise<MessageHit[]> => {
+  const trimmed = query.trim()
+  if (trimmed.length === 0) return Promise.resolve([])
+  return call<MessageHit[]>(`/rooms/messages/search?query=${encodeURIComponent(trimmed)}`)
+}
+
+/**
+ * Registers a pending reply with the host.
+ *
+ * The message itself is submitted by the official composer, which this plugin neither wraps nor
+ * intercepts, so the quote travels beside it rather than inside it: the host attaches it to the
+ * next message this member sends in the room and then forgets it.
+ */
+export const registerQuote = (
+  roomId: string,
+  quote: { readonly messageId: string; readonly preview: string; readonly authorName?: string },
+): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/quote`, {
+    method: 'POST',
+    body: JSON.stringify(quote),
+  })
+
+/** Drops a pending reply that will not be sent. */
+export const clearQuote = (roomId: string): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/quote`, { method: 'DELETE' })
+
+export const sendBlocks = (
+  roomId: string,
+  content: readonly ContentBlock[],
+  rpcId: string,
+  mentions?: readonly string[],
+): Promise<unknown> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({
+      content,
+      rpcId,
+      ...mentions === undefined || mentions.length === 0 ? {} : { mentions },
+    }),
+  })
+
 export const sendMessage = (roomId: string, content: string, rpcId: string): Promise<unknown> =>
   call(`/rooms/${encodeURIComponent(roomId)}/messages`, {
     method: 'POST',

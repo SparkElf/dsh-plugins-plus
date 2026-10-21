@@ -15,11 +15,11 @@
  * entries, so no new route and no second file API are involved.
  *
  * What the explorer does NOT know about is the knowledge base's own metadata files
- * (`.kb-audit.jsonl`, `.kb-settings.json`, `.pinned.json`, `.view-mode.json`). They live in
- * the view so every user's copy carries them, and they are neither knowledge documents nor
- * anything a reader should rename. They are filtered with the `exclude` prop, which the
- * host applies to the listing -- so they never arrive rather than being hidden after the
- * fact.
+ * (`.kb-audit.jsonl`, `.kb-settings.json`, `.kb-tree-state.json`, `.pinned.json`,
+ * `.view-mode.json`, `.kb-favorites.json`, `.kb-trash.json`). They live in the view so
+ * every user's copy carries them, and they are neither knowledge documents nor anything
+ * a reader should rename. They are filtered with the `exclude` prop, which the host
+ * applies to the listing -- so they never arrive rather than being hidden after the fact.
  *
  * @module @sparkelf/dsh-knowledge-base/client
  */
@@ -27,22 +27,23 @@
 import { useCallback, useMemo } from 'react'
 import { FileTree } from 'dsh-better-sidebar/src/client/FileTree.tsx'
 import type { UploadItem } from 'dsh-better-sidebar/src/client/upload.ts'
+import { departmentPathLabels, folderLabelOf, type DepartmentPath } from './departmentFolders.ts'
+import { VIEW_METADATA_FILENAMES } from '../viewMetadata.ts'
 
 /**
  * Files the explorer must not list.
  *
  * The leading dot alone is not enough: the explorer shows hidden files by its own setting,
- * and these six are the plugin's state, not the reader's documents. Naming them exactly
+ * and these are the plugin's state, not the reader's documents. Naming them exactly
  * keeps a genuine `.env` or `.gitignore` a reader put in the knowledge base visible.
+ *
+ * Taken from the Host rather than listed again here. A second copy is what let
+ * `.kb-favorites.json` reach the tree as an openable document: favourites were added
+ * to the view directory and this list was not updated with them. `VIEW_METADATA_FILENAMES`
+ * is derived from the very `*PathFor` helpers that write those files, so a new state
+ * file cannot be forgotten.
  */
-const METADATA_NAMES = [
-  '.kb-audit.jsonl',
-  '.kb-settings.json',
-  '.kb-pending',
-  '.kb-trash.json',
-  '.pinned.json',
-  '.view-mode.json',
-] as const
+const METADATA_NAMES: readonly string[] = VIEW_METADATA_FILENAMES
 
 /** Props for the knowledge tree. */
 /**
@@ -100,6 +101,21 @@ export interface KnowledgeFileTreeProps {
    * Keyed by the tree-relative path, so the map can be built from copy alone.
    */
   bucketLabels?: Readonly<Record<string, string>>
+  /**
+   * The reader's own organization chain, so department folders print their NAME.
+   *
+   * The department bucket stores folders by code (`nanning-psb`), because a code is a
+   * stable slug: renaming a department cannot move a document. The reader, though,
+   * knows their organization by name, so those same rows have to print
+   * 「南宁市公安局」 rather than the slug.
+   *
+   * Only the caller's own chain is translated, and only within the department bucket.
+   * A peer department's folder keeps printing its code: this build has no name for it,
+   * and the whole organization tree is readable only by an administrator. Deriving a
+   * "name" from the code would put an invented label in front of the reader, which is
+   * worse than the code they can at least match against their own department.
+   */
+  departmentPath?: DepartmentPath
 }
 
 /**
@@ -134,6 +150,23 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
     props.onPathRenamed?.(oldPath, newPath)
   }, [props.onPathRenamed])
 
+  /**
+   * One lookup over both label sources, or undefined when there is nothing to label.
+   *
+   * Built once per render rather than per row: the explorer asks for a label for every
+   * visible folder, and rebuilding a map inside that callback would repeat the work on
+   * each expansion. `departmentPath` is destructured to its two arrays so the memo
+   * depends on their identity and not on the object the parent allocates each render.
+   */
+  const departmentCodes = props.departmentPath?.codes
+  const departmentNames = props.departmentPath?.names
+  const dirLabelOf = useMemo(() => {
+    const chainLabels = departmentPathLabels(departmentCodes, departmentNames)
+    if (props.bucketLabels === undefined && chainLabels === undefined) return undefined
+    return (relPath: string): string | undefined =>
+      folderLabelOf(relPath, props.bucketLabels, chainLabels)
+  }, [props.bucketLabels, departmentCodes, departmentNames])
+
   return (
     <FileTree
       sessionId={sessionId}
@@ -154,11 +187,18 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
       // Readers open one document at a time; the batch bar answers Ctrl/Shift-click
       // gestures this surface does not use, and costs a row of height when it shows.
       selectionBar={false}
-      // The three bucket folders are the only rows whose printed name is not the
-      // reader's word for it; every row below them is a document the reader named.
-      dirLabel={props.bucketLabels === undefined
+      // Every row whose printed name is not the reader's word for it: the three
+      // buckets say an audience, and the caller's own department folders say the
+      // department's name rather than its slug. Everything else is a document or a
+      // folder the reader named themselves.
+      //
+      // Bucket labels are consulted first. The two maps address different rows today
+      // (`department` for the bucket, `department/<code>` and deeper for the chain), so
+      // the order does not change any current label; it states that the bucket's
+      // audience name is the one thing this build will not let a data value override.
+      dirLabel={dirLabelOf === undefined
         ? undefined
-        : (path, entry) => props.bucketLabels?.[relativeToRoot(root, path)] ?? entry.name}
+        : (path, entry) => dirLabelOf(relativeToRoot(root, path)) ?? entry.name}
       onPathRenamed={props.onPathRenamed === undefined ? undefined : onRenamed}
       onPathDeleted={props.onPathDeleted}
     />

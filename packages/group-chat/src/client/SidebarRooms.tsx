@@ -30,6 +30,7 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createRoom, readPreferences, savePreferences, updateRoom, type RoomSummary } from './api.ts'
+import { MessageSearch } from './MessageSearch.tsx'
 import { CreateRoomDialog } from './CreateRoomDialog.tsx'
 import { RoomDialogs } from './RoomDialogs.tsx'
 import { joinableRooms } from './rows.ts'
@@ -333,6 +334,23 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
       </div>
 
       <div className={styles.listArea}>
+        {/* Message search sits between the header and the room rows: it looks inside the rooms
+            listed below, so putting it above them is the order the reader expects. */}
+        <MessageSearch
+          t={t}
+          onOpen={(roomId, eventId) => {
+            void store.open(roomId)
+            // The match is opened, not just its room; the message anchor is best-effort because
+            // the conversation may still be loading when this fires.
+            if (typeof window !== 'undefined') {
+              window.setTimeout(() => {
+                const node = document.querySelector(`[data-group-chat-quote="${eventId}"]`)
+                node?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+              }, 800)
+            }
+          }}
+        />
+
         <div className={styles.list}>
           {failure !== undefined && <p className={styles.empty}>{t(failure)}</p>}
           {failure === undefined && rooms === undefined && <p className={styles.empty}>{t('loading')}</p>}

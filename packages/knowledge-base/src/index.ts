@@ -47,23 +47,33 @@ import {
   isContainedRelPath,
   isSafeUserId,
   moveEntry,
+  copyEntry,
   discardPendingWrite,
+  expectedViewPathFor,
   isPendingName,
   listPendingWrites,
   parkPendingWrite,
   pointMountAtView,
   readAuditEntries,
   readPendingContent,
+  readFavorites,
   readPins,
   readSettings,
+  readTemplates,
+  removeTemplate,
+  saveTemplate,
+  templateBytes,
   readStorageSettings,
+  readTreeState,
   readViewMode,
   storageSettingsOf,
   syncView,
   viewPathFor,
+  writeFavorites,
   writePins,
   writeSettings,
   writeStorageSettings,
+  writeTreeState,
   writeViewMode,
   type KnowledgeAuditEntry,
   type KnowledgeStorageSettings,
@@ -531,15 +541,30 @@ export async function syncCallerView(
   }
   const candidates = paths ?? await listRelativeFiles(plan.actualRoot)
   const allowed: ResolvedPath[] = []
+  // The paths the caller explicitly asked about that did NOT resolve as readable.
+  //
+  // `canReadPath` fails closed, so a backend problem and a genuine denial both land
+  // here. Reported rather than folded into the count because a WRITE route passes
+  // exactly one path -- the one it just created -- and needs to know whether the
+  // reader will be able to see it. Without this, "sync walked the tree" was
+  // indistinguishable from "the new document is in the view".
+  const unresolved: string[] = []
   for (const relPath of candidates) {
     if (!isContainedRelPath(relPath)) continue
     if (await canReadPath(host, config, relPath)) allowed.push({ relPath })
+    else if (paths !== undefined) unresolved.push(relPath)
   }
   const viewOptions = {
     actualRoot: plan.actualRoot,
     viewRoot: plan.viewRoot,
     userId: caller.userId,
     ...(caller.departmentCode === undefined ? {} : { departmentCode: caller.departmentCode }),
+    // The organization path is what nests the department bucket. Passed only when
+    // DataOps reported a usable one, so an older backend leaves the bucket in its
+    // single-level shape instead of being handed an empty hierarchy.
+    ...(caller.departmentPathCodes === undefined
+      ? {}
+      : { departmentPathCodes: caller.departmentPathCodes }),
   }
   // The caller's removals filter the view they are about to get. An unreadable
   // record is treated as "nothing hidden" rather than as an error: failing the whole
@@ -551,7 +576,22 @@ export async function syncCallerView(
     host.logger?.warn?.(`knowledge-base: unusable trash record for ${caller.userId}: ${trash.reason}`)
   }
   const hidden = trash.kind === 'ready' ? trash.entries.map(entry => entry.relPath) : []
-  const delta = await syncView({ ...viewOptions, hidden }, allowed)
+  // Two facts travel here that `syncView` cannot work out for itself.
+  //
+  // `fullScan`: `paths === undefined` means the candidate list came from walking the
+  // authoritative root, so this set is the whole answer. When the caller named paths,
+  // the rest of the view is unexamined and must not be pruned.
+  //
+  // `trustResolvedSet`: false when the scan considered files but resolved NONE of
+  // them. `canReadPath` fails closed without reporting why, so that shape is a
+  // wholesale failure at least as often as it is a total revoke -- and pruning on it
+  // would delete every link the reader has. The view is kept and the refusal travels
+  // back as `pruneSkipped`, which `status` reports.
+  const trustResolvedSet = !(paths === undefined && candidates.length > 0 && allowed.length === 0)
+  const delta = await syncView(
+    { ...viewOptions, hidden, fullScan: paths === undefined, trustResolvedSet },
+    allowed,
+  )
   // Retarget the browsable mount at this user's view. Without it the page would
   // browse the shared export, so a grant would change the view on disk and nothing
   // the user can see.
@@ -564,6 +604,7 @@ export async function syncCallerView(
     label: caller.label,
     considered: candidates.length,
     resolved: allowed.length,
+    ...(unresolved.length === 0 ? {} : { unresolved }),
     viewPath: viewPathFor(viewOptions),
     ...delta,
   }
@@ -1231,21 +1272,79 @@ export interface KnowledgeCaller {
   departmentCode?: string
   /** Department display name, for reporting beside the bucket. */
   departmentName?: string
+  /**
+   * The caller's organization path, root first, as DataOps reported it.
+   *
+   * Layout only, exactly like {@link departmentCode}: it decides how deep the
+   * department bucket nests and never whether a path may be read. Empty when the
+   * backend does not report it (an older DataOps), in which case the bucket keeps its
+   * single-level shape rather than disappearing.
+   */
+  departmentPathCodes?: string[]
+  /** The organization path's display names, index-aligned with the codes. */
+  departmentPathNames?: string[]
 }
 
 /**
  * Read a `{ code, name }` pair DataOps nests under the profile.
  *
+ * The organization path arrays are read here too, but each is independent: a backend
+ * that reports `code`/`name` without the arrays (every deployment today) still yields a
+ * usable department, and the caller simply gets a single-level bucket. That is why the
+ * two are separate fields rather than one required structure — the old shape must keep
+ * working without a version check.
+ *
+ * A path is only used when the two arrays agree in length and the leaf matches `code`.
+ * A mismatch means the profile contradicts itself, and half of a contradicting pair
+ * would place documents under a folder the reader cannot recognize.
+ *
  * @param value - the raw field, which is absent on older backends.
- * @returns The pair with a non-empty code, or undefined when it cannot be used.
+ * @returns The pair with a non-empty code plus any usable path, or undefined.
  */
-export function readDepartmentOf(value: unknown): { code: string; name: string } | undefined {
+export function readDepartmentOf(value: unknown): {
+  code: string
+  name: string
+  pathCodes?: string[]
+  pathNames?: string[]
+} | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const record = value as Record<string, unknown>
   const code = typeof record.code === 'string' ? record.code.trim() : ''
   if (code === '') return undefined
   const name = typeof record.name === 'string' && record.name.trim() !== '' ? record.name.trim() : code
-  return { code, name }
+  const pathCodes = readStringArray(record.pathCodes)
+  const pathNames = readStringArray(record.pathNames)
+  const pathUsable = pathCodes !== undefined
+    && pathNames !== undefined
+    && pathCodes.length === pathNames.length
+    && pathCodes.length > 0
+    && pathCodes[pathCodes.length - 1] === code
+  return {
+    code,
+    name,
+    ...(pathUsable ? { pathCodes, pathNames } : {}),
+  }
+}
+
+/**
+ * Read one string array from an untrusted field.
+ *
+ * A non-array, an array with a non-string member, or an array that trims down to empty
+ * entries all answer undefined: a path is either fully usable or not used at all, since
+ * a partially valid one would be a hierarchy with a missing level.
+ * @param value - the raw field.
+ * @returns The trimmed non-empty entries, or undefined.
+ */
+function readStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const entries: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') return undefined
+    const trimmed = entry.trim()
+    if (trimmed === '') return undefined
+    entries.push(trimmed)
+  }
+  return entries.length === 0 ? undefined : entries
 }
 
 /**
@@ -1289,7 +1388,12 @@ export async function fetchCaller(ctx: Context, config: Config): Promise<Knowled
     roleCodes,
     ...(department === undefined
       ? {}
-      : { departmentCode: department.code, departmentName: department.name }),
+      : {
+        departmentCode: department.code,
+        departmentName: department.name,
+        ...(department.pathCodes === undefined ? {} : { departmentPathCodes: department.pathCodes }),
+        ...(department.pathNames === undefined ? {} : { departmentPathNames: department.pathNames }),
+      }),
   }
 }
 
@@ -1421,6 +1525,15 @@ export const MAX_KNOWLEDGE_WRITE_BYTES = 1_048_576
 export const TEMPLATE_READ_TIMEOUT_MS = 5_000
 
 /**
+ * The path whose write permission gates template maintenance.
+ *
+ * A template is shared content, so curating one is a write to the knowledge base like
+ * any other and is asked of DataOps at this path. It names the library's own directory
+ * because that is what the operation modifies.
+ */
+const TEMPLATE_WRITE_PATH = '.kb-templates'
+
+/**
  * A refusal from the write path, with a code the route maps to a status.
  *
  * Kept apart from {@link KnowledgeError}, whose codes describe how a TRANSPORT
@@ -1481,6 +1594,15 @@ export async function createKnowledgeEntry(
   const full = join(plan.actualRoot, relPath)
   if (options.directory) {
     try {
+      // The parent has to exist first, and in the nested department layout the target
+      // is several levels deep (`department/<ancestor>/.../<own>/new-folder`). Without
+      // this, creating a folder inside a hierarchy that has no documents yet failed
+      // with a bare ENOENT, which read as a bug rather than as "the parent is missing".
+      //
+      // Only the PARENT is created with `recursive`; the leaf keeps `recursive: false`
+      // so an existing folder is still reported as EEXIST instead of being silently
+      // accepted. That distinction is what lets the dialog say "this name is taken".
+      await mkdir(dirname(full), { recursive: true })
       await mkdir(full, { recursive: false })
     } catch (cause) {
       const code = (cause as { code?: string }).code
@@ -1776,6 +1898,51 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
+/**
+ * The status a completed write answers with when the view could not follow it.
+ *
+ * Deliberately not 200: the write DID happen, but the reader's next action is to
+ * look for a document that is not there. A success code would leave the page with
+ * nothing to say, which is the failure this whole path exists to stop. 207 is
+ * "the operation happened, now read this": the body still carries the created
+ * record, and `viewSyncWarning` says why the tree does not show it yet.
+ */
+const VIEW_SYNC_FAILED_STATUS = 207
+
+/**
+ * Build a write route's reply, naming a view refresh that did not take effect.
+ *
+ * The write itself already succeeded, so this never turns a completed mutation into
+ * an error: it attaches the reason the tree will not reflect it yet, and answers 207
+ * so the client cannot mistake it for a clean success. The page shows the warning
+ * and offers a retry, which is the only honest account of what happened.
+ *
+ * @param payload - the route's own success body.
+ * @param refresh - the outcome {@link refreshViewIfStale} reported for this write.
+ * @returns the status and body to send.
+ */
+function writeReplyAfterSync(
+  payload: Record<string, unknown>,
+  refresh: { synced: boolean; delta?: ViewDelta; failure?: string },
+): { status: number; body: Record<string, unknown> } {
+  if (refresh.failure === undefined) {
+    return {
+      status: 200,
+      body: { ...payload, ...(refresh.delta === undefined ? {} : { view: refresh.delta }) },
+    }
+  }
+  return {
+    status: VIEW_SYNC_FAILED_STATUS,
+    body: {
+      ...payload,
+      viewSyncWarning: {
+        message: 'the change was saved, but the file tree could not be refreshed',
+        reason: refresh.failure,
+      },
+    },
+  }
+}
+
 /** Serialize a thrown value for the browser. */
 /**
  * Map a write refusal to the status that describes it.
@@ -1975,6 +2142,26 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
    * lives on NFS where a walk is real latency.
    */
   let nextRoutineSyncAt = 0
+  /**
+   * Why the last refresh produced no view update, when it did not.
+   *
+   * Without this a failed sync and a sync with nothing to do are the same answer,
+   * and the difference is what a reader needs: "your grants did not change" is the
+   * ordinary case, while "the view could not be rebuilt" is a fault that has to be
+   * reported. Reported through `status` so the page can say which one happened
+   * instead of leaving a newly created document invisible with no explanation.
+   */
+  let lastSyncFailure: string | undefined
+  /**
+   * Why the last full scan declined to prune, when it did.
+   *
+   * Exposed through `status` so a deployment can see "this round resolved nothing, so
+   * the view was left as-is" without reading logs. The condition is guarded (see
+   * `syncView`), so its presence is the observable signal that the permission backend
+   * answered nothing -- which is otherwise indistinguishable from a caller who has
+   * legitimately lost every grant.
+   */
+  let lastPruneSkipped: string | undefined
 
   /**
    * Rebuild the caller's view when grants may have moved, at most once per interval.
@@ -1992,7 +2179,14 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
    * @param force - rebuild even inside the interval, for a change this process made.
    * @returns What changed, so a caller can report or ignore it.
    */
-  const refreshViewIfStale = async (force = false): Promise<{ synced: boolean; delta?: ViewDelta }> => {
+  const refreshViewIfStale = async (
+    force = false,
+    // The authoritative path a WRITE just created or moved. Passed so the refresh can
+    // verify the reader will see it instead of trusting "the sync ran": the sync
+    // answers 200 even when every per-path resolve was denied, so a status-only check
+    // reported success for a document that never reached the view.
+    expectVisible?: string,
+  ): Promise<{ synced: boolean; delta?: ViewDelta; failure?: string }> => {
     // The zero-IO fast path, and the reason a read may call this at all. A closed
     // gate returns here without touching disk or the backend; a forced call skips
     // it, because the caller has already changed the grants this view reflects.
@@ -2002,29 +2196,79 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     // retry on the very next read, or an unreachable backend turns every request
     // into another walk of the shared tree.
     nextRoutineSyncAt = Date.now() + AUTO_SYNC_INTERVAL_MS
-    try {
-      const caller = await fetchCaller(host, config)
-      if (!isSafeUserId(caller.userId)) return { synced: false }
-      if (!force) {
-        const previous = viewSyncedAt.get(caller.userId)
-        if (previous !== undefined && Date.now() - previous < AUTO_SYNC_INTERVAL_MS) {
-          return { synced: false }
+    // Forced callers are the write routes, so a failure there means the reader was
+    // just told "done" about a document they cannot see. Twice, not more: a backend
+    // that is down is not made up by a third attempt, and the second covers the
+    // transient case a write actually produces (a resolve that raced the write).
+    const attempts = force ? 2 : 1
+    let lastFailure: string | undefined
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const plan = localConfig(config)
+        const caller = await fetchCaller(host, config)
+        if (!isSafeUserId(caller.userId)) {
+          lastFailure = 'unsafe caller id; cannot key a view by it'
+          continue
         }
+        if (!force) {
+          const previous = viewSyncedAt.get(caller.userId)
+          if (previous !== undefined && Date.now() - previous < AUTO_SYNC_INTERVAL_MS) {
+            return { synced: false }
+          }
+        }
+        const result = await syncCallerView(host, config)
+        if ('error' in result) {
+          // The status the sync answered with is the reason: 409 is an unconfigured
+          // backend, 502 an unreachable one, 400 an unsafe identity. Carrying it out
+          // is what turns "nothing happened" into something a reader can act on.
+          lastFailure = `view sync answered HTTP ${String(result.status)}: ${result.error}`
+          continue
+        }
+        // The verify step. `expectVisible` is authoritative; the view path it should
+        // appear at is derived from the same layout the sync used, then looked for on
+        // disk. A miss is a failed refresh, not a success with nothing to do.
+        if (expectVisible !== undefined) {
+          const verifyOptions = {
+            actualRoot: plan.actualRoot,
+            viewRoot: plan.viewRoot,
+            userId: caller.userId,
+            ...(caller.departmentCode === undefined ? {} : { departmentCode: caller.departmentCode }),
+            ...(caller.departmentPathCodes === undefined
+              ? {}
+              : { departmentPathCodes: caller.departmentPathCodes }),
+          }
+          const expected = expectedViewPathFor(verifyOptions, expectVisible)
+          const landed = expected === undefined
+            ? false
+            : await stat(join(viewPathFor(verifyOptions), expected))
+              .then(info => info.isFile() || info.isDirectory())
+              .catch(() => false)
+          if (!landed) {
+            lastFailure = `the view does not show ${JSON.stringify(expectVisible)} after the refresh`
+            continue
+          }
+        }
+        viewSyncedAt.set(caller.userId, Date.now())
+        if (viewSyncedAt.size > MAX_TRACKED_CALLERS) {
+          const oldest = viewSyncedAt.keys().next()
+          if (!oldest.done) viewSyncedAt.delete(oldest.value)
+        }
+        lastSyncFailure = undefined
+        lastPruneSkipped = result.pruneSkipped
+        return { synced: true, delta: result }
+      } catch (error) {
+        // An unreadable identity or an unreachable backend leaves the view as found.
+        // The page reports the mounted state it actually sees, and a later read
+        // retries once the interval has passed.
+        lastFailure = describeError(error).message
       }
-      const result = await syncCallerView(host, config)
-      if ('error' in result) return { synced: false }
-      viewSyncedAt.set(caller.userId, Date.now())
-      if (viewSyncedAt.size > MAX_TRACKED_CALLERS) {
-        const oldest = viewSyncedAt.keys().next()
-        if (!oldest.done) viewSyncedAt.delete(oldest.value)
-      }
-      return { synced: true, delta: result }
-    } catch {
-      // An unreadable identity or an unreachable backend leaves the view as found.
-      // The page reports the mounted state it actually sees, and a later read
-      // retries once the interval has passed.
-      return { synced: false }
     }
+    // Recorded rather than swallowed: this is the difference between a reader whose
+    // grants genuinely changed nothing and a reader whose view silently stopped
+    // following the grants. The caller below decides whether to surface it.
+    lastSyncFailure = lastFailure
+    host.logger?.warn?.(`knowledge-base: view refresh did not complete: ${lastFailure ?? 'unknown reason'}`)
+    return { synced: false, ...(lastFailure === undefined ? {} : { failure: lastFailure }) }
   }
 
   ctx.effect(() => host.webServer.register({
@@ -2160,6 +2404,8 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                   label: string
                   departmentCode?: string
                   departmentName?: string
+                  departmentPathCodes?: string[]
+                  departmentPathNames?: string[]
                 } | undefined
                 if (config.baseUrl.trim() !== '') {
                   try {
@@ -2170,12 +2416,23 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                       // department administrator's own scope comes from this value.
                       // Dropping it here would leave that bucket unlabeled even
                       // though the view was built from it.
+                      //
+                      // The organization path travels with it for the same reason one
+                      // level deeper: the tree renders the folders that are on disk,
+                      // and the names beside them come from here. Without the path the
+                      // hierarchy still exists but every level would print its code.
                       localCaller = {
                         userId: resolved.userId,
                         label: resolved.label,
                         ...(resolved.departmentCode === undefined
                           ? {}
                           : { departmentCode: resolved.departmentCode, departmentName: resolved.departmentName ?? resolved.departmentCode }),
+                        ...(resolved.departmentPathCodes === undefined
+                          ? {}
+                          : {
+                            departmentPathCodes: resolved.departmentPathCodes,
+                            departmentPathNames: resolved.departmentPathNames ?? resolved.departmentPathCodes,
+                          }),
                       }
                     }
                   } catch {
@@ -2197,6 +2454,11 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                   mountState: localMountState,
                   canManageGrants: canManage,
                   ...(localCaller === undefined ? {} : { caller: localCaller }),
+                  // A local deployment still answers writes, so a refresh that failed
+                  // here has to be reported the same way: the reader is looking at the
+                  // same tree and the same missing document.
+                  ...(lastSyncFailure === undefined ? {} : { lastSyncFailure }),
+                  ...(lastPruneSkipped === undefined ? {} : { pruneSkipped: lastPruneSkipped }),
                 })
               }
 
@@ -2278,6 +2540,15 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // is answerable without pressing anything: an unchanged set reports
               // `unchanged > 0, linked: []`, which is the zero-write case.
               ...(viewDelta === undefined ? {} : { view: viewDelta }),
+              // A refresh that could not complete is a different fact from one with
+              // nothing to do, and the page has to be able to say which happened.
+              ...(routine.failure === undefined ? {} : { viewSyncFailure: routine.failure }),
+              ...(routine.failure === undefined && lastSyncFailure === undefined
+                ? {}
+                : { lastSyncFailure: routine.failure ?? lastSyncFailure }),
+              // The prune refusal is the signal that a full scan resolved nothing:
+              // the view was kept rather than emptied, and this says so.
+              ...(lastPruneSkipped === undefined ? {} : { pruneSkipped: lastPruneSkipped }),
             })
           }
           case 'trash': {
@@ -2338,10 +2609,8 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // waiting for the next routine refresh would show it back in the listing
             // they are looking at.
             const after = await refreshViewIfStale(true)
-            return writeJson(res, 200, {
-              entries: next,
-              ...(after.delta === undefined ? {} : { view: after.delta }),
-            })
+            const reply = writeReplyAfterSync({ entries: next }, after)
+            return writeJson(res, reply.status, reply.body)
           }
           case 'trash.restore': {
             // Restoring deletes the tombstone. It cannot restore a grant: the next sync
@@ -2375,10 +2644,8 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // The rebuilt view is reported too, because a restore can legitimately bring
             // back nothing: the grant may have gone while the document was hidden, and
             // the caller needs to see that rather than assume the tree is broken.
-            return writeJson(res, 200, {
-              entries: result.entries,
-              ...(after.delta === undefined ? {} : { view: after.delta }),
-            })
+            const reply = writeReplyAfterSync({ entries: result.entries }, after)
+            return writeJson(res, reply.status, reply.body)
           }
           case 'grants': {
             // Authorization lives in DataOps; this route relays what the backend
@@ -2441,46 +2708,108 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // before the page re-reads it. This is the moment the change is certain
             // rather than suspected, which is why it does not wait for the interval.
             const afterGrant = await refreshViewIfStale(true)
-            return writeJson(res, 200, {
-              grant: created,
-              ...(afterGrant.delta === undefined ? {} : { view: afterGrant.delta }),
-            })
+            const reply = writeReplyAfterSync({ grant: created }, afterGrant)
+            return writeJson(res, reply.status, reply.body)
           }
           case 'templates': {
-            // Relay the templates DataOps already stores.
+            // The template library: a document plus a small metadata record for each.
             //
-            // A template is a wiki page in the `report_template` category, so there
-            // is nothing to keep in step on this side: the Host asks and reports.
-            // The answer is empty today (the category holds no page), and the page
-            // says so rather than filling the grid with placeholders.
+            // The library used to relay DataOps wiki pages carrying the
+            // `report_template` category, which made the surface read-only and, in
+            // practice, permanently empty -- the wiki holds no page in that category.
+            // A template is just a document with a description, so it is stored as
+            // exactly that: the file under a directory the knowledge base owns, and a
+            // sibling JSON index for the metadata. No second data model, and no write
+            // endpoint added to DataOps.
             //
-            // The short timeout is deliberate. Measured: the endpoint answers in
-            // ~7ms when the backend is idle, but the same host can be at ~179% CPU
-            // serving another feature's long polling, so this call must not be able
-            // to hold the surface open. A timeout is reported as "could not read",
-            // never as "no templates", because those are different facts.
+            // Read from the AUTHORITATIVE tree rather than the caller's view, because
+            // a template is shared content: a view is rewritten by the next sync.
+            const plan = localConfig(config)
+            try {
+              const records = await readTemplates(plan.actualRoot)
+              const templates = await Promise.all(records.map(async record => {
+                const bytes = await templateBytes(plan.actualRoot, record.fileName)
+                const dot = record.fileName.lastIndexOf('.')
+                return {
+                  id: record.id,
+                  title: record.title,
+                  description: record.description,
+                  category: record.category,
+                  tags: record.tags,
+                  fileName: record.fileName,
+                  extension: dot === -1 ? '' : record.fileName.slice(dot + 1).toLowerCase(),
+                  bytes,
+                  updatedAt: record.updatedAt,
+                  relPath: '.kb-templates/' + record.fileName,
+                }
+              }))
+              return writeJson(res, 200, { templates })
+            } catch (error) {
+              // "Could not read" is a different fact from "there are none", so the
+              // two are never merged into one empty list.
+              return writeJson(res, 200, { templates: [], error: describeError(error).message })
+            }
+          }
+          case 'template.save': {
+            // Add or replace one template. Gated on write access to the template
+            // directory, asked of DataOps like every other write here, so a template
+            // cannot be curated by someone who may not write the knowledge base.
             if (config.baseUrl.trim() === '') {
               return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
             }
+            const body = await readJsonBody(req)
+            const fileName = String(body.fileName ?? '').trim()
+            const title = String(body.title ?? '').trim()
+            if (fileName === '' || title === '') {
+              return writeJson(res, 400, { error: 'title and fileName are required' })
+            }
+            const relPath = TEMPLATE_WRITE_PATH
+            if (!await canWritePath(host, config, relPath)) {
+              return writeJson(res, 403, { error: 'write access is required to maintain templates' })
+            }
             try {
-              const pages = await request<Array<{ id?: string; title?: string; updatedAt?: string }>>(
-                host,
-                config,
-                ENDPOINTS.templates,
-                { timeoutMs: TEMPLATE_READ_TIMEOUT_MS },
-              )
+              const plan = localConfig(config)
+              const saved = await saveTemplate(plan.actualRoot, {
+                title,
+                description: String(body.description ?? ''),
+                category: String(body.category ?? ''),
+                tags: Array.isArray(body.tags) ? body.tags.map(String) : [],
+                fileName,
+                ...(typeof body.content === 'string' ? { content: body.content } : {}),
+                ...(typeof body.id === 'string' && body.id !== '' ? { id: body.id } : {}),
+              })
+              const dot = saved.fileName.lastIndexOf('.')
               return writeJson(res, 200, {
-                templates: (Array.isArray(pages) ? pages : []).map(page => ({
-                  id: String(page.id ?? ''),
-                  title: String(page.title ?? ''),
-                  ...(page.updatedAt === undefined ? {} : { updatedAt: String(page.updatedAt) }),
-                })),
+                template: {
+                  id: saved.id,
+                  title: saved.title,
+                  description: saved.description,
+                  category: saved.category,
+                  tags: saved.tags,
+                  fileName: saved.fileName,
+                  extension: dot === -1 ? '' : saved.fileName.slice(dot + 1).toLowerCase(),
+                  bytes: await templateBytes(plan.actualRoot, saved.fileName),
+                  updatedAt: saved.updatedAt,
+                  relPath: '.kb-templates/' + saved.fileName,
+                },
               })
             } catch (error) {
-              // Unreachable, refused and timed out are one answer here, because the
-              // reader's next step is the same in all three: try again later.
-              return writeJson(res, 200, { templates: [], error: describeError(error).message })
+              return writeJson(res, 400, { error: describeError(error).message })
             }
+          }
+          case 'template.remove': {
+            // Take one template offline: its document and its metadata record.
+            if (config.baseUrl.trim() === '') {
+              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
+            }
+            const body = await readJsonBody(req)
+            const id = String(body.id ?? '').trim()
+            if (id === '') return writeJson(res, 400, { error: 'id is required' })
+            if (!await canWritePath(host, config, TEMPLATE_WRITE_PATH)) {
+              return writeJson(res, 403, { error: 'write access is required to maintain templates' })
+            }
+            const plan = localConfig(config)
+            return writeJson(res, 200, { removed: await removeTemplate(plan.actualRoot, id) })
           }
           case 'create': {
             // Start a document or a folder in the authoritative tree.
@@ -2566,11 +2895,9 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // The creator should see their own document at once rather than after
               // the routine interval, and this is the moment the view is known to be
               // stale because this process just changed what it must contain.
-              const afterWrite = await refreshViewIfStale(true)
-              return writeJson(res, 200, {
-                created,
-                ...(afterWrite.delta === undefined ? {} : { view: afterWrite.delta }),
-              })
+              const afterWrite = await refreshViewIfStale(true, created.relPath)
+              const reply = writeReplyAfterSync({ created }, afterWrite)
+              return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {
                 return writeJson(res, writeStatusFor(error.code), { error: error.message, code: error.code })
@@ -2778,12 +3105,12 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 relPath,
                 outcome: 'applied',
               }).catch(() => undefined)
-              const afterWrite = await refreshViewIfStale(true)
-              return writeJson(res, 200, {
-                created,
-                ...(extraction === undefined ? {} : { extraction }),
-                ...(afterWrite.delta === undefined ? {} : { view: afterWrite.delta }),
-              })
+              const afterWrite = await refreshViewIfStale(true, created.relPath)
+              const reply = writeReplyAfterSync(
+                { created, ...(extraction === undefined ? {} : { extraction }) },
+                afterWrite,
+              )
+              return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {
                 return writeJson(res, writeStatusFor(error.code), { error: error.message, code: error.code })
@@ -2810,10 +3137,8 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // rather than at the next interval: leaving a revoked path linked would
             // keep it visible for up to that long.
             const afterRevoke = await refreshViewIfStale(true)
-            return writeJson(res, 200, {
-              revoked,
-              ...(afterRevoke.delta === undefined ? {} : { view: afterRevoke.delta }),
-            })
+            const reply = writeReplyAfterSync({ revoked }, afterRevoke)
+            return writeJson(res, reply.status, reply.body)
           }
           case 'list': {
             // A directory listing that carries each entry's modification time.
@@ -2896,6 +3221,74 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const result = await syncCallerView(host, config, Array.isArray(body.paths) ? body.paths.map(String) : undefined)
             if ('error' in result) return writeJson(res, result.status, { error: result.error })
             return writeJson(res, 200, result)
+          }
+          case 'favorites.get': {
+            // The caller's own favourites, read from their own view directory.
+            //
+            // Shaped exactly like `pins.get`, including the readability re-check: a
+            // revoke can land while a star is stored, and a star on a path the caller
+            // may no longer read must not be drawn. That is why the answer reports
+            // what it dropped rather than just answering a shorter list.
+            if (config.baseUrl.trim() === '') {
+              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
+            }
+            const plan = localConfig(config)
+            const caller = await fetchCaller(host, config)
+            if (!isSafeUserId(caller.userId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id; cannot key a view by it' })
+            }
+            const viewDir = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId })
+            const stored = await readFavorites(viewDir)
+            const relPaths: string[] = []
+            const dropped: string[] = []
+            for (const relPath of stored) {
+              if (!isContainedRelPath(relPath)) {
+                dropped.push(relPath)
+                continue
+              }
+              if (await canReadPath(host, config, relPath)) relPaths.push(relPath)
+              else dropped.push(relPath)
+            }
+            return writeJson(res, 200, { relPaths, dropped })
+          }
+          case 'favorites.set': {
+            // Replace the caller's favourites.
+            //
+            // Refuses rather than silently pruning a path it may not read, for the
+            // same reason `pins.set` does: the caller asked for that path, and a 200
+            // answering with a shorter list would let a typo read as success.
+            if (config.baseUrl.trim() === '') {
+              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
+            }
+            const plan = localConfig(config)
+            const caller = await fetchCaller(host, config)
+            if (!isSafeUserId(caller.userId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id; cannot key a view by it' })
+            }
+            const body = await readJsonBody(req)
+            if (!Array.isArray(body.relPaths)) {
+              return writeJson(res, 400, { error: 'relPaths must be an array of strings' })
+            }
+            const wanted = body.relPaths.map(String)
+            const refused: string[] = []
+            const allowed: string[] = []
+            for (const relPath of wanted) {
+              if (!isContainedRelPath(relPath)) {
+                refused.push(relPath)
+                continue
+              }
+              if (await canReadPath(host, config, relPath)) allowed.push(relPath)
+              else refused.push(relPath)
+            }
+            if (refused.length > 0) {
+              return writeJson(res, 403, {
+                error: 'cannot favourite a path this caller may not read',
+                refused,
+              })
+            }
+            const viewDir = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId })
+            const relPaths = await writeFavorites(viewDir, allowed)
+            return writeJson(res, 200, { relPaths, dropped: [] })
           }
           case 'pins.get': {
             // The caller's own pins, read from their own view directory.
@@ -3104,11 +3497,9 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 relPath: submission.relPath,
                 outcome: 'applied',
               }).catch(() => undefined)
-              const afterWrite = await refreshViewIfStale(true)
-              return writeJson(res, 200, {
-                approved: created,
-                ...(afterWrite.delta === undefined ? {} : { view: afterWrite.delta }),
-              })
+              const afterWrite = await refreshViewIfStale(true, created.relPath)
+              const reply = writeReplyAfterSync({ approved: created }, afterWrite)
+              return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {
                 return writeJson(res, writeStatusFor(error.code), { error: error.message, code: error.code })
@@ -3264,6 +3655,91 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               return writeJson(res, 404, { error: 'could not read this file', code: 'unreadable' })
             }
           }
+          case 'copy': {
+            // Copy one entry, with its subtree, to a new path.
+            //
+            // The authorization is the pair the move route checks, in the direction a
+            // copy actually needs: READ on the source (the bytes are being taken) and
+            // WRITE on the destination (something new appears there). It is not
+            // "write on both": a copy leaves the source untouched, so demanding write
+            // there would refuse a caller who may legitimately read a document out of
+            // a read-only folder into their own.
+            //
+            // DataOps decides both answers through `canReadPath` / `canWritePath`;
+            // this route never re-implements the policy.
+            if (config.baseUrl.trim() === '') {
+              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
+            }
+            const body = await readJsonBody(req)
+            const from = String(body.from ?? '')
+            const to = String(body.to ?? '')
+            if (!isContainedRelPath(from) || !isContainedRelPath(to)) {
+              return writeJson(res, 400, { error: 'from and to must be contained relative paths' })
+            }
+            // The destination is the parent directory plus the source's own name, the
+            // same rule the move route uses: a copy cannot rename, because renaming is
+            // a separate decision with its own route. `to === ''` means the root.
+            const name = from.split('/').pop() ?? ''
+            const target = to === '' ? name : to + '/' + name
+            if (!isContainedRelPath(target)) {
+              return writeJson(res, 400, { error: 'the resolved destination is not a contained relative path' })
+            }
+            // Copying a directory into itself (or into its own subtree) cannot
+            // terminate, so it is refused before the walk rather than discovered by it.
+            if (target === from || target.startsWith(from + '/')) {
+              return writeJson(res, 400, { error: 'cannot copy an entry into itself', refused: [target] })
+            }
+            const plan = localConfig(config)
+            const caller = await fetchCaller(host, config).catch(() => undefined)
+            const callerId = caller?.userId
+            if (callerId === undefined || !isSafeUserId(callerId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id; cannot key a view by it' })
+            }
+            const canReadSource = await canReadPath(host, config, from)
+            const canWriteTarget = to === '' ? true : await canWritePath(host, config, to)
+            if (!canReadSource || !canWriteTarget) {
+              return writeJson(res, 403, {
+                error: 'cannot copy a path this caller may not read, or into a folder it may not write',
+                refused: [!canReadSource ? from : undefined, !canWriteTarget ? to : undefined].filter(Boolean),
+              })
+            }
+            try {
+              const copied = await copyEntry(
+                { actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: callerId },
+                from,
+                target,
+              )
+              // Recorded as a `create` at the destination rather than as a new action
+              // kind: the audit vocabulary answers "who first put this here", and a copy
+              // is exactly that. Adding a seventh action would force every reader of the
+              // trail to learn a distinction the review question does not make.
+              await appendAuditEntry(
+                viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: callerId }),
+                {
+                  at: new Date().toISOString(),
+                  actor: callerId,
+                  actorLabel: caller?.label,
+                  action: 'create',
+                  relPath: target,
+                  outcome: 'applied',
+                },
+              ).catch(() => undefined)
+              const after = await refreshViewIfStale(true, copied.to)
+              const reply = writeReplyAfterSync({
+                from: copied.from,
+                to: copied.to,
+                entries: copied.entries,
+                bytes: copied.bytes,
+              }, after)
+              return writeJson(res, reply.status, reply.body)
+            } catch (error) {
+              const message = describeError(error).message
+              // A refusal (destination taken, too large, self-nested) is the caller's
+              // to act on, so it answers 409 rather than 500 -- the reader renamed or
+              // deleted something and retried, which is the intended flow.
+              return writeJson(res, 409, { error: message })
+            }
+          }
           case 'move': {
             // Relocate one entry the caller may WRITE, then resynchronize their view.
             //
@@ -3334,22 +3810,34 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // while the old link still points at the inode. Without this resync
               // the reader is left with a live-looking entry at the old path and
               // nothing at the new one.
-              const delta = await syncCallerView(host, config)
-              if ('error' in delta) {
+              //
+              // Retried once for the same reason the create route retries: the
+              // rename just changed which paths exist, and a resolve that raced it
+              // answers about the world before the move. One attempt would turn that
+              // race into "the move worked but you cannot see it".
+              let movedDelta = await syncCallerView(host, config)
+              if ('error' in movedDelta) movedDelta = await syncCallerView(host, config)
+              if ('error' in movedDelta) {
                 // The move itself succeeded, so this is reported as a partial result
                 // rather than a failure: telling the caller the move failed would
                 // invite a retry that now has no source to move.
-                return writeJson(res, 200, {
+                lastSyncFailure = `move view sync answered HTTP ${String(movedDelta.status)}: ${movedDelta.error}`
+                host.logger?.warn?.(`knowledge-base: ${lastSyncFailure}`)
+                return writeJson(res, VIEW_SYNC_FAILED_STATUS, {
                   from: moved.from,
                   to: moved.to,
                   delta: { linked: 0, unlinked: 0, unchanged: 0 },
-                  warning: delta.error,
+                  viewSyncWarning: {
+                    message: 'the change was saved, but the file tree could not be refreshed',
+                    reason: lastSyncFailure,
+                  },
                 })
               }
+              lastSyncFailure = undefined
               return writeJson(res, 200, {
                 from: moved.from,
                 to: moved.to,
-                delta: { linked: delta.linked.length, unlinked: delta.unlinked.length, unchanged: delta.unchanged },
+                delta: { linked: movedDelta.linked.length, unlinked: movedDelta.unlinked.length, unchanged: movedDelta.unchanged },
               })
             } catch (error) {
               return writeJson(res, 409, { error: describeError(error).message })
@@ -3389,6 +3877,60 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               return writeJson(res, 409, { error: 'the mount point is not mounted yet; sync first' })
             }
             return writeJson(res, 200, { mode: await writeViewMode(plan.mountPoint, mode) })
+          }
+          case 'treeState.get': {
+            // The folders this caller had open, read from their own view directory.
+            //
+            // Keyed by the mount point for the same reason `viewMode.get` is: the mount
+            // point already IS the caller's view (`views.sync` points it at their own
+            // directory), so the file beside their documents is theirs by construction
+            // and the answer never depends on a second identity lookup that a stale
+            // credential could fail.
+            //
+            // Never fails on a bad file. A missing, truncated, or hand-edited
+            // `.kb-tree-state.json` answers the empty list, which is the tree's own
+            // default; the reader gets a fully collapsed tree rather than an error.
+            const plan = localConfig(config)
+            return writeJson(res, 200, { expanded: await readTreeState(plan.mountPoint) })
+          }
+          case 'treeState.set': {
+            // Replace the stored set of expanded folders.
+            //
+            // Deliberately lenient about the payload compared with `pins.set`, which
+            // refuses anything the caller may not read. An expanded folder is a view
+            // state, not a claim on content: the worst outcome of a stale entry is a
+            // folder that reopens closed because its row is gone, and the worst
+            // outcome of resolving every entry against the permission store first
+            // would be a save that fails while the reader is clicking around their
+            // own tree. `readTreeState` drops anything that is not a plausible
+            // absolute path, so the file cannot be grown without bound.
+            const body = await readJsonBody(req)
+            if (!Array.isArray(body.expanded)) {
+              return writeJson(res, 400, { error: 'expanded must be an array of strings' })
+            }
+            const plan = localConfig(config)
+            // A mount point that does not exist yet is not an error: the folder a
+            // reader expanded may be the first thing they do after a page load, and
+            // `writeTreeState` creates the directory.
+            //
+            // But creating it is only safe where it is meant to be a REAL directory.
+            // In remote/NAS storage the mount point is a symlink a sync installs, so
+            // writing through an absent one would manufacture a real directory where
+            // that link belongs -- and the next sync would then have to refuse it as
+            // non-empty. That is the same rule `viewMode.set` already applies, and a
+            // preference is still not a reason to materialise a mount point.
+            const localMode = config.storageMode === 'local'
+            try {
+              const info = await stat(plan.mountPoint)
+              if (!info.isDirectory()) {
+                return writeJson(res, 409, { error: 'the mount point is not a directory yet; sync first' })
+              }
+            } catch {
+              if (!localMode) {
+                return writeJson(res, 409, { error: 'the mount point is not mounted yet; sync first' })
+              }
+            }
+            return writeJson(res, 200, { expanded: await writeTreeState(plan.mountPoint, body.expanded.map(String)) })
           }
           case 'roles': {
             // The two built-in roles plus every custom role that a grant names.

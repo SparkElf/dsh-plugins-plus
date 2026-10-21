@@ -57,6 +57,15 @@ export const name = 'group-chat'
  */
 const WARM_UP_PREFIX = 'warm-up-'
 
+/**
+ * The block type a reply uses to carry the message it answers.
+ *
+ * The host bundle and the client bundle are evaluated separately, so this string is written
+ * here as well as in the renderer that reads it. `quote-block-type.test.ts` holds the two
+ * together: a silent divergence would publish quotes nothing draws.
+ */
+const QUOTE_BLOCK_TYPE = 'group-chat-quote'
+
 /** Host services this plugin needs beyond the room runtime. */
 export const inject = ['agents', 'sessions', 'webServer', 'credentials', 'sessionController']
 
@@ -545,6 +554,22 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
     // Logged only. The poll is the fallback, so a transport problem is not an outage.
     onError: (error) => log?.error?.('[group-chat] stream unavailable; polling continues', error),
   })
+  /**
+   * The reply each room is waiting to send, keyed by room id.
+   *
+   * A quote cannot be put into the message by the browser: a room message is typed into the
+   * official composer, and this plugin never sees or rewrites what that composer submits — it
+   * only observes the session event afterwards. So the browser registers the quote here, and the
+   * publish path attaches it to the next message that member sends. The entry is consumed on
+   * first use: a quote belongs to one reply, and leaving it behind would attach it to every
+   * later message too.
+   */
+  const pendingQuotes = new Map<string, {
+    readonly messageId: string
+    readonly preview: string
+    readonly authorName?: string
+  }>()
+
   const runtimes = new Map<string, RoomRuntime>()
   const timers = new Set<ReturnType<typeof setInterval>>()
 
@@ -866,11 +891,27 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       // resolved here — which is also where the room's members are already at hand.
       const content = (data as { content: UserContent }).content
       const mentions = mentionedMemberIds(textOfContent(content), runtimes.get(roomId)?.members ?? [])
+      // The quote the browser registered, consumed here so it attaches to exactly one reply. It
+      // goes in as its own block after the typed content: the reply's words keep their order, and
+      // the renderer reads the bar from the block rather than from text the author did not write.
+      const quote = pendingQuotes.get(roomId)
+      pendingQuotes.delete(roomId)
+      const outgoing: readonly ContentBlockLike[] | string = quote === undefined
+        ? content
+        : [
+            ...content,
+            {
+              type: QUOTE_BLOCK_TYPE,
+              messageId: quote.messageId,
+              preview: quote.preview,
+              ...quote.authorName === undefined ? {} : { authorName: quote.authorName },
+            },
+          ]
       backend
         .sendMessage(roomId, {
           // The blocks travel unchanged: an attachment, an image, or an @ reference is in
           // them, and flattening to text here would silently drop everything but the words.
-          content,
+          content: outgoing,
           rpcId: typeof messageId === 'string' && messageId.length > 0
             ? messageId
             : `local-${String(Date.now())}`,
@@ -923,6 +964,7 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
         const payload = await readJsonBody(request)
         const body = await handleRoomRequest(
           route, request.method ?? 'GET', payload, url, backend, runtimes, closeRoom, ctx,
+          pendingQuotes,
         )
         // `JSON.stringify(undefined)` is `undefined`, and `end(undefined)` ends the response
         // with no body — which a client that always parses JSON reads as a parse error. A
@@ -1061,9 +1103,25 @@ const handleRoomRequest = async (
   runtimes: ReadonlyMap<string, { session: Session; members: readonly RoomMember[] }>,
   closeRoom: (roomId: string) => void,
   ctx: GroupChatContext,
+  /**
+   * The pending reply per room, registered here so the publish path can attach it.
+   *
+   * Passed in rather than owned by this module: the quote has to outlive a single request and be
+   * reachable from the session-event path, and both live in the activated runtime.
+   */
+  pendingQuotes: Map<string, { readonly messageId: string; readonly preview: string; readonly authorName?: string }>,
 ): Promise<unknown> => {
   const [resource, roomId, ...rest] = route.split('/').filter((part) => part.length > 0)
   const action = rest.join('/')
+
+  // Message search is not scoped to one room, so it cannot go through the per-room dispatch
+  // below: `rooms/messages/search` would parse as a room named `messages`. It is answered first
+  // and forwarded to the room server, which owns the visibility rule.
+  if (resource === 'rooms' && roomId === 'messages' && action === 'search') {
+    if (httpMethod !== 'GET') throw new RouteRefusal('message search accepts GET', 405)
+    const query = url.searchParams.get('query') ?? ''
+    return backend.searchMessages(query)
+  }
 
   // Who this workspace acts as, for the one client-side decision that needs it: which
   // messages are the operator's own. Read from the same account the Host already resolves
@@ -1172,6 +1230,37 @@ const handleRoomRequest = async (
       return backend.createRoom(name, readExecution(payload))
     }
     throw new Error(`unknown group-chat request: ${httpMethod} ${route}`)
+  }
+
+  // A pending reply, registered by the browser so the publish path can attach it. It never
+  // reaches the room server: the message itself is submitted by the official composer, and this
+  // plugin only sees the resulting session event, so the quote waits here until that event
+  // arrives and is consumed then.
+  if (action === 'quote') {
+    if (httpMethod === 'POST') {
+      const messageId = payload?.['messageId']
+      const preview = payload?.['preview']
+      const authorName = payload?.['authorName']
+      if (typeof messageId !== 'string' || messageId.length === 0) {
+        throw new RouteRefusal('a quote needs the message it replies to', 400)
+      }
+      if (typeof preview !== 'string') {
+        throw new RouteRefusal('a quote needs a preview string', 400)
+      }
+      pendingQuotes.set(roomId, {
+        messageId,
+        preview,
+        ...typeof authorName === 'string' && authorName.length > 0 ? { authorName } : {},
+      })
+      return { ok: true }
+    }
+    // Clearing is a no-op when nothing was registered, so the browser may call it on every send
+    // without tracking whether a quote was started.
+    if (httpMethod === 'DELETE') {
+      pendingQuotes.delete(roomId)
+      return { ok: true }
+    }
+    throw new RouteRefusal('a quote accepts POST and DELETE', 405)
   }
 
   // Forwarded unchanged for the same reason as the invite: entitlement to join is the server's

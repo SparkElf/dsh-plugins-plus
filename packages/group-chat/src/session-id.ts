@@ -21,6 +21,20 @@ export const ROOM_SESSION_PREFIX = 'group-room-'
 /** Deterministic session id for a room. */
 export const roomSessionId = (roomId: string): string => `${ROOM_SESSION_PREFIX}${roomId}`
 
+/**
+ * Reads the room a session *id* is bound to, or `undefined` for an ordinary session.
+ *
+ * Separate from {@link roomIdOfSession} because the two call sites receive different things: a
+ * seat hands the composer a bare id string, while a session event hands over the session object.
+ * Passing a string to the object form silently returns `undefined` — it checks for an object
+ * first — which is how a correctly registered composer seat ended up drawing nothing.
+ */
+export const roomIdOfSessionId = (sessionId: string): string | undefined => {
+  if (!sessionId.startsWith(ROOM_SESSION_PREFIX)) return undefined
+  const roomId = sessionId.slice(ROOM_SESSION_PREFIX.length)
+  return roomId.length > 0 ? roomId : undefined
+}
+
 /** Reads the room a session is bound to, or `undefined` for an ordinary session. */
 export const roomIdOfSession = (session: unknown): string | undefined => {
   if (typeof session !== 'object' || session === null) return undefined

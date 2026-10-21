@@ -78,9 +78,12 @@ describe('气泡分侧渲染', () => {
     expect(html).not.toContain('data-group-chat-side')
   })
 
-  it('自己的消息留在右侧（不包裹）', () => {
+  it('自己的消息包上 self 标记，右侧对齐由样式保持', () => {
+    // 自己发的消息也要包一层：引用按钮挂在消息上，不包就没有位置放它。
+    // 右侧对齐不再靠「不包裹」实现，而是由 `.selfRow` 的 `align-items: flex-end` 保持。
     const html = render({ source: { roomId: 'room-1', memberId: SELF, authorKind: 'human' }, selfId: SELF })
-    expect(html).not.toContain('data-group-chat-side')
+    expect(html).toContain('data-group-chat-side="self"')
+    expect(html).toContain('official-bubble')
   })
 
   it('其他成员的消息包上分侧标记', () => {
@@ -94,7 +97,7 @@ describe('气泡分侧渲染', () => {
     // the fetch resolves. A captured value would produce `other` both times.
     const source = { roomId: 'room-1', memberId: SELF, authorKind: 'human' }
     expect(render({ source, selfId: undefined })).toContain('data-group-chat-side="other"')
-    expect(render({ source, selfId: SELF })).not.toContain('data-group-chat-side')
+    expect(render({ source, selfId: SELF })).toContain('data-group-chat-side="self"')
   })
 
   it('官方渲染器不可用时渲染空，而不是抛错', () => {
