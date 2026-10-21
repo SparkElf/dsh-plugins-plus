@@ -920,8 +920,9 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       const content = (data as { content: UserContent }).content
       const mentions = mentionedMemberIds(textOfContent(content), runtimes.get(roomId)?.members ?? [])
       // The quote the browser registered, consumed here so it attaches to exactly one reply.
+      // Read, never consume: the step hook is what consumes the entry, and taking it here
+      // would leave the model with nothing to attach when the step runs after this publish.
       const quote = pendingQuotes.get(roomId)
-      pendingQuotes.delete(roomId)
       const outgoing = quote === undefined ? content : withQuote(content, quote)
       backend
         .sendMessage(roomId, {
@@ -958,6 +959,8 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
   }
 
   ctx.on('session/event', onSessionEvent)
+
+
 
   /**
    * The browser-facing room API.
@@ -1125,7 +1128,11 @@ const handleRoomRequest = async (
    * Passed in rather than owned by this module: the quote has to outlive a single request and be
    * reachable from the session-event path, and both live in the activated runtime.
    */
-  pendingQuotes: Map<string, { readonly messageId: string; readonly preview: string; readonly authorName?: string }>,
+  pendingQuotes: Map<string, {
+    readonly messageId: string
+    readonly preview: string
+    readonly authorName?: string
+  }>,
 ): Promise<unknown> => {
   const [resource, roomId, ...rest] = route.split('/').filter((part) => part.length > 0)
   const action = rest.join('/')
