@@ -128,7 +128,14 @@ export const MessageSearch = (props: MessageSearchProps): ReactNode => {
                 role="option"
                 aria-selected={false}
                 className={styles['hit']}
-                onClick={() => { onOpen(hit.roomId, hit.eventId) }}
+                onClick={() => {
+                  onOpen(hit.roomId, hit.eventId)
+                  // Collapse after opening: the panel covers the room list, and the reader asked
+                  // to go somewhere, not to keep searching.
+                  setQuery('')
+                  setHits([])
+                  setOpen(false)
+                }}
               >
                 <span className={styles['hitHead']}>
                   <span className={styles['hitRoom']}>{hit.roomName}</span>
