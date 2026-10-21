@@ -47,6 +47,7 @@ import { PendingQuoteBar } from './QuoteComposer.tsx'
 import { registerMessageSource, type InputTriggersLike } from './messageReference.ts'
 import { PRESET_LOCALE_NS } from './rows.ts'
 import { roomSessionId } from '../session-id.ts'
+import { readRoomState } from './api.ts'
 import { en, zh, type GroupChatKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -277,7 +278,25 @@ export function apply(ctx: ClientContext): void {
     ...base,
     open: (roomId) => {
       base.open(roomId)
-      ctx.uiWorkspace.openSession(roomSessionId(roomId))
+      // Wait for the host to have the room's Session before asking the shell to open it.
+      //
+      // The host creates room Sessions on its own startup poll; a member who clicks a room in
+      // the first seconds after the plugin comes up otherwise retains an id that does not exist
+      // yet. That failure is quiet — the history still draws — but nothing written afterwards
+      // lands, because the composer is bound to a session scope with no session behind it.
+      void (async () => {
+        for (let attempt = 0; attempt < 25; attempt += 1) {
+          try {
+            if ((await readRoomState(roomId)).open) break
+          } catch {
+            // A read that fails says nothing about readiness; the open below is still the best
+            // thing to try, and the shell reports its own failure if the session is missing.
+            break
+          }
+          await new Promise((resolve) => { setTimeout(resolve, 300) })
+        }
+        ctx.uiWorkspace.openSession(roomSessionId(roomId))
+      })()
       // Opening a room is the operator saying "show me this conversation", and the roster is the
       // other half of it: who is in here, and what the room has announced. The tab is revealed
       // rather than forced — `openTab` focuses an already-placed tab of this type instead of

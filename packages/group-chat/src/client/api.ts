@@ -265,6 +265,23 @@ export const listDirectories = (path?: string): Promise<DirectoryListing> => {
   return call(`/directories${suffix}`)
 }
 
+/**
+ * Whether the host has this room's session up.
+ *
+ * The host creates a room's session on its own poll, which starts when the plugin does. A
+ * member who opens a room before that poll reaches it makes the shell retain an id the host
+ * has not created yet — the open then fails with `sessions.retain: unknown session`, and the
+ * room shows its history against a session scope nothing can write into.
+ */
+export interface RoomState {
+  readonly roomId: string
+  readonly open: boolean
+  readonly memberCount: number
+}
+
+export const readRoomState = (roomId: string): Promise<RoomState> =>
+  call<RoomState>(`/rooms/${encodeURIComponent(roomId)}/state`)
+
 export const listEvents = (roomId: string, cursor?: string): Promise<EventPage> => {
   const suffix = cursor === undefined ? '' : `?cursor=${encodeURIComponent(cursor)}`
   return call(`/rooms/${encodeURIComponent(roomId)}/events${suffix}`)
