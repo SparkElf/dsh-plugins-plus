@@ -188,6 +188,9 @@ export const QuoteBar = ({ quote }: { readonly quote: QuotedMessage }): ReactNod
  * @param props - the message it replies to, and the store the pick lands in.
  * @returns the button, or `null` when the message cannot be replied to.
  */
+/** Source kind of the model-only quoted-message context; it must never be drawn as a message. */
+const QUOTE_CONTEXT_KIND = 'group-chat-quote'
+
 const ReplyControl = (props: {
   readonly roomId: string
   readonly messageId: string
@@ -234,6 +237,11 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
   // namespace this plugin's registration declares.
   const view = createElement(Official as OfficialView, props as unknown as Record<string, unknown>)
   const message = node?.data as MessageLike | undefined
+  // The quoted-message context the host injects before a model step is background for the
+  // model, not part of the conversation. It carries its own source kind so it is recognizable
+  // here; drawing it would put an untrusted-background snapshot in the room under the member's
+  // name, and the message it belongs to already shows the quote as a pointer.
+  if (message?.source?.kind === QUOTE_CONTEXT_KIND) return null
   const side = sided ? messageSide(message, selfId) : undefined
   const quote = quoteOf(message)
   const roomId = message?.source?.roomId

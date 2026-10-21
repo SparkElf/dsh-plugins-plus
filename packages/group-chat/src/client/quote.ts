@@ -33,6 +33,8 @@ export const QUOTE_BLOCK_TYPE = 'group-chat-quote'
  */
 export interface MessageLike {
   readonly source?: {
+    /** Producer of the message; `group-chat-quote` marks model-only context. */
+    readonly kind?: unknown
     readonly roomId?: unknown
     readonly memberId?: unknown
     readonly authorKind?: unknown
