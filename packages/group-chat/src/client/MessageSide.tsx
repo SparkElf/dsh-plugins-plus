@@ -238,6 +238,14 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
   const quote = quoteOf(message)
   const roomId = message?.source?.roomId
   const roomKnown = typeof roomId === 'string' && roomId.length > 0
+  // The id the room's log knows this message by. `source.messageId` is that row; `id` is the
+  // message's own uuid. A reply and a search jump both point at the row — it is what the room
+  // stores and what a reply carries — so it is resolved once here, before any branch uses it.
+  const sourceMessageId = message?.source?.messageId
+  const rawId = message?.id
+  const messageId = typeof sourceMessageId === 'string' && sourceMessageId.length > 0
+    ? sourceMessageId
+    : typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined
 
   // A message outside a room has no roster to attribute it from and no room to reply into, so it
   // stays exactly as the official renderer drew it. A quote can still be present on a message
@@ -249,6 +257,7 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
       <div
         className={styles['selfRow']}
         data-group-chat-side="self"
+        {...messageId === undefined ? {} : { 'data-group-chat-message': messageId }}
       >
         <QuoteBar quote={quote} />
         {view}
@@ -270,13 +279,6 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
         </div>
       )
 
-  // The id the room's log knows this message by. `source.messageId` is that row; `id` is the
-  // message's own uuid. A reply points at the row, because the room stores and searches rows.
-  const sourceMessageId = message?.source?.messageId
-  const rawId = message?.id
-  const messageId = typeof sourceMessageId === 'string' && sourceMessageId.length > 0
-    ? sourceMessageId
-    : typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined
   // The host prefixes what it publishes with the speaker's name so the model can tell who is
   // talking. That prefix is part of the stored text, so a quote taken from it would read
   // "DataOps Admin：DataOps Admin：…" once the bar draws the name itself.
@@ -306,7 +308,11 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
   // where the bubble has room and where the pointer arrives from.
   if (side === 'self') {
     return (
-      <div className={styles['selfRow']} data-group-chat-side="self">
+      <div
+        className={styles['selfRow']}
+        data-group-chat-side="self"
+        {...messageId === undefined ? {} : { 'data-group-chat-message': messageId }}
+      >
         {quote === undefined ? null : <QuoteBar quote={quote} />}
         <div className={styles['selfBody']}>
           {view}
@@ -320,6 +326,7 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
     <div
       className={styles['otherRow']}
       data-group-chat-side="other"
+      {...messageId === undefined ? {} : { 'data-group-chat-message': messageId }}
     >
       {head}
       {quote === undefined ? null : <QuoteBar quote={quote} />}

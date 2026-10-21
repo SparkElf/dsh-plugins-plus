@@ -340,14 +340,21 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
           t={t}
           onOpen={(roomId, eventId) => {
             void store.open(roomId)
-            // The match is opened, not just its room; the message anchor is best-effort because
-            // the conversation may still be loading when this fires.
-            if (typeof window !== 'undefined') {
-              window.setTimeout(() => {
-                const node = document.querySelector(`[data-group-chat-quote="${eventId}"]`)
-                node?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-              }, 800)
+            // The conversation is still loading when this fires, so the row is not in the DOM
+            // yet: poll for the anchor instead of guessing one delay, and give up quietly after
+            // a few seconds rather than scrolling to a stranger's message.
+            if (typeof document === 'undefined') return
+            let attempts = 0
+            const look = (): void => {
+              const node = document.querySelector(`[data-group-chat-message="${eventId}"]`)
+              if (node !== null) {
+                node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+                return
+              }
+              attempts += 1
+              if (attempts < 40) window.setTimeout(look, 250)
             }
+            window.setTimeout(look, 400)
           }}
         />
 

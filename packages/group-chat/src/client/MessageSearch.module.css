@@ -137,3 +137,13 @@
   font-size: 12px;
   line-height: 16px;
 }
+
+/* The matched words, marked in the result list. Inherits the row's colour so a highlight reads
+   as emphasis rather than as a second, louder kind of text. */
+.mark {
+  padding: 0;
+  border-radius: 2px;
+  background: var(--dsw-alias-bg-brand-weak, rgb(255 214 102 / 35%));
+  color: inherit;
+  font-weight: 600;
+}

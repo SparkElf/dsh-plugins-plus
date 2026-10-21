@@ -31,6 +31,33 @@ export interface MessageSearchProps {
  * Results are debounced and the newest request wins: typing quickly issues several searches, and
  * an early one resolving late would replace the results of a later, more specific query.
  */
+/**
+ * The hit text with the matched words marked.
+ *
+ * Splitting on the query rather than rendering the raw string gives the reader the one thing a
+ * result list has to offer: where in a long message the words actually are. Case is preserved
+ * from the source text; only the comparison is case-insensitive.
+ */
+const highlighted = (text: string, query: string): ReactNode => {
+  const needle = query.trim()
+  if (needle.length === 0) return text
+  const parts: ReactNode[] = []
+  const lower = text.toLowerCase()
+  const target = needle.toLowerCase()
+  let from = 0
+  let at = lower.indexOf(target)
+  let key = 0
+  while (at !== -1) {
+    if (at > from) parts.push(text.slice(from, at))
+    parts.push(<mark key={key} className={styles['mark']}>{text.slice(at, at + needle.length)}</mark>)
+    key += 1
+    from = at + needle.length
+    at = lower.indexOf(target, from)
+  }
+  if (from < text.length) parts.push(text.slice(from))
+  return parts
+}
+
 export const MessageSearch = (props: MessageSearchProps): ReactNode => {
   const { t, onOpen } = props
   const [open, setOpen] = useState(false)
@@ -143,7 +170,7 @@ export const MessageSearch = (props: MessageSearchProps): ReactNode => {
                     <span className={styles['hitAuthor']}>{hit.authorName}</span>
                   )}
                 </span>
-                <span className={styles['hitText']}>{hit.text}</span>
+                <span className={styles['hitText']}>{highlighted(hit.text, query)}</span>
               </button>
             ))
           )}

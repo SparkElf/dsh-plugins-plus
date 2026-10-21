@@ -164,10 +164,7 @@
  */
 .rowActions {
   position: absolute;
-  /* Always visible, just quiet: the pointer reveal depends on the official row's own hover
-     behaviour, which this plugin does not own, and a control that only exists while hovered is
-     easy to miss and impossible to reach by keyboard. */
-  opacity: 0.45;
+  opacity: 0;
   top: 0;
   right: -28px;
   display: flex;
@@ -181,16 +178,18 @@
 }
 
 .replyButton {
+  /* The shipped icon-action measurements, so a reply control on a room message is the same size
+     as the copy control beside it on an agent message. */
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
+  width: calc(28px + var(--dsh-content-font-delta, 0px));
+  height: calc(28px + var(--dsh-content-font-delta, 0px));
+  padding: 6px;
   border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary, inherit);
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: none;
+  color: var(--dsw-alias-label-tertiary, inherit);
   cursor: pointer;
 }
 
@@ -226,7 +225,7 @@
   left: -28px;
   display: flex;
   align-items: center;
-  opacity: 0.45;
+  opacity: 0;
   transition: opacity 120ms ease;
 }
 
