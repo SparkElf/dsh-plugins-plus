@@ -75,6 +75,7 @@ import { KnowledgeSettings } from './KnowledgeSettings.tsx'
 import { KnowledgeSearch, useKnowledgeSearch } from './KnowledgeSearch.tsx'
 import { KB_DRAG_MIME, KnowledgeListing } from './KnowledgeListing.tsx'
 import { KnowledgeIconButton, KnowledgeSectionHeader } from './KnowledgeSectionHeader.tsx'
+import { useFavorites } from './useFavorites.ts'
 import { usePinnedPaths } from './usePinnedPaths.ts'
 import { useTreeState } from './useTreeState.ts'
 import { useViewMode } from './useViewMode.ts'
@@ -560,6 +561,14 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * render does not post a request naming a tree that does not exist yet.
    */
   const pins = usePinnedPaths(state.kind === 'ready' && state.config.mountPoint !== '')
+
+  /**
+   * The caller's favourites, read from their own view directory.
+   *
+   * Gated on the mount being known for the same reason the pins are: a favourites
+   * request before the view exists would name a tree that is not there yet.
+   */
+  const favorites = useFavorites(state.kind === 'ready' && state.config.mountPoint !== '')
 
   /** The caller's list/grid preference, read from their own view directory. */
   const viewMode = useViewMode(state.kind === 'ready' && state.config.mountPoint !== '')
@@ -1321,9 +1330,27 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 mountPoint={config.mountPoint}
                 focusNew={focusNew}
                 onOpen={(path) => { openDocument(path) }}
+                // The Home table is the surface a reader starts from, so the same
+                // context menu the tree carries is wired here too -- including the
+                // star, the share dialog, and the cut/copy/paste pair.
+                isFavorite={favorites.has}
+                onFavorite={(path, favorite) => { favorites.setFavorite(path, favorite) }}
+                isPinned={pins.has}
+                onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
+                onGrant={(path) => { openPermissions(path) }}
+                onReference={(path, isDir) => {
+                  if (sessionId === undefined) {
+                    setReferencing({ path: joinPath(config.mountPoint, path), isDir })
+                    return
+                  }
+                  referenceInChat(props.ctx as never, sessionId, joinPath(config.mountPoint, path), isDir)
+                }}
+                onTreeChanged={() => { setRefreshTick(t => t + 1) }}
                 // Where a create lands when the reader has not opened a directory:
                 // their own personal bucket rather than the shared one.
                 callerId={state.kind === 'ready' ? state.status.caller?.userId : undefined}
+                departmentCode={state.kind === 'ready' ? state.status.caller?.departmentCode : undefined}
+                departmentName={state.kind === 'ready' ? state.status.caller?.departmentName : undefined}
               />
             )}
             {rendered.kind === 'trash' && <KnowledgeTrash t={t} />}

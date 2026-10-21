@@ -198,6 +198,11 @@ const MINERU_TIER = 'basic'
  * cannot answer the query-parameter contract this function sends, so pointing at the
  * version this deployment installs (`mineru>=4.0,<5`) is the honest choice rather
  * than carrying two request shapes.
+ *
+ * A 3.4.x server therefore does not work through this path: it has no `/v1` route, so
+ * the request fails here and the extractor falls through to LibreOffice or Python.
+ * That degradation is intended — upgrading the service is the fix, not teaching the
+ * client a second contract.
  */
 const MINERU_PARSE_PATH = '/v1/file_parse'
 

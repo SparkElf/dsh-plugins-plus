@@ -31,7 +31,12 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './KnowledgeListing.module.css'
 import { KnowledgeLoading } from './KnowledgeLoading.tsx'
-import { KnowledgeContextMenu, type ContextTarget } from './KnowledgeContextMenu.tsx'
+import {
+  KnowledgeContextMenu,
+  type ContextTarget,
+  type TreeClipboard,
+} from './KnowledgeContextMenu.tsx'
+import { shareCopyFor } from './knowledgeMenuCopy.ts'
 
 /** One entry, as the Host returns it. */
 interface Entry {
@@ -85,6 +90,32 @@ export interface KnowledgeListingProps {
   onPin?: (path: string, pinned: boolean) => void
   /** Whether one path is currently pinned, so the row can mark it. */
   isPinned?: (path: string) => boolean
+  /**
+   * Star or unstar one row.
+   *
+   * Omitted by a caller with no favourites store, which is how the search results list
+   * stays free of an entry that would only make sense inside the tree. A folder is
+   * favoured the same way a file is: the star marks a row, not a document.
+   */
+  onFavorite?: (path: string, favorite: boolean) => void
+  /** Whether one path is currently favourited, so the row can draw its star. */
+  isFavorite?: (path: string) => boolean
+  /**
+   * The path a paste would land in, given the row this menu was opened on.
+   *
+   * A directory row pastes INTO itself; a file row pastes beside itself. Kept a
+   * callback rather than derived in the menu because only the listing knows whether a
+   * row is the tree's root, which has no parent to paste beside.
+   */
+  pasteTargetFor?: (relPath: string, isDir: boolean) => string | null
+  /**
+   * Called after a menu-driven delete or paste succeeded.
+   *
+   * Both change paths this component is currently holding -- a delete removes one, a
+   * paste adds one and empties another -- so the page has to reload rather than the
+   * component guessing which levels moved.
+   */
+  onTreeChanged?: () => void
   /**
    * Called after a rename succeeded, so the page reloads the tree.
    *
@@ -220,6 +251,17 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
   const [menu, setMenu] = useState<{ target: ContextTarget; at: { x: number; y: number } } | null>(null)
   /** The path being dragged, so a row cannot be dropped into itself. */
   const dragSource = useRef<string | undefined>(undefined)
+  /**
+   * The cut/copied entry, held for the clipboard's lifetime.
+   *
+   * Client state, not a Host write: nothing about a pending paste is worth persisting,
+   * and a clipboard that survived a reload would be a paste the reader could no longer
+   * see they had armed. Paste always goes through `move`, so a copy request currently
+   * behaves as a move request -- the menu says which one it is in the label.
+   */
+  const [clipboard, setClipboard] = useState<TreeClipboard | null>(null)
+  /** Locale-resolved copy for the share dialog, whose strings are dialog-specific. */
+  const shareCopy = useMemo(() => shareCopyFor(props.locale), [props.locale])
 
   const read = useCallback(async (path: string): Promise<Entry[]> => {
     const response = await fetch(kbApiPath(KB_API.list), {
@@ -422,6 +464,22 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
         />
       )}
       <span className={styles.entryName}>{entry.name}</span>
+      {/* Favourites star, immediately BEFORE the date column.
+          The reader asked for exactly that placement: the star is a mark on the row
+          the reader recognises, and putting it after the timestamp would leave it
+          floating at the row's trailing edge where the hover actions live and the
+          eye no longer reads it as belonging to the name. `margin-left: auto` on
+          `.entryTime` still pushes the pair to the right edge, so the column stays
+          aligned with rows that carry no star. */}
+      {props.isFavorite?.(entry.relPath) === true && (
+        <span
+          className={styles.entryFavorite}
+          aria-label={props.t('favoriteMark')}
+          title={props.t('favoriteMark')}
+        >
+          ★
+        </span>
+      )}
       {entry.mtimeMs !== undefined && (
         <span className={styles.entryTime} title={formatModifiedTitle(entry.mtimeMs, locale)}>
           {formatModified(entry.mtimeMs)}
@@ -673,12 +731,27 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
         target={menu?.target ?? null}
         at={menu?.at ?? null}
         t={props.t}
+        shareCopy={shareCopy}
         pinned={menu === null ? false : props.isPinned?.(menu.target.relPath) === true}
+        favorite={menu === null ? false : props.isFavorite?.(menu.target.relPath) === true}
+        clipboard={clipboard}
+        pasteInto={menu === null ? null : (props.pasteTargetFor?.(menu.target.relPath, menu.target.isDir) ?? null)}
         onClose={() => { setMenu(null) }}
         onGrant={(path) => { props.onGrant?.(path) }}
         onPin={(path, pinned) => { props.onPin?.(path, pinned) }}
+        onFavorite={(path, favorite) => { props.onFavorite?.(path, favorite) }}
         onReference={(path, isDir) => { props.onReference?.(path, isDir) }}
+        onClipboard={(entry) => { setClipboard(entry) }}
         onRenamed={() => { props.onRenamed?.() }}
+        onDeleted={() => { props.onTreeChanged?.() }}
+        onMoved={() => {
+          // A cut consumes the clipboard: its source path no longer exists, so a second
+          // paste would target something gone. A copy keeps it -- pasting one entry into
+          // two folders is the ordinary reason to copy rather than cut, and clearing here
+          // would make the second paste impossible without re-copying.
+          setClipboard(current => (current?.cut === true ? null : current))
+          props.onTreeChanged?.()
+        }}
       />
     </>
   )

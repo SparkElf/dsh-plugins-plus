@@ -116,8 +116,20 @@ export function openInSidebar(
   // a track of width 0. Expanding first is the same control the host's own expand
   // button drives, and it is idempotent -- only called when the column reports
   // itself collapsed, so an already-open column is never toggled shut.
-  if (typeof column.isExpanded === 'function' && column.isExpanded() === false) {
-    column.toggleExpanded?.()
+  //
+  // Expanding is best-effort. `toggleExpanded` drives the column's per-session layout
+  // state, and this page is a global panel with no session surface mounted, so the
+  // controller answers with `sidebarRight: no session surface is mounted`. Letting that
+  // reach the caller aborted the open before `openResource` ran: the reader clicked a
+  // document and nothing happened at all. A column that refuses to expand is a layout
+  // problem, not a reason to withhold the document.
+  try {
+    if (typeof column.isExpanded === 'function' && column.isExpanded() === false) {
+      column.toggleExpanded?.()
+    }
+  } catch {
+    // The column opens at whatever width the frame gives it; the reader still gets
+    // the document.
   }
   column.openResource(address)
   return 'opened'

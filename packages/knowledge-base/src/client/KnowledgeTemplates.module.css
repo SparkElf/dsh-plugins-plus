@@ -1,102 +1,245 @@
-/* The template library dialog.
-   A full-surface sheet rather than a centred box: the reference fills the area, and
-   a grid of template cards needs the room. Sizes follow the plugin's other surfaces
-   (11px/12px/14px text tokens, the shared radii) instead of importing the
-   reference's own scale, because this page is a DSH surface and not a copy of the
-   product it was modelled on. */
+/*
+ * The template library dialog.
+ *
+ * Everything structural is the primitives': the dialog, the tab strip, the fields and
+ * the buttons are `Modal` / `SegmentedTabs` / `Input` / `Button`, so their colour and
+ * type already follow the active theme. What lives here is the two-pane layout the
+ * dialog needs -- a card grid for using templates, and a list-plus-form for
+ * maintaining them.
+ *
+ * No hardcoded font sizes and no colour literals: a type step comes from
+ * `font: var(--dsw-font-*)`, ink from `--dsw-alias-label-*`.
+ */
 
-.scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: flex;
-  align-items: stretch;
-  justify-content: center;
-  padding: 24px;
-  box-sizing: border-box;
-  /* The same scrim the primitive Modal paints, so a dialog from this plugin
-     darkens the surface the way every other dialog in the product does. */
-  background: var(--dsw-alias-bg-mask-1);
-}
-
-.sheet {
+/* The dialog body: toolbar, then whichever pane is showing. */
+.dialog {
   display: flex;
   flex-direction: column;
-  width: 100%;
-  max-width: 1040px;
-  min-height: 0;
-  border: 0.5px solid var(--dsw-alias-border-l3);
-  border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-bg-layer-1);
-  overflow: hidden;
+  gap: 12px;
+  min-width: 0;
 }
 
-.bar {
-  flex: none;
+/* Tab strip and search share one line; the search takes the remaining width. */
+.toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 56px;
-  padding: 0 16px;
-  box-sizing: border-box;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
 }
 
-.title {
-  margin: 0;
-  font: var(--dsw-font-base-strong-16);
-  color: var(--dsw-alias-label-primary);
-}
-
-/* The search takes the free space, so the title and the close control stay pinned
-   to their corners however long the query is. */
-.search {
+.toolbar > :last-child {
   flex: 1 1 auto;
   min-width: 0;
-  display: flex;
 }
 
-.body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding: 16px;
+/* An outcome or refusal sentence, given its own line so it cannot be mistaken for
+   part of the list. */
+.notice {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
 }
 
 .muted {
   margin: 0;
+  padding: 12px 0;
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxs-12);
 }
 
+/* ── the library pane ────────────────────────────────────────────────────────── */
+
+.library {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+/* Where a copy lands. Bordered because it is a choice, not a caption: the reader is
+   expected to change it. */
+.destination {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.destinationLabel {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* Responsive columns: `auto-fill` with a floor, so a narrow dialog wraps instead of
+   squeezing cards into unreadable columns. */
 .grid {
   display: grid;
-  /* `auto-fill` with a floor, so a narrow sheet wraps instead of squeezing the
-     cards into unreadable columns. */
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 44vh;
+  overflow-y: auto;
+}
+
+/* One card: head, description, tags, then a foot pinned to the bottom so the action
+   buttons line up across a row of cards of different heights. */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.cardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cardTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-strong-12);
+}
+
+.cardBody {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxxs-11);
+  /* Two lines at most: a long description must not make one card twice its
+     neighbour's height. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.cardTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* The foot is pushed to the bottom, so every card's action sits on the same line
+   across a row. */
+.cardFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.cardMeta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── the manage pane ─────────────────────────────────────────────────────────── */
+
+.manage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.manageBar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* One manageable template per row: name, its file and size, then the actions. */
+.manageList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.card {
+.manageRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--dsw-radius-sm);
+}
+
+.manageRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.manageName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.manageActions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 4px;
+}
+
+/* The maintenance form: one labelled control per line. */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 12px;
-  box-sizing: border-box;
-  border: 0.5px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-sm);
-  background: var(--dsw-alias-bg-layer-2);
+  min-width: 0;
 }
 
-.cardTitle {
+.fieldLabel {
+  color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xxs-12);
-  color: var(--dsw-alias-label-primary);
 }
 
-.cardMeta {
-  font: var(--dsw-font-xxxs-11);
+.fieldHint {
   color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+.fileInput {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* Cancel and Save sit together at the form's end, in the order a reader expects. */
+.formActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
 }

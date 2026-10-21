@@ -20,10 +20,11 @@ import {
   permissionToDataOpsActions,
 } from '../src/permissions.ts'
 import {
+  formatGrantInstant,
   groupHoldingsByPrincipal,
   groupHoldingsByResource,
   summarizeActions,
-} from '../src/client/KnowledgePermissionOverview.tsx'
+} from '../src/client/permissionRows.ts'
 import { buildRoleSummaries } from '../src/client/roleSummary.ts'
 
 describe('the five knowledge permissions', () => {
@@ -148,6 +149,32 @@ describe('built-in roles', () => {
     expect(departmentScopeOf(undefined)).toBeUndefined()
     expect(departmentScopeOf('  ')).toBeUndefined()
   })
+
+  it('scopes the department administrator to its own level of the nested tree', () => {
+    // With an organization path the caller's department is the LAST level, so the
+    // prefix has to be the whole chain rather than a bare code that appears at
+    // several depths.
+    const chain = ['business-ops', 'biz-analysis']
+    expect(departmentScopeOf('biz-analysis', chain)).toBe('department/business-ops/biz-analysis/')
+    expect(builtInRoleCoversPath(DEPARTMENT_ADMIN_ROLE, 'department/business-ops/biz-analysis/x.md', 'biz-analysis', chain)).toBe(true)
+    expect(builtInRoleCoversPath(DEPARTMENT_ADMIN_ROLE, 'department/business-ops/biz-analysis/2026/x.md', 'biz-analysis', chain)).toBe(true)
+    // A peer that shares the ancestor must stay out: comparing the leaf alone would
+    // let `business-ops/crm-ops` through.
+    expect(builtInRoleCoversPath(DEPARTMENT_ADMIN_ROLE, 'department/business-ops/crm-ops/x.md', 'biz-analysis', chain)).toBe(false)
+    // An ancestor's own folder is above the caller's scope, not inside it.
+    expect(builtInRoleCoversPath(DEPARTMENT_ADMIN_ROLE, 'department/business-ops/x.md', 'biz-analysis', chain)).toBe(false)
+    // The caller's own department container is theirs to manage.
+    expect(builtInRoleCoversPath(DEPARTMENT_ADMIN_ROLE, 'department/business-ops/biz-analysis', 'biz-analysis', chain)).toBe(true)
+  })
+
+  it('keeps the flat answers when no path is reported', () => {
+    // The degradation contract: an older backend must produce exactly the permissions
+    // this build had before hierarchy existed.
+    expect(departmentScopeOf('OPS', [])).toBe('department/OPS/')
+    expect(departmentScopeOf('OPS', undefined)).toBe('department/OPS/')
+    expect(builtInRoleActionsOn(DEPARTMENT_ADMIN_ROLE, 'department/OPS/x.md', 'OPS', []))
+      .toEqual(builtInRoleActionsOn(DEPARTMENT_ADMIN_ROLE, 'department/OPS/x.md', 'OPS'))
+  })
 })
 
 describe('deciding one role action with an explanation', () => {
@@ -215,5 +242,68 @@ describe('permission overview grouping', () => {
     expect(roles[0]?.label).toBe('超级管理员')
     expect(roles[0]?.builtIn).toBe(true)
     expect(roles[1]?.builtIn).toBe(false)
+  })
+})
+
+describe('the two tabbed readings of one grant table', () => {
+  /**
+   * The page has ONE body: two tabs over the same payload. These pin the parts the
+   * tabs depend on — that each row carries the grants a revoke must name, and that
+   * the two readings agree about the same underlying set.
+   */
+  const GRANTS = [
+    { id: '1', relPath: 'global/a.md', kind: 'file' as const, principalType: 'user' as const, principalId: 'u-1', action: 'read', grantedBy: 'admin', grantedAt: '2026-01-01T00:00:00Z' },
+    { id: '2', relPath: 'global/b.md', kind: 'file' as const, principalType: 'user' as const, principalId: 'u-1', action: 'write', grantedBy: 'admin', grantedAt: '2026-03-02T00:00:00Z' },
+    { id: '3', relPath: 'global/a.md', kind: 'file' as const, principalType: 'role' as const, principalId: 'knowledge-super-admin', action: 'manage', grantedBy: 'admin', grantedAt: '2026-02-01T00:00:00Z' },
+  ]
+
+  it('carries the exact grants a row revokes, so the action removes what it shows', () => {
+    const people = groupHoldingsByPrincipal(GRANTS)
+    const zhang = people.find(person => person.principalId === 'u-1')
+    // Two grants behind one row: the revoke has to name both, or it would silently
+    // leave half of what the row displays.
+    expect(zhang?.grants.map(grant => grant.id)).toEqual(['1', '2'])
+  })
+
+  it('names the principal kind on each person row', () => {
+    // The type column needs it; without it the table could only print the id.
+    const people = groupHoldingsByPrincipal(GRANTS)
+    expect(people.every(person => person.principalType !== undefined)).toBe(true)
+  })
+
+  it('agrees with the resource reading about the same grants', () => {
+    // Two readings of one payload must not disagree: every grant appears exactly
+    // once on each side, or the tabs would tell different stories.
+    const people = groupHoldingsByPrincipal(GRANTS)
+    const resources = groupHoldingsByResource(GRANTS)
+    const personTotal = people.reduce((sum, person) => sum + person.grants.length, 0)
+    const resourceTotal = resources.reduce(
+      (sum, resource) => sum + resource.principals.reduce((inner, holder) => inner + holder.grants.length, 0), 0)
+    expect(personTotal).toBe(GRANTS.length)
+    expect(resourceTotal).toBe(GRANTS.length)
+  })
+
+  it('gives every holder on a path its own grants, for the row-level revoke', () => {
+    const resources = groupHoldingsByResource(GRANTS)
+    const globalA = resources.find(resource => resource.relPath === 'global/a.md')
+    // Two principals can reach global/a.md; revoking the row must cover both.
+    const all = globalA?.principals.flatMap(holder => holder.grants) ?? []
+    expect(all.map(grant => grant.id).sort()).toEqual(['1', '3'])
+  })
+
+  it('takes the newest instant as the row date, not the first one seen', () => {
+    // A row spans several grants, so its date is the latest of them. Compared as
+    // instants rather than as a formatted string: the formatter prints local time,
+    // so pinning the printed text would make this fail in another time zone.
+    const people = groupHoldingsByPrincipal(GRANTS)
+    const zhang = people.find(person => person.principalId === 'u-1')
+    expect(zhang?.latestAt).toBe('2026-03-02T00:00:00Z')
+    // …and that it is later than the row's other grant, which is the actual claim.
+    expect(new Date(zhang?.latestAt ?? 0).getTime())
+      .toBeGreaterThan(new Date('2026-01-01T00:00:00Z').getTime())
+  })
+
+  it('formats a missing instant as a dash rather than an epoch date', () => {
+    expect(formatGrantInstant('')).toBe('-')
   })
 })

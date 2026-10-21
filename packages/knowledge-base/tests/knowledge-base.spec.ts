@@ -33,6 +33,7 @@ import {
   classifyMount,
   syncCallerView,
   name,
+  mineruUrlFor,
   revokeGrant,
   withStoredStorage,
   type KnowledgeError,
@@ -76,6 +77,8 @@ import {
   readPins,
   isMountPoint,
   readSettings,
+  normalizeMineruBaseUrl,
+  DEFAULT_KNOWLEDGE_SETTINGS,
   readStorageSettings,
   readTreeState,
   readViewMode,
@@ -6174,4 +6177,157 @@ describe('a targeted sync must not touch the rest of the view', () => {
     }
   })
 
+})
+
+describe('the MinerU service address is a setting a reader can change', () => {
+  /**
+   * The port alone can only ever name this machine. A MinerU reached through a tunnel, a
+   * gateway or another host has no port to put anywhere, so the settings page gains a
+   * full address and the extraction path must actually read it. "Only adds an interface
+   * without changing the caller" is the failure this suite is written to catch.
+   */
+  const configWith = (extra: Record<string, unknown>): Config => ({ ...baseConfig(), ...extra } as Config)
+
+  /** A minimal config: the fields `mineruUrlFor` reads are the only ones that matter. */
+  const baseConfig = () => ({ mineruPort: 8000, mineruBaseUrl: '' })
+
+  it('normalises what a reader types', () => {
+    // Padding and a trailing slash name the same endpoint as the bare address; storing
+    // them verbatim would make two identical settings compare unequal.
+    expect(normalizeMineruBaseUrl('  http://10.0.0.5:8000/  ')).toBe('http://10.0.0.5:8000')
+    expect(normalizeMineruBaseUrl('http://10.0.0.5:8000')).toBe('http://10.0.0.5:8000')
+    expect(normalizeMineruBaseUrl('https://mineru.internal/base/')).toBe('https://mineru.internal/base')
+    // A path prefix survives: MinerU may sit behind one.
+    expect(normalizeMineruBaseUrl('https://gw.example.com/mineru')).toBe('https://gw.example.com/mineru')
+  })
+
+  it('refuses a value that could never work', () => {
+    // Each of these would be handed to a parser that can only fail on it, and the reader
+    // would see "extraction broke" instead of "this setting is wrong".
+    expect(normalizeMineruBaseUrl('')).toBe('')
+    expect(normalizeMineruBaseUrl('   ')).toBe('')
+    expect(normalizeMineruBaseUrl('10.0.0.5:8000')).toBe('')
+    expect(normalizeMineruBaseUrl('file:///etc/passwd')).toBe('')
+    expect(normalizeMineruBaseUrl('ftp://host:21')).toBe('')
+    expect(normalizeMineruBaseUrl(undefined)).toBe('')
+    expect(normalizeMineruBaseUrl(42)).toBe('')
+  })
+
+  it('keeps the stored value round-tripping through the settings file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-mineru-'))
+    try {
+      const viewDir = join(root, 'view')
+      // A fresh deployment reads the defaults, and the default is "derive from the port".
+      await expect(readSettings(viewDir)).resolves.toEqual(DEFAULT_KNOWLEDGE_SETTINGS)
+      expect(DEFAULT_KNOWLEDGE_SETTINGS.mineruBaseUrl).toBe('')
+
+      await writeSettings(viewDir, { reviewRequired: false, mineruBaseUrl: ' http://10.0.0.5:8000/ ' })
+      // Written normalised, not as typed.
+      await expect(readSettings(viewDir)).resolves.toEqual({
+        reviewRequired: false,
+        mineruBaseUrl: 'http://10.0.0.5:8000',
+      })
+
+      // Clearing it returns to the derived behaviour.
+      await writeSettings(viewDir, { reviewRequired: true, mineruBaseUrl: '' })
+      await expect(readSettings(viewDir)).resolves.toEqual({ reviewRequired: true, mineruBaseUrl: '' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reads a hand-edited or foreign value as "not configured"', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-mineru-bad-'))
+    try {
+      const viewDir = join(root, 'view')
+      await mkdir(viewDir, { recursive: true })
+      // A corrupt setting costs the reader their preference, not the page: "derive from
+      // the port" is always a working answer, so an unusable value reads as empty.
+      await writeFile(
+        join(viewDir, '.kb-settings.json'),
+        JSON.stringify({ reviewRequired: true, mineruBaseUrl: 'not-a-url' }),
+        'utf8',
+      )
+      await expect(readSettings(viewDir)).resolves.toEqual({ reviewRequired: true, mineruBaseUrl: '' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('prefers an explicit address over the derived port', () => {
+    // The deployment-level fallback and the per-caller setting are the same shape: an
+    // address wins, an empty one falls back.
+    expect(mineruUrlFor(configWith({ mineruBaseUrl: 'http://mineru.gateway:9000' }))).toBe('http://mineru.gateway:9000')
+    expect(mineruUrlFor(configWith({ mineruBaseUrl: 'http://mineru.gateway:9000/' }))).toBe('http://mineru.gateway:9000')
+    expect(mineruUrlFor(configWith({ mineruBaseUrl: '' }))).toBe('http://127.0.0.1:8000')
+    expect(mineruUrlFor(configWith({ mineruBaseUrl: '   ' }))).toBe('http://127.0.0.1:8000')
+    // An unusable configured value must not be handed to the extractor as if it worked.
+    expect(mineruUrlFor(configWith({ mineruBaseUrl: 'file:///x' }))).toBe('http://127.0.0.1:8000')
+    // And the port derivation still honours its own invalid case.
+    expect(mineruUrlFor(configWith({ mineruBaseUrl: '', mineruPort: 0 }))).toBeUndefined()
+  })
+})
+
+describe('the settings write keeps older callers working', () => {
+  /**
+   * `settings.set` gained a field. An older client that sends only the review toggle must
+   * keep working AND must not clear an address it never mentioned -- otherwise upgrading
+   * the Host silently resets the operator's configured service.
+   */
+  const settingsSource = async (): Promise<string> =>
+    readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+
+  it('treats an absent address as "leave it alone", not as empty', async () => {
+    const source = await settingsSource()
+    const branch = source.slice(source.indexOf("case 'settings.set'"))
+    // Absent -> read the stored value back and keep it.
+    expect(branch.slice(0, 2400)).toMatch(/body\.mineruBaseUrl === undefined/u)
+    expect(branch.slice(0, 2400)).toMatch(/\(await readSettings\(viewDir\)\)\.mineruBaseUrl/u)
+    // Present but not a string is a client bug, refused rather than coerced.
+    expect(branch.slice(0, 2400)).toMatch(/typeof body\.mineruBaseUrl !== 'string'/u)
+  })
+
+  it('refuses an address that is not an absolute http(s) URL', async () => {
+    const source = await settingsSource()
+    const branch = source.slice(source.indexOf("case 'settings.set'"))
+    expect(branch.slice(0, 2400)).toMatch(/new URL\(candidate\)/u)
+    expect(branch.slice(0, 2400)).toMatch(/protocol !== 'http:'/u)
+    // The refusal is a 400, not a silently stored bad value.
+    expect(branch.slice(0, 2400)).toMatch(/writeJson\(res, 400/u)
+  })
+
+  it('still requires the review flag, which every write already sent', async () => {
+    const source = await settingsSource()
+    const branch = source.slice(source.indexOf("case 'settings.set'"))
+    expect(branch.slice(0, 1200)).toMatch(/typeof body\.reviewRequired !== 'boolean'/u)
+  })
+
+  it('renders the field on the surface a reader can actually reach', async () => {
+    // 落点是这一项的真实风险：上一版把它加在 `KnowledgeSettings.tsx`，而真机点侧边栏
+    // 「设置」打开的是 DSH 全局设置弹窗，那一页不可达，于是字段用户永远看不到。
+    // 断言落在 DSH 全局设置的知识库分节（`KnowledgeSettingsSection.tsx`）上。
+    const section = await readFile(new URL('../src/client/KnowledgeSettingsSection.tsx', import.meta.url), 'utf8')
+    expect(section).toMatch(/id="kb-mineru-base-url"/u)
+    expect(section).toMatch(/KB_API\.settingsGet/u)
+    expect(section).toMatch(/KB_API\.settingsSet/u)
+    // 保存必须由显式动作提交，而不是每次按键就写盘。
+    expect(section).toMatch(/saveMineru/u)
+    // 没授权的人能看到值但改不了。
+    expect(section).toMatch(/disabled=\{!mineru\.canEdit/u)
+
+    // 不可达的那一页不再留第二处入口，避免两套 UI 各自演化。
+    const unreachable = await readFile(new URL('../src/client/KnowledgeSettings.tsx', import.meta.url), 'utf8')
+    expect(unreachable).not.toMatch(/settingsMineruHeading/u)
+  })
+
+  it('feeds the caller setting into extraction, which is what makes it do anything', async () => {
+    // The whole point: a stored value nothing reads is not a feature. The upload route
+    // must pass the caller's own address to `extractBeside`.
+    const source = await settingsSource()
+    expect(source).toMatch(/export async function extractBeside\(\s*config: Config,\s*relPath: string,\s*mineruUrl\?: string,/u)
+    expect(source).toMatch(/extractBeside\(config, relPath, uploadSettings\.mineruBaseUrl\)/u)
+    // And the override outranks the deployment answer inside the extractor.
+    const body = source.slice(source.indexOf('export async function extractBeside'))
+    expect(body.slice(0, 1400)).toMatch(/mineruUrl !== undefined && mineruUrl !== '' \? mineruUrl : mineruUrlFor\(config\)/u)
+  })
 })

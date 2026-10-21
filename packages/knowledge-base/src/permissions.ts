@@ -27,6 +27,10 @@
  * @module @sparkelf/dsh-knowledge-base/permissions
  */
 
+// One shared definition of "may this code be a directory name", so the role's path
+// prefix and the view's folder layout cannot disagree about what a valid chain is.
+import { usableDepartmentPath } from './views.ts'
+
 /**
  * One action a caller can hold on a knowledge path.
  *
@@ -251,10 +255,29 @@ export function builtInRoleOf(id: string): BuiltInRole | undefined {
 /**
  * The path prefix a department-scoped role covers.
  *
- * @param departmentCode - the caller's department, as DataOps reported it.
- * @returns `department/<code>/`, or undefined when there is no department.
+ * With an organization path the prefix is the caller's OWN department folder inside
+ * the nested layout, `department/<ancestor>/.../<own>/`. A department administrator
+ * manages their own department's documents, not an ancestor's: a parent folder holds
+ * sibling departments they have no business in.
+ *
+ * The nested prefix ends with the caller's own code and starts at the organization
+ * root, because the path is root-first. That is why this returns a whole prefix
+ * rather than a bare code: the caller's code alone appears at several depths.
+ *
+ * Without a usable path (an older backend) the legacy single-level
+ * `department/<code>/` is returned, so an un-upgraded deployment keeps exactly the
+ * permissions it had.
+ *
+ * @param departmentCode - the caller's own department code.
+ * @param departmentPathCodes - the caller's organization path, root first.
+ * @returns The prefix, or undefined when there is no department to scope to.
  */
-export function departmentScopeOf(departmentCode: string | undefined): string | undefined {
+export function departmentScopeOf(
+  departmentCode: string | undefined,
+  departmentPathCodes?: readonly string[],
+): string | undefined {
+  const path = usableDepartmentPath(departmentPathCodes)
+  if (path.length > 0) return 'department/' + path.join('/') + '/'
   if (departmentCode === undefined || departmentCode.trim() === '') return undefined
   return 'department/' + departmentCode.trim() + '/'
 }
@@ -262,29 +285,31 @@ export function departmentScopeOf(departmentCode: string | undefined): string | 
 /**
  * Whether one built-in role covers one path for one caller.
  *
- * `department/<code>/` is compared as a PREFIX of the finished path, so
- * `department/OPS/` covers `department/OPS/值班表.md` but never
- * `department/OPS2/...`. The trailing slash in
- * {@link departmentScopeOf} is what makes that exact rather than a string-prefix
- * coincidence.
+ * The prefix is compared as a PREFIX of the finished path, so a department
+ * administrator's own folder covers everything inside it but never a peer's. The
+ * nested prefix carries the caller's whole chain, so `department/A/B/` covers
+ * `department/A/B/2026/计划.md` and never `department/A/C/...`: sharing the ancestor
+ * `A` is not enough to reach a sibling.
  *
  * @param roleId - the built-in role's id.
  * @param relPath - path relative to the knowledge root.
  * @param departmentCode - the caller's department, when they have one.
+ * @param departmentPathCodes - the caller's organization path, root first.
  * @returns true when the role confers its actions on that path for that caller.
  */
 export function builtInRoleCoversPath(
   roleId: string,
   relPath: string,
   departmentCode: string | undefined,
+  departmentPathCodes?: readonly string[],
 ): boolean {
   const role = builtInRoleOf(roleId)
   if (role === undefined) return false
   if (!role.departmentScoped) return true
-  const scope = departmentScopeOf(departmentCode)
+  const scope = departmentScopeOf(departmentCode, departmentPathCodes)
   if (scope === undefined) return false
-  // The bare bucket is covered too: a department administrator manages the folder
-  // itself, not only the documents inside it.
+  // The bucket and the caller's own department folder are covered too: a department
+  // administrator manages their department's container, not only the documents in it.
   if (relPath === 'department') return true
   return relPath.startsWith(scope) || relPath === scope.slice(0, -1)
 }
@@ -295,16 +320,18 @@ export function builtInRoleCoversPath(
  * @param roleId - role id.
  * @param relPath - path relative to the knowledge root.
  * @param departmentCode - the caller's department, when they have one.
+ * @param departmentPathCodes - the caller's organization path, root first.
  * @returns the concrete actions, empty when the role does not cover the path.
  */
 export function builtInRoleActionsOn(
   roleId: string,
   relPath: string,
   departmentCode: string | undefined,
+  departmentPathCodes?: readonly string[],
 ): ConcreteKnowledgeAction[] {
   const role = builtInRoleOf(roleId)
   if (role === undefined) return []
-  if (!builtInRoleCoversPath(roleId, relPath, departmentCode)) return []
+  if (!builtInRoleCoversPath(roleId, relPath, departmentCode, departmentPathCodes)) return []
   return expandActions(role.actions)
 }
 
@@ -330,6 +357,7 @@ export interface RoleDecision {
  * @param relPath - path relative to the knowledge root.
  * @param action - the action being attempted.
  * @param departmentCode - the caller's department, when they have one.
+ * @param departmentPathCodes - the caller's organization path, root first.
  * @returns the decision, with a reason whenever it is negative.
  */
 export function decideRoleAction(
@@ -337,17 +365,18 @@ export function decideRoleAction(
   relPath: string,
   action: KnowledgeAction,
   departmentCode: string | undefined,
+  departmentPathCodes?: readonly string[],
 ): RoleDecision {
   const role = builtInRoleOf(roleId)
   if (role === undefined) {
     return { covered: false, actions: [], reason: 'unknown role: ' + roleId }
   }
-  if (!builtInRoleCoversPath(roleId, relPath, departmentCode)) {
+  if (!builtInRoleCoversPath(roleId, relPath, departmentCode, departmentPathCodes)) {
     return {
       covered: false,
       actions: [],
       reason: role.departmentScoped
-        ? 'this path is outside department ' + (departmentCode ?? '(none)')
+        ? 'this path is outside department ' + (departmentScopeOf(departmentCode, departmentPathCodes) ?? '(none)')
         : 'this path is outside the role',
     }
   }

@@ -163,11 +163,6 @@ export function KnowledgeTrash(props: KnowledgeTrashProps) {
 
   return (
     <div className={styles.surface}>
-      {/* The retention rule is the part the header does not carry, so it stays even
-          when the table is empty: it answers "what happens to this" before there is
-          anything to ask about. */}
-      <p className={tableStyles.pageHint}>{c('trashDisabled')}</p>
-
       {notice !== undefined && <p className={styles.notice}>{notice}</p>}
       {state.kind === 'error' && <p className={styles.notice}>{state.message}</p>}
       {state.kind === 'ready' && state.error !== undefined && (

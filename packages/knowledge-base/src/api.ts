@@ -95,11 +95,24 @@ export const KB_API = {
    *
    * A template is a DataOps wiki page whose category is `report_template`, so the
    * Host relays `GET /api/resources/wiki/pages/templates` rather than keeping a
-   * template store of its own. The list is empty today: the wiki holds no page in
-   * that category yet, and this surface reports that rather than inventing rows.
+   * second copy to keep in step.
    */
   templates: 'templates',
+  /**
+   * Add or replace one template: a document file plus its metadata.
+   *
+   * A template is exactly a document plus a small record describing it, so this
+   * route takes the file's text and the metadata in one body rather than modelling
+   * a second kind of object. The document is written through the same create/upload
+   * path a reader's own file uses, under a template directory the knowledge base
+   * owns, and the metadata goes beside it.
+   */
+  templateSave: 'template.save',
+  /** Remove one template: its document and its metadata record. */
+  templateRemove: 'template.remove',
   /** Read the caller's pinned paths. */
+  favoritesGet: 'favorites.get',
+  favoritesSet: 'favorites.set',
   pinsGet: 'pins.get',
   /** Replace the caller's pinned paths. */
   pinsSet: 'pins.set',
@@ -166,11 +179,22 @@ export const KB_API = {
    * to it stays meaningful; the Host resynchronizes the caller's view afterwards,
    * because a moved file's old path is a dead link until it does.
    */
+  copy: 'copy',
   move: 'move',
   /** Read the caller's list/grid preference. */
   viewModeGet: 'viewMode.get',
   /** Replace the caller's list/grid preference. */
   viewModeSet: 'viewMode.set',
+  /**
+   * Read which folders the caller had open in the explorer.
+   *
+   * Beside the layout preference for the same reason: it describes how this reader
+   * looks at the tree rather than what is in it, so it belongs to the caller's view
+   * instead of one browser's storage.
+   */
+  treeStateGet: 'treeState.get',
+  /** Replace the set of expanded folders. */
+  treeStateSet: 'treeState.set',
   /** The ordered deployment steps and their recent runs. */
   deploySteps: 'deploy.steps',
   /** SSH hosts available as deployment targets. */
@@ -334,8 +358,20 @@ export interface KnowledgeStatusView {
    * Absent when the backend is unconfigured or did not answer. The page uses it to
    * name the actor on editor saves, so the audit trail records a person rather than
    * an anonymous edit.
+   *
+   * The organization path is optional because the backend may not report it: an older
+   * DataOps answers only `code`/`name`, and the tree then labels the department bucket
+   * with that single name exactly as it did before hierarchy existed. Code that
+   * assumed the path was present would break against such a backend.
    */
-  caller?: { userId: string; label: string }
+  caller?: {
+    userId: string
+    label: string
+    departmentCode?: string
+    departmentName?: string
+    departmentPathCodes?: string[]
+    departmentPathNames?: string[]
+  }
   /** Visible file count, or null when the backend is not configured. */
   visibleFiles: number | null
   /** ISO-8601 time of the last successful synchronization. */
@@ -445,6 +481,25 @@ export interface PinnedView {
 }
 
 /**
+ * The caller's favourited paths, as the browser renders them.
+ *
+ * A star marks a row the reader wanted to find again, so the list is addressed by
+ * `relPath` only: every entry has already been resolved as readable for this caller.
+ * Kept apart from {@link PinnedView} deliberately -- see `favoritesPathFor`.
+ */
+export interface FavoritesView {
+  /** Paths the caller starred, relative to the mount point. */
+  relPaths: string[]
+  /**
+   * Paths dropped because the caller may no longer read them.
+   *
+   * Reported rather than silently discarded, so a star that disappears after a
+   * revoke can be explained instead of looking like a bug.
+   */
+  dropped: string[]
+}
+
+/**
  * One entry the caller may move, as the move route reports it.
  *
  * Returned instead of a bare boolean so the caller can tell a refusal apart from a
@@ -476,4 +531,78 @@ export interface MoveResultView {
 export interface ViewModeView {
   /** The stored layout. */
   mode: 'list' | 'grid' | 'explorer'
+}
+
+/**
+ * The folders the caller had open in the explorer, as absolute paths.
+ *
+ * Absolute rather than tree-relative because that is the vocabulary the explorer
+ * speaks: it reports `onToggle` with the absolute path of the row and takes
+ * `expanded` the same way. Storing them in that form means neither side has to
+ * re-derive the root, and a folder that a grant revoke removed simply never
+ * matches a row again rather than pointing at some other directory's new occupant.
+ *
+ * An empty list is the correct answer both for "the reader has collapsed
+ * everything" and for "nothing was ever stored", which is why the two share one
+ * representation: the tree's default state IS all-collapsed.
+ */
+export interface TreeStateView {
+  /** Absolute paths of the folders the reader had expanded. */
+  expanded: string[]
+}
+
+/**
+ * One template: a document plus the metadata that describes it.
+ *
+ * Deliberately a flat record rather than a model with its own identity rules: the
+ * `id` is derived from the file name inside the template directory, so a template
+ * cannot exist without its document and deleting one cannot leave the other behind.
+ */
+export interface KnowledgeTemplateView {
+  /** Stable id, derived from the stored file's name. */
+  id: string
+  /** Display name. */
+  title: string
+  /** One-line description shown on the card. */
+  description: string
+  /** Grouping label, e.g. `report` or `meeting`. */
+  category: string
+  /** Free-form tags, already split. */
+  tags: string[]
+  /** The document's file name including its extension. */
+  fileName: string
+  /** Extension without the dot, lower-cased; drives the card's file badge. */
+  extension: string
+  /** Document size in bytes. */
+  bytes: number
+  /** Last-modified instant, ISO-8601. */
+  updatedAt: string
+  /** Where the document lives, relative to the knowledge root. */
+  relPath: string
+}
+
+/** The template library as the Host answers it. */
+export interface KnowledgeTemplatesView {
+  /** Every stored template, newest first. */
+  templates: KnowledgeTemplateView[]
+  /** Set when the list was read but the store could not be (never both). */
+  error?: string
+}
+
+/** The body of one template save. */
+export interface KnowledgeTemplateSaveInput {
+  /** Display name; also used to derive the file name when the document is new. */
+  title: string
+  /** One-line description. */
+  description: string
+  /** Grouping label. */
+  category: string
+  /** Free-form tags. */
+  tags: string[]
+  /** The document's text. Required when creating, omitted when only metadata changes. */
+  content?: string
+  /** The file name to store, including its extension. */
+  fileName: string
+  /** Set when editing an existing template, so its document is replaced in place. */
+  id?: string
 }

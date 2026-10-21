@@ -12,12 +12,21 @@
  * what the primitive's `getAnchorRect` hook is for: a context menu opens where the reader
  * clicked, not below the row's own control.
  *
+ * Every action here is a call to a route that already exists. Sharing is `grant`, the
+ * star is `favorites.set`, and paste dispatches on what the clipboard holds: a cut pastes
+ * through `move`, a copy through `copy`. Both resolve the destination from the entry's own
+ * name, so a paste cannot rename; both carry a directory's whole subtree. The clipboard is
+ * a client-side pair of paths and a flag -- nothing about a pending paste is worth a
+ * server-side record, and a clipboard that survived a reload would be a paste the reader
+ * could no longer see they had armed.
+ *
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
 import { useCallback, useState } from 'react'
 import { Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
+import { KnowledgeShareDialog, type ShareDialogCopy } from './KnowledgeShareDialog.tsx'
 
 /** One row the menu can act on. */
 export interface ContextTarget {
@@ -29,6 +38,16 @@ export interface ContextTarget {
   isDir: boolean
 }
 
+/** The clipboard the copy/cut entries fill. */
+export interface TreeClipboard {
+  /** The path that was copied or cut. */
+  relPath: string
+  /** Its display name, so the paste label can name the entry. */
+  name: string
+  /** True when the source is removed on paste (cut); false for a copy request. */
+  cut: boolean
+}
+
 /** Props for the context menu. */
 export interface KnowledgeContextMenuProps {
   /** The row the menu is open on, or null when closed. */
@@ -37,6 +56,8 @@ export interface KnowledgeContextMenuProps {
   at: { x: number; y: number } | null
   /** Copy resolver for this package's namespace. */
   t: (key: string) => string
+  /** Copy for the share dialog, which carries its own key set. */
+  shareCopy: ShareDialogCopy
   /** Close the menu. */
   onClose: () => void
   /** Open the permission surface for this path. */
@@ -45,10 +66,31 @@ export interface KnowledgeContextMenuProps {
   onPin: (path: string, pinned: boolean) => void
   /** Whether this path is currently pinned. */
   pinned: boolean
+  /** Toggle the favourite state for this path. */
+  onFavorite: (path: string, favorite: boolean) => void
+  /** Whether this path is currently favourited. */
+  favorite: boolean
   /** Insert a reference to this path into the conversation. */
   onReference: (path: string, isDir: boolean) => void
   /** Called after a rename succeeds, so the page reloads the tree. */
   onRenamed: () => void
+  /** Called after a delete-to-trash succeeds, so the page reloads the tree. */
+  onDeleted: () => void
+  /** What the clipboard currently holds, or null when it is empty. */
+  clipboard: TreeClipboard | null
+  /** Put one entry on the clipboard. Recording only; nothing moves until paste. */
+  onClipboard: (entry: TreeClipboard | null) => void
+  /**
+   * The directory a paste would land in.
+   *
+   * For a directory row the target is that directory; for a file it is the file's
+   * parent. The menu states it so a paste never lands somewhere the reader cannot see,
+   * and `null` means the destination is unknown, which disables the entry rather than
+   * guessing.
+   */
+  pasteInto: string | null
+  /** Called after a paste succeeds, so the page reloads both affected levels. */
+  onMoved: () => void
 }
 
 /**
@@ -87,6 +129,15 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
   const { target, at, t, onClose } = props
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | undefined>(undefined)
+  /**
+   * The row the share dialog is open for, captured when the menu row is chosen.
+   *
+   * The menu and the dialog have different lifetimes: choosing "Share" closes the menu,
+   * and the parent then clears `target` -- so a dialog reading the live target would
+   * unmount in the same commit that opened it. Holding the row here is what lets the
+   * dialog outlive the menu.
+   */
+  const [shareTarget, setShareTarget] = useState<ContextTarget | null>(null)
 
   /**
    * Position the dropdown at the pointer.
@@ -152,32 +203,139 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
     }
   }
 
-  if (target === null || at === null) return null
+  /** Remove the row into the caller's own trash. */
+  const remove = async (row: ContextTarget): Promise<void> => {
+    setBusy(true); setNotice(undefined)
+    try {
+      const response = await fetch(kbApiPath(KB_API.trashRemove), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        // `kind` lets the tombstone say a whole directory disappeared rather than a
+        // file, which is what the trash page words its rows from.
+        body: JSON.stringify({ relPath: row.relPath, kind: row.isDir ? 'directory' : 'file' }),
+        cache: 'no-store',
+      })
+      const body = await readKnowledgeJson<{ error?: string }>(response)
+      if (!response.ok || body.error !== undefined) {
+        throw new Error(body.error ?? 'HTTP ' + String(response.status))
+      }
+      onClose()
+      props.onDeleted()
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : t('deleteFailed'))
+    } finally {
+      setBusy(false)
+    }
+  }
 
-  const items: MenuEntry[] = [
+  /**
+   * Paste the clipboard entry into this row's directory.
+   *
+   * The route follows the clipboard's own flag, because those are the two different
+   * promises the reader was made: a cut pastes through `move` and the source disappears,
+   * a copy through `copy` and the source stays. Doing both with `move` would delete a
+   * file the reader asked to duplicate. Both routes resolve the destination name from the
+   * source path, so neither can rename, and both carry a directory's whole subtree.
+   *
+   * The refusal is surfaced rather than swallowed, because a paste that silently did
+   * nothing is the one outcome a clipboard must not have.
+   */
+  const paste = async (): Promise<void> => {
+    const clip = props.clipboard
+    const into = props.pasteInto
+    if (clip === null || into === null) return
+    setBusy(true); setNotice(undefined)
+    try {
+      const response = await fetch(kbApiPath(clip.cut ? KB_API.move : KB_API.copy), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ from: clip.relPath, to: into }),
+        cache: 'no-store',
+      })
+      const body = await readKnowledgeJson<{ error?: string }>(response)
+      if (!response.ok || body.error !== undefined) {
+        throw new Error(body.error ?? 'HTTP ' + String(response.status))
+      }
+      onClose()
+      props.onMoved()
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : t('pasteFailed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // The menu is positioned from the pointer and needs a row; the share dialog is a
+  // separate overlay with its own lifetime, so it is rendered even when the menu has
+  // already closed (which is exactly what choosing "Share" does). `row` is the
+  // non-null view of the target the menu handlers close over.
+  const menuOpen = target !== null && at !== null
+  const row: ContextTarget | null = menuOpen ? target : null
+
+  const clipboardEmpty = props.clipboard === null || props.pasteInto === null
+  const items: MenuEntry[] = row !== null ? [
     // A directory has no bytes to save, so the row is absent rather than disabled: a
     // permanently disabled entry teaches the reader nothing.
-    ...(target.isDir ? [] : [{ id: 'download', label: t('actionDownload'), disabled: busy }]),
+    ...(row.isDir ? [] : [{ id: 'download', label: t('actionDownload'), disabled: busy }]),
     { id: 'rename', label: t('actionRename'), disabled: busy },
-    { type: 'separator', id: 'sep-1' },
+    { id: 'share', label: t('actionShare') },
+    { id: 'favorite', label: props.favorite ? t('actionUnfavorite') : t('actionFavorite') },
+    { type: 'separator', id: 'sep-clip' },
+    { id: 'copy', label: t('actionCopy') },
+    { id: 'cut', label: t('actionCut') },
+    {
+      id: 'paste',
+      // Disabled with an empty clipboard, and when there is no known destination. The
+      // label names what will be pasted, so a paste is never a surprise about content
+      // or about where it went.
+      label: clipboardEmpty
+        ? t('actionPaste')
+        : (props.clipboard?.cut === true ? t('actionPasteCut') : t('actionPasteCopy'))
+          + ' ' + (props.clipboard?.name ?? ''),
+      disabled: busy || clipboardEmpty,
+    },
+    { type: 'separator', id: 'sep-2' },
     { id: 'pin', label: props.pinned ? t('actionUnpin') : t('actionPin') },
     { id: 'reference', label: t('actionReference') },
-    { type: 'separator', id: 'sep-2' },
+    { type: 'separator', id: 'sep-3' },
     { id: 'grant', label: t('actionPermissions') },
-  ]
+    { id: 'delete', label: t('actionDelete'), danger: true, disabled: busy },
+  ] : []
 
   return (
     <>
       <Menu
-        open
+        open={menuOpen}
         anchor={<span />}
         items={items}
         onSelect={(id) => {
-          if (id === 'download') { void download(target); return }
-          if (id === 'rename') { void rename(target); return }
-          if (id === 'pin') { props.onPin(target.relPath, !props.pinned); onClose(); return }
-          if (id === 'reference') { props.onReference(target.relPath, target.isDir); onClose(); return }
-          if (id === 'grant') { props.onGrant(target.relPath); onClose() }
+          // The menu only exists while `row` is set; this keeps the handlers typed
+          // against a real target rather than re-checking at each branch.
+          if (row === null) return
+          if (id === 'download') { void download(row); return }
+          if (id === 'rename') { void rename(row); return }
+          if (id === 'share') {
+            // Capture first: `onClose` clears the parent's target in the same commit.
+            setShareTarget(row)
+            onClose()
+            return
+          }
+          if (id === 'favorite') { props.onFavorite(row.relPath, !props.favorite); onClose(); return }
+          if (id === 'copy') {
+            props.onClipboard({ relPath: row.relPath, name: row.name, cut: false })
+            onClose()
+            return
+          }
+          if (id === 'cut') {
+            props.onClipboard({ relPath: row.relPath, name: row.name, cut: true })
+            onClose()
+            return
+          }
+          if (id === 'paste') { void paste(); return }
+          if (id === 'pin') { props.onPin(row.relPath, !props.pinned); onClose(); return }
+          if (id === 'reference') { props.onReference(row.relPath, row.isDir); onClose(); return }
+          if (id === 'grant') { props.onGrant(row.relPath); onClose() }
+          if (id === 'delete') { void remove(row) }
         }}
         onClose={onClose}
         portal
@@ -187,6 +345,16 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
         autoFocus
       />
       {notice !== undefined && <p role="alert">{notice}</p>}
+      <KnowledgeShareDialog
+        relPath={shareTarget === null ? null : shareTarget.relPath}
+        isDir={shareTarget?.isDir === true}
+        copy={props.shareCopy}
+        onClose={() => { setShareTarget(null) }}
+        onShared={() => {
+          setShareTarget(null)
+          props.onRenamed()
+        }}
+      />
     </>
   )
 }

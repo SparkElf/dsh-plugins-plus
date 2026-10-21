@@ -100,6 +100,34 @@
   margin-left: 0;
 }
 
+/* The favourites star, drawn immediately before the date.
+   It carries the row's auto margin only while it is present, so the star and the
+   timestamp travel together to the right edge as one group and a row without a star
+   keeps exactly the layout it had. `.entryTime` gives its own auto margin up when a
+   star precedes it (`+`), otherwise the two would push in opposite directions and
+   leave a gap between them. Both release the margin on hover for the same reason the
+   timestamp already does: the trailing `@` button owns the right edge while it shows.
+   `--dsw-static-amber-500` is the set's only warm stop, which is what makes a star
+   read as a star rather than as one more grey glyph. */
+.entryFavorite {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--dsw-static-amber-500);
+  font: var(--dsw-font-xxs-12);
+  line-height: 1;
+}
+
+.entryFavorite + .entryTime {
+  margin-left: 0;
+  padding-left: 4px;
+}
+
+.entry:hover .entryFavorite,
+.entry:focus-within .entryFavorite {
+  margin-left: 0;
+}
+
 /* The hover-revealed reference button at the row's far right. Its label is the
    explorer's own `@文件` / `@file` string rather than a bare `@`, so a reader
    sees the same affordance in both trees. Hidden rows keep the name at full

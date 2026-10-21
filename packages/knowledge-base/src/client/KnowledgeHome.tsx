@@ -16,10 +16,9 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { ownerLabelOf } from './ownerLabel.ts'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  IconChevronDownOutlineRegular,
-  IconChevronUpOutlineRegular,
   IconFolderOpenOutlineRegular,
   IconListPenOutlineRegular,
   IconPlusOutlineRegular,
@@ -31,6 +30,13 @@ import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgeHome.module.css'
 import panelStyles from './KnowledgePanel.module.css'
 import { KnowledgeTemplates } from './KnowledgeTemplates.tsx'
+import { KnowledgeCreateDialog, defaultDestination, type CreateMode } from './KnowledgeCreateDialog.tsx'
+import {
+  KnowledgeContextMenu,
+  type ContextTarget,
+  type TreeClipboard,
+} from './KnowledgeContextMenu.tsx'
+import { shareCopyFor } from './knowledgeMenuCopy.ts'
 
 /** One document row, as the table renders it. */
 interface HomeRow {
@@ -83,6 +89,18 @@ export interface KnowledgeHomeProps {
   /** Open one document in the preview. */
   onOpen: (path: string) => void
   /**
+   * The caller's DataOps id, when the status route reported one.
+   *
+   * Used only to choose where a create lands by default: with no current directory
+   * the reader's own `personal/<id>` folder is the one place a new draft cannot
+   * surprise a colleague, so it is preferred over `global`.
+   */
+  callerId?: string
+  /** The caller's own department code, so the owner cell can name it instead of a slug. */
+  departmentCode?: string
+  /** The caller's own department name; the code stands in when this is absent. */
+  departmentName?: string
+  /**
    * The tab whose card should take focus on mount.
    *
    * Set when a reader arrives here from the tree's empty state, which is asking
@@ -90,6 +108,31 @@ export interface KnowledgeHomeProps {
    * so it is the one that should be reachable by keyboard immediately.
    */
   focusNew?: boolean
+  /**
+   * Star or unstar one row.
+   *
+   * The Home table is the surface a reader actually starts from, so the context menu
+   * lives here as well as on the tree. Omitted by a caller with no favourites store,
+   * which keeps the menu's star entry out rather than offering a write that cannot land.
+   */
+  onFavorite?: (path: string, favorite: boolean) => void
+  /** Whether one path is currently favourited, so the row can draw its star. */
+  isFavorite?: (path: string) => boolean
+  /** Open the permission surface for one path. */
+  onGrant?: (path: string) => void
+  /** Insert a reference to this path into the conversation. */
+  onReference?: (path: string, isDir: boolean) => void
+  /** Pin or unpin one row, offered by the same menu the tree uses. */
+  onPin?: (path: string, pinned: boolean) => void
+  /** Whether one path is currently pinned. */
+  isPinned?: (path: string) => boolean
+  /**
+   * Called after any menu action that changed the tree.
+   *
+   * The table holds its own rows, so a rename/delete/paste has to be followed by a
+   * re-read; the page owns the tick that triggers it.
+   */
+  onTreeChanged?: () => void
 }
 
 /** Format one instant for the table, matching the preview's own absolute form. */
@@ -118,13 +161,13 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [tab, setTab] = useState<HomeTab>('recent')
   /**
-   * Which card's menu is open, or null.
+   * Which create/upload dialog is open, or undefined when none is.
    *
-   * One value rather than a flag per card, so "only one open at a time" is the
-   * shape of the state instead of a rule the handlers have to remember to enforce.
+   * The reference opened a dropdown under each card and then a browser `prompt` for
+   * the name, which cannot show or change where the file lands. The card is now a
+   * trigger for one dialog that asks both questions at once.
    */
-  const [openCard, setOpenCard] = useState<CardId | null>(null)
-  const cardsRef = useRef<HTMLDivElement | null>(null)
+  const [dialog, setDialog] = useState<CreateMode | undefined>(undefined)
   /**
    * What the last menu action did, so the reader sees an outcome.
    *
@@ -135,182 +178,92 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   const [notice, setNotice] = useState<string | null>(null)
   /** Whether the template library covers the surface. */
   const [templatesOpen, setTemplatesOpen] = useState(false)
-  /** A hidden file input's handle, so a menu row can open the reader's picker. */
-  const uploadRef = useRef<HTMLInputElement | null>(null)
+  /**
+   * The open context menu: which row, and where the pointer was.
+   *
+   * One menu for the whole table rather than one per row, because a row is re-created
+   * on every re-read and an open menu owned by a row would unmount with it.
+   */
+  const [menu, setMenu] = useState<{ target: ContextTarget; at: { x: number; y: number } } | null>(null)
+  /**
+   * The cut/copied entry, held for the clipboard's lifetime.
+   *
+   * Client state, like the tree's: nothing about a pending paste is worth persisting,
+   * and paste goes through the Host's own `copy` / `move` routes.
+   */
+  const [clipboard, setClipboard] = useState<TreeClipboard | null>(null)
+  /** Locale-resolved copy for the share dialog, whose strings are dialog-specific. */
+  const shareCopy = useMemo(() => shareCopyFor(props.locale), [props.locale])
 
 
 
-  // Close on an outside pointer. The card's own handler stops propagation, so
-  // reaching the document means the press was somewhere else.
-  useEffect(() => {
-    if (openCard === null) return
-    const close = (event: MouseEvent) => {
-      if (cardsRef.current !== null && event.target instanceof Node && cardsRef.current.contains(event.target)) return
-      setOpenCard(null)
-    }
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpenCard(null) }
-    document.addEventListener('mousedown', close)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', close)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [openCard])
-
-  // Read once per mount. The tree route answers one directory level, and the Home
-  // table lists documents rather than a tree, so only the mount's own level is
-  // read here: descending would turn a landing page into a filesystem walk.
-  const read = useCallback(async (): Promise<void> => {
-    if (props.mountPoint === '') {
-      setState('error')
-      return
-    }
-    setState('loading')
-    try {
-      const response = await fetch(kbApiPath(KB_API.list), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: '' }),
-        cache: 'no-store',
-      })
-      if (!response.ok) throw new Error('HTTP ' + String(response.status))
-      const body = await readKnowledgeJson<{
-        entries?: Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>
-      }>(response)
-      setRows((body.entries ?? [])
-        .filter(entry => !entry.isDir)
-        .map(entry => ({
+    // Read once per mount, one level deep in each bucket.
+    //
+    // Documents live inside the buckets, not beside them: the mount's own level holds
+    // only the three bucket directories, so listing it alone yields an empty table no
+    // matter how many documents exist. Each bucket is one directory deep, which is
+    // where a document sits, so the walk stops there instead of turning a landing page
+    // into a full filesystem scan.
+    const read = useCallback(async (): Promise<void> => {
+      if (props.mountPoint === '') {
+        setState('error')
+        return
+      }
+      setState('loading')
+      try {
+        const listLevel = async (path: string): Promise<Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>> => {
+          const response = await fetch(kbApiPath(KB_API.list), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path }),
+            cache: 'no-store',
+          })
+          if (!response.ok) throw new Error('HTTP ' + String(response.status))
+          const body = await readKnowledgeJson<{
+            entries?: Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>
+          }>(response)
+          return body.entries ?? []
+        }
+        const root = await listLevel('')
+        // A bucket that cannot be read must not hide the others; the tree reports
+        // per-row readability, so this surface stays a convenience listing.
+        const buckets = root.filter(entry => entry.isDir).map(entry => entry.relPath)
+        const nested = await Promise.all(buckets.map(async bucket => {
+          try {
+            return (await listLevel(bucket)).filter(entry => !entry.isDir)
+          } catch {
+            return []
+          }
+        }))
+        setRows(nested.flat().map(entry => ({
           relPath: entry.relPath,
           name: entry.name,
           location: locationOf(entry.relPath),
           ...(entry.mtimeMs === undefined ? {} : { mtimeMs: entry.mtimeMs }),
         })))
-      setState('ready')
-    } catch {
-      setState('error')
-    }
-  }, [props.mountPoint])
+        setState('ready')
+      } catch {
+        setState('error')
+      }
+    }, [props.mountPoint])
 
   useEffect(() => { void read() }, [read])
 
   /**
-   * Run one menu action.
+   * Which create/upload flow one card row starts.
    *
-   * `new-doc` and `new-folder` ask for a name first: the reference's menu opens an
-   * editor, and creating `未命名.md` unasked would put a file in the shared tree
-   * that nobody chose a name for. The prompt is the smallest honest stand-in for
-   * the editor this plugin does not have.
+   * The rows keep their `kind` vocabulary so the card table above stays data rather
+   * than wiring, but every one of them now opens the shared dialog instead of
+   * branching into a prompt or a hidden file input: the dialog is what makes "where
+   * does it go" a question the reader can answer.
    */
-  const runItem = useCallback(async (kind: CardItem['kind']) => {
+  const openDialogFor = useCallback((kind: CardItem['kind']): void => {
     if (kind === 'open-templates') {
-      setOpenCard(null)
       setTemplatesOpen(true)
       return
     }
-    const wantsDirectory = kind === 'new-folder' || kind === 'upload-folder'
-    if (kind === 'upload-file' || kind === 'upload-folder') {
-      // The page opens the reader's own picker and posts what they choose, which is
-      // how an upload works in a browser: the Host has no picker route, and the
-      // bytes never need to reach it before the reader has chosen them.
-      setOpenCard(null)
-      if (uploadRef.current !== null) {
-        const input = uploadRef.current
-        const wantsFolder = kind === 'upload-folder'
-        // `webkitdirectory` is what makes the row's promise true: the picker returns
-        // the folder's whole subtree, each file carrying its path relative to the
-        // chosen root. Without it the row could only offer a multi-file selection,
-        // which is not what "upload folder" says.
-        if (wantsFolder) input.setAttribute('webkitdirectory', '')
-        else input.removeAttribute('webkitdirectory')
-        input.multiple = true
-        input.dataset.folder = wantsFolder ? 'true' : 'false'
-        input.click()
-      }
-      return
-    }
-    const entered = window.prompt(c(wantsDirectory ? 'cardItemNewFolder' : 'cardItemNewDoc'))
-    const name = (entered ?? '').trim()
-    if (name === '') {
-      setNotice(c('cardNeedsPath'))
-      return
-    }
-    const relPath = wantsDirectory ? name : (name.endsWith('.md') ? name : name + '.md')
-    setOpenCard(null)
-    setNotice(c('cardBusyCreating'))
-    try {
-      const response = await fetch(kbApiPath(KB_API.create), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ relPath, kind: wantsDirectory ? 'directory' : 'file' }),
-        cache: 'no-store',
-      })
-      const body = (await response.json().catch(() => ({}))) as { error?: string }
-      if (!response.ok) {
-        // The Host's message names the reason (no write access, name taken), so it
-        // is shown rather than flattened into "failed".
-        setNotice(body.error ?? c('cardCreateFailed'))
-        return
-      }
-      setNotice(c('cardCreated') + ' ' + relPath)
-      await read()
-    } catch {
-      setNotice(c('cardCreateFailed'))
-    }
-  }, [c, props, read])
-
-  /**
-   * Upload the chosen files, one request each, and report what happened.
-   *
-   * One request per file rather than a batch body, because the Host checks write
-   * permission and the size ceiling per path: a single body carrying many files
-   * would have to decide what a partially-authorized batch means, and the honest
-   * answer is a per-file outcome anyway.
-   *
-   * A failure does not stop the run. The reader chose a folder; refusing the whole
-   * selection because one file collided with an existing name would make them guess
-   * which one. So every file is attempted and the summary names the failures.
-   *
-   * @param files - the chosen files, each carrying its path relative to the picked root.
-   * @returns Nothing; the outcome is reported through `notice`.
-   */
-  const uploadFiles = useCallback(async (files: File[]) => {
-    if (files.length === 0) return
-    setNotice(c('cardBusyCreating'))
-    let done = 0
-    const failed: string[] = []
-    for (const file of files) {
-      // `webkitRelativePath` is the folder the reader picked plus the file's place
-      // inside it, which is exactly the destination: uploading a folder recreates
-      // its shape in the tree rather than flattening it into one level.
-      const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
-      try {
-        const content = await file.text()
-        const response = await fetch(kbApiPath(KB_API.upload), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ relPath, content }),
-          cache: 'no-store',
-        })
-        if (response.ok) done += 1
-        else failed.push(relPath)
-      } catch {
-        failed.push(relPath)
-      }
-    }
-    if (failed.length === 0) {
-      setNotice(c('uploadDone').replace('{n}', String(done)))
-    } else {
-      // The count and the names, because "3 of 5 failed" alone leaves the reader
-      // with no way to tell which ones to retry.
-      setNotice(
-        c('uploadPartial')
-          .replace('{ok}', String(done))
-          .replace('{failed}', String(failed.length))
-          .replace('{names}', failed.slice(0, 3).join('、')),
-      )
-    }
-    await read()
-  }, [c, read])
+    setDialog(kind)
+  }, [])
 
   // "Recently opened" is the only set the tree can answer: its one time field is
   // the modification instant. The other three need an owner or a star per file,
@@ -369,7 +322,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
 
   return (
     <div className={styles.home}>
-      <div className={styles.cards} ref={cardsRef}>
+      <div className={styles.cards}>
         {/* A card, not a Button: the whole tile is the target and its own layout
             (plate, text, chevron) is the content. `Button` renders a fixed-height
             control whose label is a single line, so using it here would mean
@@ -379,72 +332,50 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
             `/root/projects/kb-notes/CARD-SPEC-VERIFIED-BY-KBUI.md`: a horizontal
             row, a 20.5 CSS px rounded colour plate, and the three parts vertically
             centred. The stylesheet carries the per-value provenance. */}
-        {cards.map(card => {
-          const open = openCard === card.id
-          return (
-            <div key={card.id} className={styles.cardSlot}>
-              <button
-                type="button"
-                className={styles.card}
-                data-card={card.id}
-                data-open={open ? 'true' : undefined}
-                aria-expanded={open}
-                aria-haspopup="menu"
-                // Autofocus only the blank-page card, and only when the caller asked:
-                // moving focus without being asked would steal it from the rail.
-                autoFocus={props.focusNew === true && card.id === 'new'}
-                disabled={props.mountPoint === ''}
-                onClick={() => { setOpenCard(open ? null : card.id) }}
-              >
-                <span className={styles.cardPlate} data-tone={card.tone} aria-hidden="true">{card.glyph}</span>
-                <span className={styles.cardText}>
-                  <span className={styles.cardTitle}>{card.title}</span>
-                  <span className={styles.cardBody}>{card.body}</span>
-                </span>
-                {/* The reference flips this arrow while the menu is open, so it
-                    reads as an expander rather than a navigation chevron. */}
-                <span className={styles.cardChevron} aria-hidden="true">
-                  {open ? <IconChevronUpOutlineRegular size={16} /> : <IconChevronDownOutlineRegular size={16} />}
-                </span>
-              </button>
-              {open && (
-                <ul className={styles.cardMenu} role="menu" aria-label={card.title}>
-                  {card.items.map(item => (
-                    <li key={item.kind}>
-                      {/* Every row does something: the two create rows and the two
-                          upload rows reach the Host, and the template row opens the
-                          library. Only an unmounted tree disables them, because
-                          there is then no destination. */}
-                      <button
-                        type="button"
-                        className={styles.cardMenuItem}
-                        role="menuitem"
-                        disabled={props.mountPoint === ''}
-                        onClick={() => { void runItem(item.kind) }}
-                      >
-                        {item.label}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )
-        })}
+        {cards.map(card => (
+          <div key={card.id} className={styles.cardSlot}>
+            <button
+              type="button"
+              className={styles.card}
+              data-card={card.id}
+              aria-expanded={dialog !== undefined && card.items.some(item => item.kind === dialog)}
+              aria-haspopup={card.id === 'template' ? 'dialog' : undefined}
+              // Autofocus only the blank-page card, and only when the caller asked:
+              // moving focus without being asked would steal it from the rail.
+              autoFocus={props.focusNew === true && card.id === 'new'}
+              disabled={props.mountPoint === ''}
+              // One card, one intent: the blank-page card starts a document, the
+              // upload card starts an upload, and the template card opens the library.
+              // A card with more than one row (a document OR a folder, a file OR a
+              // folder) still has a single obvious first action, so the extra rows
+              // stay as the dialog's own choice instead of a dropdown.
+              onClick={() => {
+                const first = card.items[0]
+                if (first !== undefined) openDialogFor(first.kind)
+              }}
+            >
+              <span className={styles.cardPlate} data-tone={card.tone} aria-hidden="true">{card.glyph}</span>
+              <span className={styles.cardText}>
+                <span className={styles.cardTitle}>{card.title}</span>
+                <span className={styles.cardBody}>{card.body}</span>
+              </span>
+            </button>
+          </div>
+        ))}
       </div>
 
-      {/* The reader's own picker. Hidden rather than styled: a browser decides what
-          a file control looks like, and the menu rows are the visible affordance. */}
-      <input
-        ref={uploadRef}
-        type="file"
-        className={styles.hiddenInput}
-        onChange={(event) => {
-          const chosen = [...(event.target.files ?? [])]
-          // Cleared so choosing the same files twice fires again: a file input keeps
-          // its value, and a second pick of the same names would otherwise do nothing.
-          event.target.value = ''
-          void uploadFiles(chosen)
+      {/* One dialog for all three actions. It asks the two questions the dropdown
+          could not: what is it called, and where does it go. Escape, the mask and
+          focus return belong to `Modal`, not to this file. */}
+      <KnowledgeCreateDialog
+        open={dialog !== undefined}
+        mode={dialog ?? 'new-doc'}
+        onClose={() => { setDialog(undefined) }}
+        defaultPath={defaultDestination(undefined, props.callerId)}
+        t={c}
+        onDone={(message) => {
+          setNotice(message)
+          void read()
         }}
       />
 
@@ -453,7 +384,15 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
       {notice !== null && <p className={panelStyles.notice} role="status">{notice}</p>}
 
       {templatesOpen && (
-        <KnowledgeTemplates t={props.t} onClose={() => { setTemplatesOpen(false) }} />
+        <KnowledgeTemplates
+          t={props.t}
+          onClose={() => { setTemplatesOpen(false) }}
+          mountPoint={props.mountPoint}
+          callerId={props.callerId}
+          // A template "use" writes a real document, so it opens like one: the same
+          // path a click on the file itself takes.
+          onOpen={(path) => { props.onOpen(path) }}
+        />
       )}
 
       <SegmentedTabs<HomeTab>
@@ -501,7 +440,20 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
               </tr>
             )}
             {visible.map(row => (
-              <tr key={row.relPath}>
+              <tr
+                key={row.relPath}
+                // On the row root, not on a cell: a right-click lands on whichever
+                // <td> the pointer happens to be over, and a handler on one cell would
+                // silently miss the other four. `preventDefault` is what suppresses the
+                // browser's own menu -- without it both menus open on top of each other.
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  setMenu({
+                    target: { relPath: row.relPath, name: row.name, isDir: false },
+                    at: { x: event.clientX, y: event.clientY },
+                  })
+                }}
+              >
                 <td>
                   {/* The title is the link and the rest of the row is data, so the
                       control belongs inside the cell rather than wrapping the row.
@@ -516,17 +468,74 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                   </button>
                 </td>
                 <td className={styles.muted}>{row.location}</td>
-                {/* Owner is drawn from grant data the tree does not carry, so the
-                    cell states that instead of naming a person guessed from the
-                    filename. */}
-                <td><Tag tone="quiet">{c('homeColOwnerUnset')}</Tag></td>
-                <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
+                {/* Ownership follows the bucket the document sits in, not a guess
+                    from its name: shared documents belong to everyone, a department
+                    folder to that department, and a personal folder to its owner. */}
+                <td>
+                  <Tag tone="quiet">
+                    {ownerLabelOf(
+                      row.relPath,
+                      {
+                        callerId: props.callerId,
+                        departmentCode: props.departmentCode,
+                        departmentName: props.departmentName,
+                      },
+                      {
+                        global: c('ownerGlobal'),
+                        self: c('ownerSelf'),
+                        unknown: row.relPath.startsWith('department/') ? c('bucketDepartment') : c('bucketPersonal'),
+                      },
+                    ).label}
+                  </Tag>
+                </td>
+                {/* The Created cell carries the favourites star on its LEFT, inside the
+                    same <td>. A separate cell would add a sixth column and shift every
+                    header, and the owner column was just accepted against this layout.
+                    The star leads the stamp so it reads as a mark on the row rather than
+                    as part of the date, and an unstarred row renders exactly as before. */}
+                <td className={styles.muted}>
+                  {props.isFavorite?.(row.relPath) === true && (
+                    <span className={styles.favoriteMark} aria-label={c('favoriteMark')} title={c('favoriteMark')}>★</span>
+                  )}
+                  {formatStamp(row.mtimeMs, locale)}
+                </td>
                 <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* One menu for the whole table, mounted outside the scroll container so it is
+          not clipped by it. Rows are re-read often; a menu owned by a row would unmount
+          mid-interaction. */}
+      <KnowledgeContextMenu
+        target={menu?.target ?? null}
+        at={menu?.at ?? null}
+        t={c}
+        shareCopy={shareCopy}
+        pinned={menu === null ? false : props.isPinned?.(menu.target.relPath) === true}
+        favorite={menu === null ? false : props.isFavorite?.(menu.target.relPath) === true}
+        clipboard={clipboard}
+        // Every row here is a file, so a paste lands beside it in its own directory.
+        pasteInto={menu === null ? null : (menu.target.relPath.includes('/')
+          ? menu.target.relPath.slice(0, menu.target.relPath.lastIndexOf('/'))
+          : '')}
+        onClose={() => { setMenu(null) }}
+        onGrant={(path) => { props.onGrant?.(path) }}
+        onPin={(path, pinned) => { props.onPin?.(path, pinned) }}
+        onFavorite={(path, favorite) => { props.onFavorite?.(path, favorite) }}
+        onReference={(path, isDir) => { props.onReference?.(path, isDir) }}
+        onClipboard={(entry) => { setClipboard(entry) }}
+        onRenamed={() => { props.onTreeChanged?.() }}
+        onDeleted={() => { props.onTreeChanged?.() }}
+        onMoved={() => {
+          // A cut consumes the clipboard (its source is gone); a copy keeps it so the
+          // same entry can be pasted into a second folder.
+          setClipboard(current => (current?.cut === true ? null : current))
+          props.onTreeChanged?.()
+        }}
+      />
     </div>
   )
 }

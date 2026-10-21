@@ -1,0 +1,213 @@
+/*
+ * The create/upload dialog's styles.
+ *
+ * Chrome, buttons and inputs are the primitives' own (`Modal`, `Button`, `Input`), so
+ * their colours and type steps already follow the active theme. What lives here is the
+ * form layout the primitives do not know about: the label/field/error stack, the
+ * breadcrumb bar, and the file list.
+ *
+ * No hardcoded font sizes and no colour literals: a type step comes from
+ * `font: var(--dsw-font-*)`, ink from `--dsw-alias-label-*`.
+ */
+
+/* The dialog body: fields stacked with one step between them. */
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* One labelled control: label, control, then its own hint or error underneath. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.fieldHint {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+/* An inline refusal: the field is usable, the value is not. */
+.fieldError {
+  color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+/* The composed target restated in full under the two controls that make it up. */
+.summary {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+  word-break: break-all;
+}
+
+/* ── destination picker ───────────────────────────────────────────────────────── */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* Root button, then one crumb per level, wrapping when the path is deep. */
+.pickerBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.crumbWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.crumbSep {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.crumb {
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+}
+
+.crumb:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The last crumb is where the reader already is; it states the position rather than
+   offering to go there again. */
+.crumb:disabled {
+  color: var(--dsw-alias-label-primary);
+  cursor: default;
+}
+
+/* The chosen directory, spelled out: the breadcrumb shows the shape, this shows the
+   value that will be written. */
+.pickerPath {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+}
+
+.pickerPathLabel {
+  flex: 0 0 auto;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+.pickerPathValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  font-family: var(--dsw-font-markdown-code);
+}
+
+/* Subdirectories of the shown level, scrolling rather than growing the dialog. */
+.pickerList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.pickerMuted {
+  margin: 0;
+  padding: 6px 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+.pickerRow {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+  text-align: start;
+  cursor: pointer;
+}
+
+.pickerRow:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ── upload ───────────────────────────────────────────────────────────────────── */
+
+.fileInput {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* One row per chosen file: its own relative name, and where it will land. */
+.fileList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.fileRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fileName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.fileTarget {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  font-family: var(--dsw-font-markdown-code);
+}

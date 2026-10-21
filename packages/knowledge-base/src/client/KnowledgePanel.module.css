@@ -765,3 +765,43 @@
 .surface + .surface > .subhead {
   margin-top: 0;
 }
+
+/* The confirmation line after an `@`-reference found a conversation.
+   It sits at the page's bottom-left rather than inside any column: the reference
+   can land in a conversation that is not the one on screen, so the note has to be
+   readable from wherever the reader is looking. */
+.referenceNote {
+  position: fixed;
+  inset-inline-start: 16px;
+  inset-block-end: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 420px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  box-shadow: var(--dsw-shadow-lv2);
+}
+
+/* The dismiss control is a glyph, so it keeps the note's own baseline and only
+   needs enough hit area to be clickable. */
+.referenceNoteDismiss {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xs-13);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.referenceNoteDismiss:hover {
+  color: var(--dsw-alias-label-primary);
+}

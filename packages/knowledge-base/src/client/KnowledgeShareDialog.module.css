@@ -1,0 +1,116 @@
+/**
+ * The Share dialog's layout.
+ *
+ * Every value comes from a `--dsw-*` token: sizes are the product's own type ramp
+ * (`--dsw-font-*`) and spacing its radius/scale tokens, so the dialog matches the
+ * permission table it shares a backend with instead of inventing metrics a theme
+ * change would leave behind.
+ */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dsw-space-3);
+  min-width: 0;
+}
+
+.intro {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-s-14);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dsw-space-1);
+  min-width: 0;
+}
+
+.fieldLabel {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 15rem;
+  overflow-y: auto;
+  border: var(--dsw-border-width) solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--dsw-space-2);
+  width: 100%;
+  padding: var(--dsw-space-2) var(--dsw-space-3);
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.option:hover,
+.option[data-active='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.option[aria-selected='true'] {
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+}
+
+.optionLabel {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-14);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionDetail {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state {
+  padding: var(--dsw-space-2) var(--dsw-space-3);
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.chosen {
+  display: flex;
+  align-items: center;
+  gap: var(--dsw-space-2);
+  flex-wrap: wrap;
+}
+
+.chosenLabel {
+  color: var(--dsw-alias-label-caption);
+  font: var(--dsw-font-xxs-12);
+}
+
+.notice {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.hint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}

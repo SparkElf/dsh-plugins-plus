@@ -300,3 +300,27 @@
   color: var(--dsw-alias-state-error-primary);
   font: var(--dsw-font-xxs-12);
 }
+
+/* ---- The deployment block's local shape ----
+
+   A local deployment cannot run any deployment step: every one of them executes on a
+   remote host, so with no SSH host configured the wizard has nothing that can act.
+   Rather than seven disabled buttons with an explanation, the block becomes two
+   sentences of plain text. No link and no disclosure: the plugin owns no
+   documentation URL, and a control here would be one more thing that cannot do
+   anything -- which is the exact complaint this branch answers. */
+
+.deployAbout {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The aside's own caption. Tertiary ink and a caption weight: it labels an
+   explanation rather than introducing a section, so it must sit below the sentence
+   above it in the visual hierarchy rather than competing with the block's heading. */
+.deployAboutLabel {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-strong-11);
+}

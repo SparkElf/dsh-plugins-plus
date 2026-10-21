@@ -12,6 +12,7 @@
 
 import {
   IconArchiveOutlineRegular,
+  IconChecklistOutlineRegular,
   IconFlatListOutlineRegular,
   IconSettingsOutlineRegular,
   IconShieldOutlineRegular,
@@ -19,7 +20,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** One rail section id, matching a selection kind. */
-export type SectionKind = 'home' | 'permissions' | 'indexing' | 'trash' | 'settings'
+export type SectionKind = 'home' | 'permissions' | 'indexing' | 'trash' | 'audit' | 'settings'
 
 /**
  * The glyph matching one rail section.
@@ -37,6 +38,9 @@ export function sectionGlyph(kind: SectionKind, size?: number) {
   if (kind === 'permissions') return <IconShieldOutlineRegular {...props} />
   if (kind === 'indexing') return <IconFlatListOutlineRegular {...props} />
   if (kind === 'trash') return <IconArchiveOutlineRegular {...props} />
+  // A checklist rather than a document with a clock: this row is a worklist to get
+  // through, and the trail beside it on the same page is the record of having done so.
+  if (kind === 'audit') return <IconChecklistOutlineRegular {...props} />
   if (kind === 'settings') return <IconSettingsOutlineRegular {...props} />
   // `IconWorkspaceTreeOutline` rather than the filled-artwork `IconDeliverDoc`: that one
   // is the only glyph in the shipped set without an `Outline` sibling, and beside three

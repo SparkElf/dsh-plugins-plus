@@ -1147,10 +1147,45 @@ export interface KnowledgeSettings extends KnowledgeStorageSettings {
    * is the behaviour the operator asked for. Turning it on is a deliberate act.
    */
   reviewRequired: boolean
+  /**
+   * MinerU's full base address, or `''` to derive it from the port.
+   *
+   * The port alone cannot express anything but this machine: a service reached through
+   * a tunnel, a gateway or another host has no port to put here. An empty value means
+   * "derive it", which keeps every existing deployment working without a migration.
+   */
+  mineruBaseUrl: string
 }
 
 /** The settings a caller who has never opened the page gets. */
-export const DEFAULT_KNOWLEDGE_SETTINGS: KnowledgeSettings = { reviewRequired: false }
+export const DEFAULT_KNOWLEDGE_SETTINGS: KnowledgeSettings = { reviewRequired: false, mineruBaseUrl: '' }
+
+/**
+ * Normalise a MinerU base address.
+ *
+ * Only an absolute http(s) address is storable. A bare host, a `file:` URL or a typo
+ * would be handed to a parser that can only fail on it, and the failure would surface
+ * as "extraction broke" rather than "this setting is wrong", so the value is checked
+ * where it is written instead.
+ * @param raw - the candidate value.
+ * @returns The trimmed address without a trailing slash, or `''`.
+ */
+export function normalizeMineruBaseUrl(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  const trimmed = raw.trim()
+  if (trimmed === '') return ''
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return ''
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+  // A trailing slash is the same endpoint as without it, and keeping it would make two
+  // identical settings compare unequal. The path is preserved: MinerU may sit behind a
+  // prefix.
+  return trimmed.replace(/\/+$/u, '')
+}
 
 /**
  * Copy the storage fields out of a parsed settings object.
@@ -1196,7 +1231,14 @@ export async function readSettings(viewDir: string): Promise<KnowledgeSettings> 
     if (parsed === null || typeof parsed !== 'object') return { ...DEFAULT_KNOWLEDGE_SETTINGS }
     // The storage fields travel with the review toggle: the panel writes both through this
     // one file, so a read that returned only the toggle would silently drop them.
-    return { reviewRequired: parsed.reviewRequired === true, ...storageSettingsOf(parsed) }
+    return {
+      reviewRequired: parsed.reviewRequired === true,
+      // A value the writer would refuse reads as "not configured" rather than as an
+      // error: a hand-edited or older file must cost the reader their preference, not
+      // the page, and "derive from the port" is always a working answer.
+      mineruBaseUrl: normalizeMineruBaseUrl(parsed.mineruBaseUrl),
+      ...storageSettingsOf(parsed),
+    }
   } catch {
     return { ...DEFAULT_KNOWLEDGE_SETTINGS }
   }
@@ -1218,6 +1260,7 @@ export async function writeSettings(
 ): Promise<KnowledgeSettings> {
   const normalized: KnowledgeSettings = {
     reviewRequired: settings.reviewRequired === true,
+    mineruBaseUrl: normalizeMineruBaseUrl(settings.mineruBaseUrl),
     // Round-tripped through the validator so a caller cannot store a value the reader
     // would reject, and omitted fields stay omitted rather than becoming `undefined` keys.
     ...storageSettingsOf({ ...settings } as unknown as Record<string, unknown>),

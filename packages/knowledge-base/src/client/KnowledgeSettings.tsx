@@ -1,11 +1,34 @@
 /**
+ * TODO: this page is unreachable from the real entry, and needs a decision.
+ *
+ * Verified by driving the deployed product on 2026-10-21, not by reading the code:
+ * entering 知识库 and clicking 「设置」 in its own rail opens the DSH GLOBAL settings
+ * dialog (left nav: 通用设置/模型/内置插件/Agent 预设/DataOps/备份/知识库/插件市场/
+ * 侧边卡片), never this component. The rail row sets `selection.kind = 'settings'`,
+ * which `KnowledgePanel.tsx` renders as this surface, but the click that a reader can
+ * actually reach is the shell's own settings entry, so nothing in the real UI leads
+ * here. The review switch below therefore has no user-facing effect today.
+ *
+ * Deliberately NOT deleted: removing this file, the `rendered.kind === 'settings'`
+ * branch in `KnowledgePanel.tsx` and the `menu.settings` rail row is a cross-file
+ * structural change, and the choice between "delete the page" and "give it a real
+ * entry point" is a product decision rather than a cleanup. Left as-is with this note
+ * so the next change starts from the measured fact instead of re-deriving it.
+ *
+ * What WAS moved: the MinerU service address. It lived here for one round and was
+ * invisible to readers for exactly this reason; it now renders in
+ * `KnowledgeSettingsSection.tsx` (DSH global settings → 知识库), which is reachable.
+ */
+/**
  * The settings surface of the management page.
  *
- * Two things live here, and they are different in kind. The review switch is a
- * DECISION: it changes whether other people's contributions take effect immediately,
- * so it is a control and it needs write access. The audit trail is a RECORD of what
- * already happened, so it is a read-only list. Presenting them together is deliberate:
- * the reason to turn review on is visible in the trail underneath it.
+ * This page is now only the review switch: a DECISION about whether other people's
+ * contributions take effect immediately, so it is a control and it needs write
+ * access. The queue that decision governs and the trail of what it settled both
+ * moved to the Audit page, which is the surface an operator opens to get through
+ * work; parking a worklist under a configuration switch made them scroll past the
+ * setting to reach today's arrivals, and left two duplicate entry points pointing
+ * at the same two tables.
  *
  * The switch ships OFF. That is the product decision, not a default that drifted: an
  * operator who never opens this page keeps the behaviour they had, and turning review
@@ -15,7 +38,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Switch, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath } from '../api.ts'
 import tableStyles from './KnowledgePermissions.module.css'
 import styles from './KnowledgePanel.module.css'
@@ -24,6 +47,13 @@ import styles from './KnowledgePanel.module.css'
 export interface KnowledgeSettingsView {
   /** Whether a write must be reviewed before it counts as published. */
   reviewRequired: boolean
+  /**
+   * MinerU's full base address, or `''` to derive it from the configured port.
+   *
+   * Absent from an older Host's answer, which reads as `''`: the field then shows
+   * "derived" rather than a value the Host never sent.
+   */
+  mineruBaseUrl?: string
 }
 
 /** One recorded change, as the Host reports it. */
@@ -71,27 +101,8 @@ export interface PendingWriteView {
 
 type LoadState =
   | { kind: 'loading' }
-  | {
-      kind: 'ready'
-      settings: KnowledgeSettingsView
-      canEdit: boolean
-      entries: KnowledgeAuditEntryView[]
-      pending: PendingWriteView[]
-      canDecide: boolean
-    }
+  | { kind: 'ready'; settings: KnowledgeSettingsView; canEdit: boolean }
   | { kind: 'error'; message: string }
-
-/**
- * Format an audit instant for a table cell.
- * @param value - ISO timestamp.
- * @returns The formatted instant, or a dash when unparseable.
- */
-function formatWhen(value: string): string {
-  const time = new Date(value)
-  if (Number.isNaN(time.getTime())) return '—'
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${String(time.getFullYear())}/${pad(time.getMonth() + 1)}/${pad(time.getDate())} ${pad(time.getHours())}:${pad(time.getMinutes())}`
-}
 
 /**
  * Render the review switch and the audit trail.
@@ -107,55 +118,23 @@ export function KnowledgeSettings(props: KnowledgeSettingsProps) {
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const [settingsResponse, auditResponse, pendingResponse] = await Promise.all([
-        fetch(kbApiPath(KB_API.settingsGet), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-          cache: 'no-store',
-        }),
-        fetch(kbApiPath(KB_API.auditList), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-          cache: 'no-store',
-        }),
-        fetch(kbApiPath(KB_API.pendingList), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-          cache: 'no-store',
-        }),
-      ])
-      if (!settingsResponse.ok) throw new Error('HTTP ' + String(settingsResponse.status))
-      const settingsBody = (await settingsResponse.json()) as {
-        settings?: KnowledgeSettingsView
-        canEdit?: boolean
-      }
-      // The audit trail is allowed to fail on its own: an unreadable trail should not
-      // blank the switch, which is the part the operator came here to change.
-      let entries: KnowledgeAuditEntryView[] = []
-      if (auditResponse.ok) {
-        const auditBody = (await auditResponse.json()) as { entries?: KnowledgeAuditEntryView[] }
-        entries = auditBody.entries ?? []
-      }
-      let pending: PendingWriteView[] = []
-      let canDecide = false
-      if (pendingResponse.ok) {
-        const pendingBody = (await pendingResponse.json()) as {
-          pending?: PendingWriteView[]
-          canDecide?: boolean
-        }
-        pending = pendingBody.pending ?? []
-        canDecide = pendingBody.canDecide === true
-      }
+      const response = await fetch(kbApiPath(KB_API.settingsGet), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+        cache: 'no-store',
+      })
+      // This is the one read the page exists for, so a failure here blanks it rather
+      // than showing a switch whose position would be a guess.
+      if (!response.ok) throw new Error('HTTP ' + String(response.status))
+      const body = (await response.json()) as { settings?: KnowledgeSettingsView; canEdit?: boolean }
       setState({
         kind: 'ready',
-        settings: { reviewRequired: settingsBody.settings?.reviewRequired === true },
-        canEdit: settingsBody.canEdit === true,
-        entries,
-        pending,
-        canDecide,
+        settings: {
+          reviewRequired: body.settings?.reviewRequired === true,
+          mineruBaseUrl: typeof body.settings?.mineruBaseUrl === 'string' ? body.settings.mineruBaseUrl : '',
+        },
+        canEdit: body.canEdit === true,
       })
     } catch (error: unknown) {
       setState({ kind: 'error', message: error instanceof Error ? error.message : String(error) })
@@ -190,34 +169,6 @@ export function KnowledgeSettings(props: KnowledgeSettingsProps) {
     }
   }
 
-  /**
-   * Approve or reject one submission, then re-read the queue.
-   * @param name - the submission to decide.
-   * @param decision - which way to decide it.
-   */
-  const decide = async (name: string, decision: 'approve' | 'reject'): Promise<void> => {
-    setBusy(true); setNotice(undefined)
-    try {
-      const route = decision === 'approve' ? KB_API.pendingApprove : KB_API.pendingReject
-      const response = await fetch(kbApiPath(route), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name }),
-        cache: 'no-store',
-      })
-      const body = (await response.json()) as { error?: string }
-      if (!response.ok) throw new Error(body.error ?? 'HTTP ' + String(response.status))
-      setNotice(decision === 'approve' ? c('pendingApproved') : c('pendingRejected'))
-      // Re-read rather than splicing locally: the Host is the authority on what is
-      // still queued, and the trail below gained an entry that must show.
-      await load()
-    } catch (error: unknown) {
-      setNotice(error instanceof Error ? error.message : c('pendingDecideFailed'))
-    } finally {
-      setBusy(false)
-    }
-  }
-
   if (state.kind === 'loading') {
     return <div className={styles.notice}>{c('settingsLoading')}</div>
   }
@@ -225,7 +176,7 @@ export function KnowledgeSettings(props: KnowledgeSettingsProps) {
     return <div className={styles.notice}>{c('settingsLoadFailed')}</div>
   }
 
-  const { settings, canEdit, entries, pending, canDecide } = state
+  const { settings, canEdit } = state
 
   return (
     <div className={styles.contentColumn}>
@@ -248,99 +199,6 @@ export function KnowledgeSettings(props: KnowledgeSettingsProps) {
         {notice !== undefined && <p className={tableStyles.pageHint}>{notice}</p>}
       </section>
 
-      <section className={styles.surface}>
-        <h2 className={styles.subhead}>{c('settingsPendingHeading')}</h2>
-        {c('settingsPendingHint') === '' ? null : <p className={tableStyles.pageHint}>{c('settingsPendingHint')}</p>}
-          {pending.length === 0 ? (
-            <p className={tableStyles.emptyRow}>{c('settingsPendingEmpty')}</p>
-          ) : (
-            <table className={tableStyles.table}>
-              <thead>
-                <tr>
-                  <th>{c('colPendingWhen')}</th>
-                  <th>{c('colPendingSubmitter')}</th>
-                  <th>{c('colPendingTarget')}</th>
-                  <th>{c('colPendingSize')}</th>
-                  <th>{c('colPendingDecision')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pending.map((entry) => (
-                  <tr key={entry.name}>
-                    <td>{formatWhen(entry.at)}</td>
-                    <td>{entry.userId}</td>
-                    <td>{entry.relPath}</td>
-                    <td>{String(entry.bytes)} B</td>
-                    <td>
-                      <span className={tableStyles.actions}>
-                        <Button
-                          variant="primary"
-                          disabled={!canDecide || busy}
-                          onClick={() => { void decide(entry.name, 'approve') }}
-                        >
-                          {c('pendingApprove')}
-                        </Button>
-                        <Button
-                          disabled={!canDecide || busy}
-                          onClick={() => { void decide(entry.name, 'reject') }}
-                        >
-                          {c('pendingReject')}
-                        </Button>
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        {!canDecide && <p className={tableStyles.pageHint}>{c('pendingReadOnly')}</p>}
-      </section>
-
-      <section className={styles.surface}>
-        <h2 className={styles.subhead}>{c('settingsAuditHeading')}</h2>
-        {c('settingsAuditHint') === '' ? null : <p className={tableStyles.pageHint}>{c('settingsAuditHint')}</p>}
-        <table className={tableStyles.table}>
-          <thead>
-            <tr>
-              <th>{c('colAuditWhen')}</th>
-              <th>{c('colAuditActor')}</th>
-              <th>{c('colAuditAction')}</th>
-              <th>{c('colAuditTarget')}</th>
-              <th>{c('colAuditOutcome')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.length === 0 ? (
-              <tr>
-                <td colSpan={5} className={tableStyles.emptyRow}>{c('settingsAuditEmpty')}</td>
-              </tr>
-            ) : (
-              entries.map((entry) => (
-                <tr key={entry.at + entry.action + entry.relPath}>
-                  <td>{formatWhen(entry.at)}</td>
-                  {/*
-                    The display name is what a reader recognises; the id is what the
-                    trail is checked against. Showing the name and keeping the id in the
-                    tooltip preserves both without widening the column. An entry written
-                    before labels were recorded falls back to its id.
-                  */}
-                  <td title={entry.actor}>{entry.actorLabel ?? entry.actor}</td>
-                  <td>{c('auditAction' + entry.action.charAt(0).toUpperCase() + entry.action.slice(1))}</td>
-                  <td>
-                    {entry.relPath}
-                    {entry.toRelPath !== undefined && ' → ' + entry.toRelPath}
-                  </td>
-                  <td>
-                    <Tag tone={entry.outcome === 'applied' ? 'success' : 'warning'}>
-                      {c('auditOutcome' + entry.outcome.charAt(0).toUpperCase() + entry.outcome.slice(1))}
-                    </Tag>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </section>
     </div>
   )
 }

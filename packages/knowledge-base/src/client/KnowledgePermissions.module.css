@@ -1,31 +1,125 @@
 /*
- * The permissions surface's own styles: the one-to-many authorization table.
+ * The permissions surface's styles.
  *
- * The shape is DataOps' permission preview
+ * The shape follows DataOps' permission preview
  * (`dataops/frontend/src/modules/prototype-pages/PermissionsPrototypePage.vue`,
- * the `.ep-tb` table at the application-detail block): a header row of small
- * secondary-ink labels over hairline-separated rows, where one row's first cell
- * carries a heavier name plus dimmer supporting lines, and its last cells hold
- * tags and a multi-line list.
+ * the `.ep-tb` table at the application-detail block): hairline-separated rows
+ * under small secondary-ink headers, where one row's first cell carries a heavier
+ * name plus dimmer supporting lines and its last cells hold tags and a list.
  *
  * Only the metrics come from that reference; every colour and type step is the
  * DSH token it maps to, so the table follows the active theme. The reference's
  * `font-size: 10.5px/12px` and `--ink-3`/`--border` therefore read here as
  * `--dsw-font-xxxs-11`, `--dsw-font-xxs-12`, `--dsw-alias-label-*` and
  * `--dsw-alias-border-l*`.
+ *
+ * The elevation is the statistics band and the tab strip: the page leads with
+ * four numbers, then one tab per reading of the same grant payload.
  */
+
+/* ── the page body ─────────────────────────────────────────────────────────── */
+
+.overview {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Four equal cards: equal width so the eye reads them as one band of numbers
+   rather than as a list whose later items matter less. */
+.statRow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.statCard {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* The number is the point of the card, so it takes the design system's larger
+   step and the label drops to caption ink beneath it. */
+.statValue {
+  font: var(--dsw-font-base-strong-16);
+  color: var(--dsw-alias-label-primary);
+  line-height: 1.2;
+}
+
+.statLabel {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── roles in use, as one wrapping strip ───────────────────────────────────── */
+
+/* Roles are a fact about the grants, not a column of any table, so they get a
+   strip of their own above the tabs rather than a fourth table nobody asked for. */
+.roleStrip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.roleStripHeading {
+  margin: 0;
+  font: var(--dsw-font-xxxs-strong-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.roleStripList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* One role reads as a unit: its name then its chips, hairline-separated so two
+   adjacent roles do not merge into one run of tags. */
+.roleChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.roleChipName {
+  font: var(--dsw-font-xxxs-strong-11);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* The tab strip sits directly over the table it switches. */
+.tabs {
+  align-self: flex-start;
+}
+
+.overviewEmpty {
+  margin: 0;
+  padding: 20px 10px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* ── the table ─────────────────────────────────────────────────────────────── */
 
 .table {
   width: 100%;
   border-collapse: collapse;
-  /* One column per fact, with the path list taking the slack: the first three
-     are content-sized so a long path cannot squeeze the principal's name. */
+  /* One column per fact, path list taking the slack: the first three are
+     content-sized so a long path cannot squeeze the principal's name. */
   table-layout: auto;
 }
 
 .table th {
   text-align: left;
-  /* The reference's 10.5px header step. */
   font: var(--dsw-font-xxxs-strong-11);
   color: var(--dsw-alias-label-tertiary);
   padding: 6px 10px;
@@ -50,14 +144,12 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* The reference's `muted` supporting line (its 10.5px). */
 .principalMeta {
   margin-top: 2px;
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxxs-11);
 }
 
-/* The reference prints the identifier in its `mono muted` line. */
 .principalId {
   margin-top: 2px;
   color: var(--dsw-alias-label-tertiary);
@@ -65,10 +157,8 @@
   overflow-wrap: anywhere;
 }
 
-/* The tag column: one tag per row, wrapped so several stack rather than
-   widening the column. */
-.kinds,
-.actions {
+/* Tag columns: wrapped so several chips stack rather than widening the column. */
+.chips {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -83,7 +173,6 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /* The reference's 11px / 1.65 multi-target block. */
   font: var(--dsw-font-xxxs-11);
   line-height: 1.65;
   color: var(--dsw-alias-label-secondary);
@@ -94,12 +183,86 @@
   overflow-wrap: anywhere;
 }
 
+/* Everyone who can reach one path, as name-then-kind pairs. */
+.holders {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.holder {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.holderName {
+  font: var(--dsw-font-xxxs-strong-11);
+  color: var(--dsw-alias-label-primary);
+}
+
+.holderKind {
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* A fact the schema implies rather than one the backend stores. */
+.placeholder {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
 /* The trailing action column never wraps into the path list. */
 .actionCell {
   white-space: nowrap;
 }
 
-/* The reference's centered muted empty row. */
+/* ── dialogs ───────────────────────────────────────────────────────────────── */
+
+.dialogForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dialogField {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* A dialog's select, matched to the Input primitive's box so a form of mixed
+   controls lines up. */
+.dialogSelect {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.dialogNotice {
+  margin: 0;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ── shared with the other management pages ────────────────────────────────── */
+
+/* Every page in this group imports this one stylesheet, so the classes below are
+   used by siblings as well as by this surface. They stay here rather than being
+   copied into each module: one table style is what keeps the pages looking like
+   one product, and a per-page copy would drift. */
+
+/* The centered muted empty row a table shows instead of data. */
 .emptyRow td {
   padding: 18px;
   text-align: center;
@@ -150,17 +313,15 @@
   overflow-wrap: anywhere;
 }
 
-/* A right-aligned numeric column, so the counts line up column-wise. */
+/* A right-aligned numeric column, so counts line up column-wise. */
 .countCell {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-/*
- * Marks a count that is a lower bound because part of the subtree could not be
- * read. Muted and small on purpose: it qualifies the number beside it rather than
- * competing with it for the eye.
- */
+/* A count that is a lower bound because part of the subtree could not be read.
+   Muted and small on purpose: it qualifies the number beside it rather than
+   competing with it for the eye. */
 .partialMark {
   margin-left: 2px;
   color: var(--dsw-alias-label-tertiary);
@@ -168,224 +329,15 @@
   cursor: help;
 }
 
-/* A muted dash or placeholder that is a value's absence rather than data. */
-.placeholder {
-  color: var(--dsw-alias-label-tertiary);
-}
-
-/*
- * The dialogs' own form grid. The page's `.form` is a rail-width stack; a dialog
- * is a narrower surface, so it lays its fields out on one column with the labels
- * above them.
- */
-.dialogForm {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.dialogField {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  font: var(--dsw-font-xxs-12);
-  color: var(--dsw-alias-label-secondary);
-}
-
-/* A dialog's select, matched to the Input primitive's box so a form of mixed
-   controls reads as one column rather than as two designs. */
-.dialogSelect {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  border: 0.5px solid var(--dsw-alias-border-l3);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-label-primary);
-  font: var(--dsw-font-xxs-12);
-}
-
-/* The dialog's inline result line, under the fields it reports on. */
-.dialogNotice {
-  margin: 0;
-  font: var(--dsw-font-xxxs-11);
-  color: var(--dsw-alias-label-secondary);
-}
-
-/* The section heading over the table. */
-.tableHead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 7px;
-}
-
-.tableTitle {
-  margin: 0;
-  font: var(--dsw-font-xxs-strong-12);
-  color: var(--dsw-alias-label-primary);
-}
-
-.tableHint {
-  margin: 0;
-  color: var(--dsw-alias-label-tertiary);
-  font: var(--dsw-font-xxxs-11);
-}
-
-/* ---------------------------------------------------------------------------
- * Permission overview
- *
- * Two readings of the same grant table, above the table itself. Both are lists
- * rather than tables: a person's holdings are one sentence and a few tags, and a
- * table would spend the width on cells that are empty for most rows.
- * ------------------------------------------------------------------------- */
-
-.overviewBand {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  padding: 0 0 20px;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l1);
-}
-
-.overviewSection {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.overviewHeading {
-  margin: 0;
-  font: var(--dsw-font-xxs-strong-12);
-  color: var(--dsw-alias-label-secondary);
-}
-
-.overviewList {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.overviewItem {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
-  border: 0.5px solid var(--dsw-alias-border-l1);
-  border-radius: 6px;
-}
-
-.overviewRow {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-
-.overviewName {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font: var(--dsw-font-xxs-strong-12);
-  color: var(--dsw-alias-label-primary);
-}
-
-.overviewActions,
-.overviewCount,
-.overviewKind {
-  flex: none;
-  font: var(--dsw-font-xxxs-strong-11);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.overviewRolesInline {
-  font: var(--dsw-font-xxxs-11);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.overviewPaths {
-  font: var(--dsw-font-xxs-12);
-  color: var(--dsw-alias-label-secondary);
-}
-
-.overviewPaths summary {
-  cursor: pointer;
-  font: var(--dsw-font-xxxs-strong-11);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.overviewPaths ul {
-  margin: 4px 0 0;
-  padding: 0 0 0 16px;
-  list-style: none;
-}
-
-.overviewHolders {
+/* A tag set inside a table cell. */
+.actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 12px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.overviewHolders li {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.overviewHolderName {
-  font: var(--dsw-font-xxs-12);
-  color: var(--dsw-alias-label-primary);
-}
-
-.overviewHolderActions {
-  font: var(--dsw-font-xxxs-11);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.overviewEmpty {
-  padding: 16px 0;
-  font: var(--dsw-font-xxs-12);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.overviewRoleList {
-  display: flex;
-  flex-direction: column;
   gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
 }
 
-.overviewRole {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  font: var(--dsw-font-xxs-12);
-}
-
-.overviewRoleName {
-  font: var(--dsw-font-xxs-strong-12);
-  color: var(--dsw-alias-label-primary);
-}
-
-.overviewRoleActions,
-.overviewRolePaths {
-  font: var(--dsw-font-xxxs-11);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-/* An action that belongs to a row rather than to the page: it sits in the last
- * cell and reads as text until hovered, so a table of rows is not a wall of
- * buttons. */
+/* An action that belongs to a row rather than to the page: it reads as text
+   until hovered, so a table of rows is not a wall of buttons. */
 .linkButton {
   padding: 0;
   border: 0;

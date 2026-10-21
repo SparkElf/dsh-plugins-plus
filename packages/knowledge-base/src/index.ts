@@ -59,6 +59,7 @@ import {
   readFavorites,
   readPins,
   readSettings,
+  normalizeMineruBaseUrl,
   readTemplates,
   removeTemplate,
   saveTemplate,
@@ -179,6 +180,13 @@ export interface Config {
   mineruBackend: MineruBackend
   /** TCP port the MinerU API listens on where it is deployed. */
   mineruPort: number
+  /**
+   * MinerU's full base address, or `''` to derive it from `mineruPort`.
+   *
+   * Deployment-level fallback for the setting a caller can change on the settings page.
+   * Empty keeps the derivation, so a deployment that never sets this keeps working.
+   */
+  mineruBaseUrl: string
   /** Memory ceiling in MiB for the MinerU service, clamped to half the host's RAM. */
   mineruMemoryMaxMiB: number
 }
@@ -256,6 +264,7 @@ export const Config: z<Config> = z.object({
   mineruTier: z.union([z.const('basic'), z.const('standard')]).default('basic'),
   mineruBackend: z.union([z.const('onnx'), z.const('torch')]).default('onnx'),
   mineruPort: z.number().default(8000),
+  mineruBaseUrl: z.string().default(''),
   // Measured 2026-10-15 on a 7.9 GB host parsing a one-page PDF: the `basic` tier peaked at
   // 1.86 GB resident, which is already within a 2 GB ceiling and left `MemoryHigh` no headroom
   // at all. The service step clamps this to half of RAM, so the value below is a ceiling for a
@@ -1363,6 +1372,37 @@ function readStringArray(value: unknown): string[] | undefined {
  * @param config - resolved plugin config.
  * @returns The caller's id, display name and role codes.
  */
+
+/**
+ * Read one department's ancestor chain from the DataOps catalogue.
+ *
+ * `/auth/me` is the self-scoped answer and the one this plugin prefers, but a deployment
+ * built before the chain was added to it still answers with the leaf department only.
+ * The catalogue already answers with `pathCodes`/`pathNames`, and grant subjects already
+ * read it, so the chain can be recovered there without asking DataOps for a new route.
+ * A caller without access simply gets `undefined` and keeps the leaf-only shape, which
+ * the tree renders as a code rather than pretending to know the hierarchy.
+ */
+async function readDepartmentPathFromCatalog(
+  ctx: Context,
+  config: Config,
+  code: string,
+): Promise<{ pathCodes: string[]; pathNames: string[] } | undefined> {
+  const body = await request<Record<string, unknown>>(ctx, config, ENDPOINTS.departments)
+  const rows = Array.isArray(body.departments) ? body.departments : []
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null) continue
+    const record = row as Record<string, unknown>
+    if (record.code !== code) continue
+    const pathCodes = readStringArray(record.pathCodes)
+    const pathNames = readStringArray(record.pathNames)
+    if (pathCodes === undefined || pathNames === undefined) return undefined
+    if (pathCodes.length === 0 || pathCodes.length !== pathNames.length) return undefined
+    return { pathCodes, pathNames }
+  }
+  return undefined
+}
+
 export async function fetchCaller(ctx: Context, config: Config): Promise<KnowledgeCaller> {
   const body = await request<Record<string, unknown>>(ctx, config, ENDPOINTS.me)
   // The route answers `{ user: {...} }`, not the profile at the top level. Read
@@ -1381,7 +1421,17 @@ export async function fetchCaller(ctx: Context, config: Config): Promise<Knowled
       .map(role => (role as Record<string, unknown>).code)
       .filter((code): code is string => typeof code === 'string' && code !== '')
     : []
-  const department = readDepartmentOf(profile.department)
+  let department = readDepartmentOf(profile.department)
+  // Older deployments answer /auth/me with the leaf department only. Recover the chain
+  // from the catalogue this plugin already reads for grant subjects, so the department
+  // tree can still name the hierarchy instead of showing slugs.
+  if (department !== undefined && department.pathCodes === undefined) {
+    const recovered = await readDepartmentPathFromCatalog(ctx, config, department.code)
+      .catch(() => undefined)
+    if (recovered !== undefined && recovered.pathCodes[recovered.pathCodes.length - 1] === department.code) {
+      department = { ...department, ...recovered }
+    }
+  }
   return {
     userId,
     label,
@@ -1660,11 +1710,18 @@ export async function createKnowledgeEntry(
  * @param relPath - the uploaded document's path, relative to the knowledge root.
  * @returns What happened, or undefined when the format needs no extraction.
  */
-export async function extractBeside(config: Config, relPath: string): Promise<{ markdown: string; via?: string; reason?: string } | undefined> {
+export async function extractBeside(
+  config: Config,
+  relPath: string,
+  mineruUrl?: string,
+): Promise<{ markdown: string; via?: string; reason?: string } | undefined> {
   if (!isExtractable(relPath)) return undefined
   const plan = localConfig(config)
   const fullPath = join(plan.actualRoot, relPath)
-  const result = await extractDocument(fullPath, relPath, { mineruUrl: mineruUrlFor(config) })
+  // A caller-supplied address is the user's own setting and outranks the deployment's;
+  // absent, the deployment answer (explicit address, else the derived port) applies.
+  const effectiveUrl = mineruUrl !== undefined && mineruUrl !== '' ? mineruUrl : mineruUrlFor(config)
+  const result = await extractDocument(fullPath, relPath, { mineruUrl: effectiveUrl })
   if (result.markdown === undefined) {
     return { markdown: '', reason: result.reason ?? 'extraction produced no text' }
   }
@@ -1685,6 +1742,10 @@ export async function extractBeside(config: Config, relPath: string): Promise<{ 
  * @returns `http://127.0.0.1:<port>` when the service is expected, else undefined.
  */
 export function mineruUrlFor(config: Config): string | undefined {
+  // An explicit address wins over the derived one. It is the only way to reach a service
+  // that is not on this machine: the port alone can only ever mean 127.0.0.1.
+  const configured = normalizeMineruBaseUrl((config as { mineruBaseUrl?: string }).mineruBaseUrl)
+  if (configured !== '') return configured
   const port = (config as { mineruPort?: number }).mineruPort
   if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) return undefined
   return 'http://127.0.0.1:' + String(port)
@@ -3094,7 +3155,10 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // reader opens. Extract beside the original rather than instead of it:
               // the upload keeps the file the user chose, and gains a greppable
               // `.md` sibling. A failed extraction is reported, never fatal.
-              const extraction = await extractBeside(config, relPath)
+              // The caller's own MinerU address, when they set one. This is the step that
+              // makes the setting do anything: without it the page would store a value
+              // nothing reads. Empty falls back to the deployment answer.
+              const extraction = await extractBeside(config, relPath, uploadSettings.mineruBaseUrl)
               // Recorded before answering, and a recording failure never changes the
               // answer: the bytes are already on disk.
               await appendAuditEntry(uploadViewDir, {
@@ -3407,7 +3471,30 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               })
             }
             const viewDir = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId })
-            const settings = await writeSettings(viewDir, { reviewRequired: body.reviewRequired })
+            // The address is optional and absent means "leave it alone": an older client
+            // that only sends the review toggle must not silently clear a configured
+            // service. A present value must be an absolute http(s) address or empty.
+            let mineruBaseUrl: string
+            if (body.mineruBaseUrl === undefined) {
+              mineruBaseUrl = (await readSettings(viewDir)).mineruBaseUrl
+            } else if (typeof body.mineruBaseUrl !== 'string') {
+              return writeJson(res, 400, { error: 'mineruBaseUrl must be a string' })
+            } else {
+              const candidate = body.mineruBaseUrl.trim()
+              if (candidate !== '') {
+                let parsed: URL
+                try {
+                  parsed = new URL(candidate)
+                } catch {
+                  return writeJson(res, 400, { error: 'mineruBaseUrl must be an absolute http(s) address' })
+                }
+                if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+                  return writeJson(res, 400, { error: 'mineruBaseUrl must use http or https' })
+                }
+              }
+              mineruBaseUrl = candidate
+            }
+            const settings = await writeSettings(viewDir, { reviewRequired: body.reviewRequired, mineruBaseUrl })
             return writeJson(res, 200, { settings })
           }
           case 'audit.list': {

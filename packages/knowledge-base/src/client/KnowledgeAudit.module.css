@@ -1,0 +1,33 @@
+/*
+ * The audit surface's own styles.
+ *
+ * Almost everything here is the shared table furniture from
+ * `KnowledgePermissions.module.css` -- one table style across the management pages
+ * is what makes them read as one product, and a per-page copy would drift. This
+ * module adds only what is specific to this page: the tab strip's placement and the
+ * path cell, whose content is a code-shaped value rather than prose.
+ *
+ * Every colour, type step and spacing value is a `--dsw-*` token, so the page
+ * follows the active theme instead of pinning a light-mode look.
+ */
+
+.audit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The strip sits directly over the table it switches, left-aligned: it is a
+   control over the table below, not a centred heading over the page. */
+.tabs {
+  align-self: flex-start;
+}
+
+/* A path is a code-shaped value: the code face keeps `/` and `_` legible, and
+   wrapping rather than overflowing means a deep path cannot widen the column past
+   the decision buttons beside it. */
+.pathCell {
+  font: var(--dsw-font-xxxs-11) var(--ds-font-family-code);
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}

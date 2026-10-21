@@ -274,3 +274,14 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* The favourites star, drawn at the start of the Created cell.
+   Inline rather than a block: it sits on the same baseline as the date it precedes,
+   and the cell keeps its existing alignment so the two date columns still line up
+   across starred and unstarred rows. `--dsw-static-amber-500` is the set's only warm
+   stop, which is what makes the mark read as a star rather than one more grey glyph. */
+.favoriteMark {
+  margin-right: 4px;
+  color: var(--dsw-static-amber-500);
+  font: var(--dsw-font-xxs-12);
+}

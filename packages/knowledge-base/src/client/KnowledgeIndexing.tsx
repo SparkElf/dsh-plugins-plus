@@ -150,8 +150,6 @@ export function KnowledgeIndexing(props: KnowledgeIndexingProps) {
 
   return (
     <div className={styles.surface}>
-      <p className={tableStyles.pageHint}>{c('indexNote')}</p>
-
       {notice !== undefined && <p className={styles.notice}>{notice}</p>}
 
       <table className={tableStyles.table}>
