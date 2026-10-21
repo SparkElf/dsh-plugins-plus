@@ -8,24 +8,60 @@
  */
 
 /* The strip itself: a hairline above it is what separates it from the tree without
-   drawing a card that competes with the content. */
+   drawing a card that competes with the content.
+
+   The HEIGHT is set inline by the drag handle, not here, and it is a fixed height (not
+   `max-height`): the body below scrolls inside it, so a 500-file batch can never push
+   the file tree out of the panel. `flex: none` keeps it from being squeezed by the
+   tree's own flex growth. */
 .strip {
   flex: none;
   display: flex;
   flex-direction: column;
+  /* The handle is 6px tall and sits at the top edge; the summary and the scrolling body
+     share the rest. */
+  min-height: 0;
   border-top: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-1);
 }
 
-/* Summary line and the fold control. It stays one line at every width; the summary
-   truncates rather than wrapping, because a wrapped header changes the strip's height
-   every time a count changes. */
+/* The resize handle: a thin strip on the top edge.
+
+   It is deliberately taller than the 0.5px hairline it replaces, because a 1px target
+   is ungrabbable with a pointer. The negative margin pulls it over the border so the
+   visible line stays one hairline while the hit area is 6px. */
+.handle {
+  flex: none;
+  height: 6px;
+  margin-top: -0.5px;
+  cursor: ns-resize;
+  /* A hairline centred in the handle; the rest stays transparent so it does not look
+     like a second border. */
+  background: linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 2px,
+    var(--dsw-alias-border-l2) 2px,
+    var(--dsw-alias-border-l2) 3px,
+    transparent 3px,
+    transparent 100%
+  );
+}
+
+/* Keyboard focus has to be visible: the handle is the only control in this region. */
+.handle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+
+/* The summary line. One line at every width: a wrapping header would change the strip's
+   height whenever a count changed, and the height is the reader's to set here. */
 .head {
+  flex: none;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  padding: 4px 8px;
+  padding: 2px 8px 4px;
 }
 
 .summary {
@@ -37,15 +73,19 @@
   font: var(--dsw-font-xxs-12);
 }
 
-/* The scrolling body. `max-height` keeps a 500-file drop from owning the panel: the
-   tree stays reachable and the list scrolls within itself. */
+/* The scrolling body. It takes whatever height the strip has left after the handle and
+   the summary line, and scrolls inside that: the panel's own layout never grows. */
 .body {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 0 8px 6px;
-  max-height: 160px;
   overflow-y: auto;
+  /* Scroll chaining would move the page under the pointer once this list hit its end,
+     which is disorienting while dragging files in. */
+  overscroll-behavior: contain;
 }
 
 .group {

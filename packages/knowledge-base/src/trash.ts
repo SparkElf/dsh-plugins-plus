@@ -15,6 +15,20 @@
  * file keeps its inode, every other caller keeps their link, and restoring is
  * deleting the note.
  *
+ * ### DO NOT "fix" this by moving or deleting the file
+ *
+ * The obvious-looking change -- make `trash.remove` rename the file into a trash
+ * directory, or unlink it -- is WRONG here, and it is the change a future reader is
+ * most likely to make. A view entry is a hardlink to the shared authoritative copy:
+ * unlinking it removes one link and leaves the data, which looks harmless, but the
+ * next `syncView` finds a standing grant with no link and restores it (see above).
+ * Moving the file is worse: the authoritative path is the one DataOps grants are
+ * written against, so moving it silently invalidates every other caller's grant and
+ * makes the document unreachable for everyone, not just the caller who removed it.
+ *
+ * Removal is a per-caller filter, never a filesystem operation. That is the whole
+ * design, and it is why the trash record exists at all.
+ *
  * ## What a tombstone is scoped to
  *
  * A tombstone belongs to a CALLER, not to a path: two people sharing a document may

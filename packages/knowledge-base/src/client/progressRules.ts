@@ -11,31 +11,6 @@
  */
 
 /**
- * Whether the strip may fold now.
- *
- * Folded means "one summary line instead of a list". It folds when every task in both
- * groups reached a terminal state AND the batch has not been folded before -- the
- * second half is what stops it re-folding after a reader expanded a finished batch to
- * read which file failed.
- * @param uploads - the current batch's rows.
- * @param extractions - the extraction tasks the Host reports.
- * @param alreadyFolded - whether a fold already happened for this batch.
- * @returns Whether to fold.
- */
-export function shouldFoldStrip(
-  uploads: readonly { state: string }[],
-  extractions: readonly { state: string }[],
-  alreadyFolded: boolean,
-): boolean {
-  if (alreadyFolded) return false
-  const uploadSettled = uploads.length === 0
-    || uploads.every(task => task.state === 'done' || task.state === 'failed')
-  const extractSettled = extractions.length === 0
-    || extractions.every(task => task.state === 'succeeded' || task.state === 'failed' || task.state === 'unsupported')
-  return uploadSettled && extractSettled
-}
-
-/**
  * Whether a retry button would help for this state.
  *
  * Only a failure is worth retrying. `unsupported` means no extractor exists for the
@@ -68,4 +43,30 @@ export function failureReason(body: { error?: unknown; code?: unknown } | undefi
   if (status === 403) return 'write access is required here'
   if (status >= 500) return 'the server failed while writing the file (HTTP ' + String(status) + ')'
   return 'the upload was refused (HTTP ' + String(status) + ')'
+}
+
+/** The strip's height bounds, in pixels. */
+export const PROGRESS_MIN_HEIGHT = 44
+export const PROGRESS_DEFAULT_HEIGHT = 180
+/** The share of the panel's height the strip may take, leaving the tree the rest. */
+export const PROGRESS_MAX_SHARE = 0.6
+
+/**
+ * Clamp a dragged height into the strip's legal range.
+ *
+ * The upper bound is a share of the PANEL, not a constant: the strip must never grow
+ * until the file tree is unreachable, and how much room that is depends on how tall the
+ * panel currently is. A 600px panel and a 1200px panel therefore allow different
+ * maximums, which is what keeps the tree visible on both.
+ * @param desired - the height the pointer asked for.
+ * @param panelHeight - the panel's own height, when known.
+ * @returns The height to use.
+ */
+export function clampProgressHeight(desired: number, panelHeight: number | undefined): number {
+  const shareMax = panelHeight === undefined || panelHeight <= 0
+    ? PROGRESS_DEFAULT_HEIGHT * 2
+    : Math.floor(panelHeight * PROGRESS_MAX_SHARE)
+  const max = Math.max(PROGRESS_MIN_HEIGHT, shareMax)
+  if (!Number.isFinite(desired)) return PROGRESS_DEFAULT_HEIGHT
+  return Math.min(max, Math.max(PROGRESS_MIN_HEIGHT, Math.round(desired)))
 }

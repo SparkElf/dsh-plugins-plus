@@ -18,7 +18,7 @@ import {
   type DroppedFile,
   type DropTargetLike,
 } from '../src/client/useFileDrop.ts'
-import { canRetryExtraction, failureReason, shouldFoldStrip } from '../src/client/progressRules.ts'
+import { PROGRESS_DEFAULT_HEIGHT, PROGRESS_MIN_HEIGHT, clampProgressHeight, canRetryExtraction, failureReason } from '../src/client/progressRules.ts'
 
 /** A folder row that accepts drops. */
 const dir = (relativePath: string, overrides: Partial<DropTargetLike> = {}): DropTargetLike => ({
@@ -183,40 +183,6 @@ describe('a partial drop tells the reader which files failed', () => {
   })
 })
 
-describe('the progress strip folds only once per settled batch', () => {
-  /**
-   * The strip is a resident surface, so its fold rule is the difference between "it
-   * gets out of the way when done" and "it is in the way forever". The decision is
-   * imported from the component rather than restated here: a copy in the test would
-   * keep passing after the component's rule changed.
-   */
-  it('stays open while an upload is still in flight', () => {
-    expect(shouldFoldStrip([{ state: 'uploading' }], [], false)).toBe(false)
-    expect(shouldFoldStrip([{ state: 'waiting' }], [], false)).toBe(false)
-  })
-
-  it('stays open while an extraction is queued or running', () => {
-    expect(shouldFoldStrip([], [{ state: 'pending' }], false)).toBe(false)
-    expect(shouldFoldStrip([], [{ state: 'running' }], false)).toBe(false)
-  })
-
-  it('folds once the batch has settled', () => {
-    expect(shouldFoldStrip([{ state: 'done' }, { state: 'failed' }], [{ state: 'succeeded' }], false)).toBe(true)
-  })
-
-  it('does not fold again after the reader opened it', () => {
-    // The reader expanded a finished batch to read which file failed; folding it back
-    // would take away the answer they just asked for.
-    expect(shouldFoldStrip([{ state: 'failed' }], [], true)).toBe(false)
-  })
-
-  it('treats an unsupported extraction as settled', () => {
-    // No extractor exists for that type, so it will never change: waiting on it would
-    // keep the strip open forever.
-    expect(shouldFoldStrip([], [{ state: 'unsupported' }], false)).toBe(true)
-  })
-})
-
 describe('an extraction row says what happened and whether retrying helps', () => {
   /**
    * The five states are not interchangeable to a reader: "queued" means wait, "failed"
@@ -272,5 +238,48 @@ describe('a failure reason survives a response that is not JSON', () => {
   it('treats an empty error string as absent', () => {
     // A body of `{error: ''}` must not produce an empty reason.
     expect(failureReason({ error: '' }, 500)).toMatch(/server failed/u)
+  })
+})
+
+describe('the progress strip height stays inside its bounds', () => {
+  /**
+   * The strip is resizable, so every drag is a chance to make the file tree unreachable
+   * (drag too tall) or to leave an unusable sliver (drag too short). The clamp is the
+   * only thing standing between the reader and either end, so both bounds are pinned.
+   */
+  it('never lets the strip shrink below the minimum', () => {
+    // A reader dragging down hard must still leave a readable row.
+    expect(clampProgressHeight(0, 800)).toBe(PROGRESS_MIN_HEIGHT)
+    expect(clampProgressHeight(-500, 800)).toBe(PROGRESS_MIN_HEIGHT)
+  })
+
+  it('never lets the strip take more than its share of the panel', () => {
+    // 60% of 800 = 480: the tree keeps 320px, so it is still reachable and usable.
+    const clamped = clampProgressHeight(10_000, 800)
+    expect(clamped).toBeLessThanOrEqual(480)
+    expect(clamped).toBeGreaterThanOrEqual(PROGRESS_MIN_HEIGHT)
+  })
+
+  it('scales the maximum with the panel, not a fixed pixel cap', () => {
+    // A taller panel may give the strip more room; a short one must not.
+    expect(clampProgressHeight(10_000, 1200)).toBeGreaterThan(clampProgressHeight(10_000, 400))
+  })
+
+  it('passes a height that is already legal straight through', () => {
+    expect(clampProgressHeight(180, 800)).toBe(180)
+    expect(clampProgressHeight(PROGRESS_MIN_HEIGHT, 800)).toBe(PROGRESS_MIN_HEIGHT)
+  })
+
+  it('falls back to the default when the panel height is unknown', () => {
+    // Before layout the parent height is 0/undefined; the drag must still be sane
+    // rather than collapsing to the minimum.
+    expect(clampProgressHeight(500, undefined)).toBeGreaterThanOrEqual(PROGRESS_MIN_HEIGHT)
+    expect(clampProgressHeight(500, 0)).toBeGreaterThanOrEqual(PROGRESS_MIN_HEIGHT)
+  })
+
+  it('returns the default for a non-finite drag value', () => {
+    // A pointer event can report NaN mid-teardown; a NaN height would blank the strip.
+    expect(clampProgressHeight(Number.NaN, 800)).toBe(PROGRESS_DEFAULT_HEIGHT)
+    expect(clampProgressHeight(Number.POSITIVE_INFINITY, 800)).toBe(PROGRESS_DEFAULT_HEIGHT)
   })
 })

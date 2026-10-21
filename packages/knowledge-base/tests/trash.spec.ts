@@ -6,6 +6,7 @@ import {
   tombstoneHides,
   type Tombstone,
 } from '../src/trash.ts'
+import { bucketOf, usableDepartmentPath } from '../src/views.ts'
 
 /** Build a tombstone with the fields a test does not care about filled in. */
 function stone(relPath: string, kind: 'file' | 'directory' = 'file'): Tombstone {
@@ -102,5 +103,118 @@ describe('the hidden set a view builder consumes', () => {
 
   it('is empty when nothing was removed', () => {
     expect(hiddenPaths([]).size).toBe(0)
+  })
+})
+
+describe('删除 → 列表消失 → 回收站出现 → 恢复 → 列表出现', () => {
+  /**
+   * The four states a reader judges the trash by, driven through the functions the
+   * Host actually calls. Two coordinate spaces are exercised because that is where
+   * the reported defect lived:
+   *
+   * - `global/a.md` is the same string in both spaces, so it always worked.
+   * - `personal/<uid>/note.md` is NOT: the view drops the owner segment, so the
+   *   tombstone has to be matched against `personal/note.md`. Deleting a personal
+   *   document used to write the tombstone and leave the file visible.
+   */
+  const USER = 'u-1'
+
+  /** The view-relative path a tombstone must also match, mirroring syncCallerView. */
+  function viewPathOf(relPath: string, departmentPathCodes: readonly string[] = []): string | undefined {
+    const placement = bucketOf(relPath, usableDepartmentPath(departmentPathCodes))
+    return placement === undefined ? undefined : placement.bucket + '/' + placement.inner
+  }
+
+  /** The hidden set syncCallerView builds: both forms, deduplicated. */
+  function hiddenSet(entries: readonly Tombstone[], codes: readonly string[] = []): Set<string> {
+    const out = new Set<string>()
+    for (const entry of entries) {
+      out.add(entry.relPath)
+      const viewPath = viewPathOf(entry.relPath, codes)
+      if (viewPath !== undefined) out.add(viewPath)
+    }
+    return out
+  }
+
+  /** Whether the view would show this authoritative path after a sync. */
+  function visibleInView(entries: readonly Tombstone[], relPath: string, codes: readonly string[] = []): boolean {
+    const viewPath = viewPathOf(relPath, codes)
+    if (viewPath === undefined) return false
+    return !hiddenSet(entries, codes).has(viewPath)
+  }
+
+  it('runs all four states for a global document', () => {
+    const relPath = 'global/a.md'
+    // 1. before removal: it is in the listing.
+    let tombstones: readonly Tombstone[] = []
+    expect(visibleInView(tombstones, relPath)).toBe(true)
+
+    // 2. remove: absent from the listing, present in the trash.
+    tombstones = addTombstone(tombstones, stone(relPath))
+    expect(visibleInView(tombstones, relPath)).toBe(false)
+    expect(tombstones.map(entry => entry.relPath)).toEqual([relPath])
+
+    // 3. restore: back in the listing, gone from the trash.
+    const restored = removeTombstone(tombstones, relPath)
+    expect(restored.restored).toBe(true)
+    expect(restored.entries).toEqual([])
+    expect(visibleInView(restored.entries, relPath)).toBe(true)
+  })
+
+  it('runs all four states for a PERSONAL document, whose view path drops the owner', () => {
+    // This is the case that used to fail: the tombstone says personal/u-1/note.md but
+    // the view builds personal/note.md, so the deleted file stayed visible.
+    const relPath = `personal/${USER}/note.md`
+    // The two spaces genuinely differ, which is what makes this test meaningful.
+    expect(viewPathOf(relPath)).toBe('personal/note.md')
+
+    let tombstones: readonly Tombstone[] = []
+    expect(visibleInView(tombstones, relPath)).toBe(true)
+
+    tombstones = addTombstone(tombstones, stone(relPath))
+    // THE assertion: the deleted personal document leaves the listing.
+    expect(visibleInView(tombstones, relPath)).toBe(false)
+    expect(tombstones.map(entry => entry.relPath)).toEqual([relPath])
+
+    const restored = removeTombstone(tombstones, relPath)
+    expect(restored.restored).toBe(true)
+    expect(visibleInView(restored.entries, relPath)).toBe(true)
+  })
+
+  it('runs all four states for a legacy flat department document', () => {
+    // With NO organization path the department bucket stays one level deep, so
+    // `department/<leaf>/file` is served at the bucket root as `department/file` --
+    // a third shape, same rule. (A caller WITH a path keeps the chain instead, which
+    // is why this case passes no codes.)
+    const relPath = 'department/data-combat/legacy.md'
+    expect(viewPathOf(relPath, [])).toBe('department/legacy.md')
+
+    let tombstones: readonly Tombstone[] = []
+    expect(visibleInView(tombstones, relPath, [])).toBe(true)
+    tombstones = addTombstone(tombstones, stone(relPath))
+    expect(visibleInView(tombstones, relPath, [])).toBe(false)
+
+    const restored = removeTombstone(tombstones, relPath)
+    expect(visibleInView(restored.entries, relPath, [])).toBe(true)
+  })
+
+  it('keeps a raw tombstone working without migration', () => {
+    // Old records contain only the authoritative path. The hidden set still contains
+    // that raw form, so nothing needs rewriting when this ships.
+    const entries = [stone(`personal/${USER}/old.md`)]
+    expect(hiddenSet(entries).has(`personal/${USER}/old.md`)).toBe(true)
+    // And a caller who stores the view form directly is honoured too.
+    expect(hiddenSet([stone('personal/direct.md')]).has('personal/direct.md')).toBe(true)
+  })
+
+  it('hides a whole personal directory, not just its own path', () => {
+    // Removing a folder must take its contents with it: the subtree is matched on the
+    // tombstoned path, and the view form carries the same relationship.
+    const entries = [stone(`personal/${USER}/folder`, 'directory')]
+    expect(tombstoneHides(entries, `personal/${USER}/folder/inner.md`)).toBeDefined()
+    // The tombstone itself names the folder; the child is hidden by the subtree rule
+    // inside `tombstoneHides`, not by a separate entry in the hidden set.
+    expect(entries.some(entry => entry.relPath === `personal/${USER}/folder`)).toBe(true)
+    expect(hiddenSet(entries).has('personal/folder')).toBe(true)
   })
 })

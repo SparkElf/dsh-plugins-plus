@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, type ExtractionStatusView, type ExtractionTaskView } from '../api.ts'
-import { canRetryExtraction, shouldFoldStrip } from './progressRules.ts'
+import { PROGRESS_DEFAULT_HEIGHT, PROGRESS_MIN_HEIGHT, clampProgressHeight, canRetryExtraction } from './progressRules.ts'
 import styles from './KnowledgeProgressPanel.module.css'
 
 /** One file's upload, as the strip shows it. */
@@ -60,9 +60,6 @@ const POLL_MS = 1_500
 /** Which extraction states are still worth polling for. */
 const ACTIVE_STATES = new Set(['pending', 'running'])
 
-/** The strip's own fold state: open while working, folded once everything settled. */
-type Fold = 'open' | 'folded'
-
 /**
  * Render one extraction task's state as a sentence.
  * @param task - the task from the Host.
@@ -96,12 +93,57 @@ function describeExtraction(
 export function KnowledgeProgressPanel(props: KnowledgeProgressPanelProps) {
   const t = props.t
   const [extractions, setExtractions] = useState<ExtractionTaskView[]>([])
-  const [fold, setFold] = useState<Fold>('open')
   /** The task being retried, so only its own row shows the pending state. */
   const [retrying, setRetrying] = useState<string | undefined>(undefined)
   const [retryError, setRetryError] = useState<{ relPath: string; reason: string } | undefined>(undefined)
-  /** Set once a batch has settled, so the fold can happen exactly once. */
-  const settled = useRef(false)
+  /**
+   * The strip's height, driven by the drag handle.
+   *
+   * Fixed rather than content-sized: a long batch must scroll inside the strip instead
+   * of pushing the file tree off the panel. The drag writes this value through
+   * `clampProgressHeight`, which is what keeps the tree reachable at the top end.
+   */
+  const [height, setHeight] = useState(PROGRESS_DEFAULT_HEIGHT)
+  /** The strip's own element, so a drag can measure the panel it lives in. */
+  const stripRef = useRef<HTMLElement | null>(null)
+
+  /**
+   * Begin a height drag.
+   *
+   * The move/up listeners go on `window`, not on the handle: a pointer drag leaves the
+   * 6px handle immediately, and listeners bound to it would stop firing the moment it did.
+   * `pointerup` removes both, so a drag cannot leak a listener that keeps resizing.
+   * @param event - the pointerdown on the handle.
+   */
+  const startResize = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    const startY = event.clientY
+    const startHeight = height
+    // The parent's height is the budget the strip shares with the tree.
+    const panelHeight = stripRef.current?.parentElement?.clientHeight
+
+    const onMove = (moveEvent: PointerEvent): void => {
+      // Dragging UP grows the strip: the handle sits on its top edge.
+      const next = startHeight + (startY - moveEvent.clientY)
+      setHeight(clampProgressHeight(next, panelHeight))
+    }
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [height])
+
+  /** Keyboard equivalent, so the handle is usable without a pointer. */
+  const onResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    event.preventDefault()
+    const panelHeight = stripRef.current?.parentElement?.clientHeight
+    const delta = event.key === 'ArrowUp' ? 16 : -16
+    setHeight(clampProgressHeight(height + delta, panelHeight))
+  }, [height])
+
 
   const readExtractions = useCallback(async (): Promise<ExtractionTaskView[]> => {
     const response = await fetch(kbApiPath(KB_API.extractStatus), {
@@ -159,21 +201,6 @@ export function KnowledgeProgressPanel(props: KnowledgeProgressPanelProps) {
     return { done, failed, active, settledAll: extractions.length > 0 && active === 0 }
   }, [extractions])
 
-  // Fold once, when the last batch reached a terminal state. `settled` keeps it from
-  // re-folding after the reader opened it to read the result.
-  useEffect(() => {
-    const everythingSettled = (props.uploads.length === 0 || upload.settledAll)
-      && (extractions.length === 0 || extraction.settledAll)
-    if (shouldFoldStrip(props.uploads, extractions, settled.current)) {
-      settled.current = true
-      setFold('folded')
-    }
-    if (!everythingSettled) {
-      settled.current = false
-      setFold('open')
-    }
-  }, [props.uploads.length, upload.settledAll, extractions.length, extraction.settledAll])
-
   /** Ask the Host to run this extraction again. */
   const retry = useCallback(async (relPath: string): Promise<void> => {
     setRetrying(relPath)
@@ -217,19 +244,32 @@ export function KnowledgeProgressPanel(props: KnowledgeProgressPanelProps) {
   }
 
   return (
-    <section className={styles.strip} aria-label={t('progressTitle')}>
+    <section
+      ref={stripRef}
+      className={styles.strip}
+      style={{ height: String(height) + 'px' }}
+      aria-label={t('progressTitle')}
+    >
+      {/* The resize handle sits on the TOP edge: the strip is anchored to the panel's
+          foot, so growing it means moving its top boundary up. A separator role with an
+          orientation is what tells a screen reader the thing is adjustable at all. */}
+      <div
+        className={styles.handle}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label={t('progressResize')}
+        aria-valuenow={height}
+        aria-valuemin={PROGRESS_MIN_HEIGHT}
+        aria-valuemax={clampProgressHeight(Number.MAX_SAFE_INTEGER, stripRef.current?.parentElement?.clientHeight ?? undefined)}
+        tabIndex={0}
+        onPointerDown={startResize}
+        onKeyDown={onResizeKeyDown}
+      />
       <header className={styles.head}>
         <span className={styles.summary}>{summary()}</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => { setFold(current => (current === 'open' ? 'folded' : 'open')) }}
-        >
-          {fold === 'open' ? t('progressCollapse') : t('progressExpand')}
-        </Button>
       </header>
 
-      {fold === 'open' && (
+      {(
         <div className={styles.body}>
           {props.uploads.length > 0 && (
             <div className={styles.group}>

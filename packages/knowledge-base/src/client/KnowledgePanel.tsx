@@ -75,6 +75,7 @@ import { KnowledgeSearch, useKnowledgeSearch } from './KnowledgeSearch.tsx'
 import { KB_DRAG_MIME, KnowledgeListing } from './KnowledgeListing.tsx'
 import { KnowledgeProgressPanel, type UploadTaskView } from './KnowledgeProgressPanel.tsx'
 import { failureReason } from './progressRules.ts'
+import { resolveUploadDir } from './dropTargetPath.ts'
 import { KnowledgeIconButton, KnowledgeSectionHeader } from './KnowledgeSectionHeader.tsx'
 import { useFavorites } from './useFavorites.ts'
 import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
@@ -585,6 +586,25 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * prop and an un-upgraded backend — which reports neither array — simply omits it,
    * leaving the folders to print their codes exactly as before.
    */
+  /**
+   * Report a drop that had no safe destination.
+   *
+   * Shown as a failed row in the progress strip rather than swallowed: the reader
+   * dragged a file and is watching for it to appear, and "nothing happened" is the one
+   * outcome that gives them nothing to act on. The reason names the missing fact.
+   */
+  const reportDropRefused = useCallback((): void => {
+    setUploadTasks([{ name: t('dropRefusedNoCaller'), dir: '', state: 'failed', reason: t('dropRefusedNoCallerReason') }])
+  }, [t])
+
+  /**
+   * The id the Host reports for this caller, used to place a drop in `personal`.
+   *
+   * The view hides the owner segment, so a tree row carries `personal`; every write has
+   * to put the id back. Kept as one value so the three drop entry points cannot disagree.
+   */
+  const callerId = state.kind === 'ready' ? state.status.caller?.userId : undefined
+
   const callerPath = useMemo((): { codes: readonly string[]; names: readonly string[] } | undefined => {
     const caller = state.kind === 'ready' ? state.status.caller : undefined
     const codes = caller?.departmentPathCodes
@@ -1271,7 +1291,21 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                       // part that was missing.
                       setReferencing({ path, isDir })
                     }}
-                    onUploadRequest={(dir, items) => { void uploadInto(kbRoot, dir, items) }}
+                    onUploadRequest={(dir, items) => {
+                      // `dir` arrives absolute under the mount; the view calls the personal
+                      // bucket plain `personal`, so the owner segment has to be put back
+                      // before anything is written.
+                      const viewRel = relativeToRoot(kbRoot, dir)
+                      const target = resolveUploadDir(viewRel, callerId)
+                      if (target === undefined) {
+                        // Refused rather than written to `personal` bare: that path is
+                        // invisible in the view, so a silent write would look like a
+                        // successful upload the reader can never find.
+                        reportDropRefused()
+                        return
+                      }
+                      void uploadInto(kbRoot, target === '' ? kbRoot : joinPath(kbRoot, target), items)
+                    }}
                     // A drop during an upload is ignored rather than queued: two batches
                     // writing the same folder at once would interleave their progress
                     // rows and make the strip's counts meaningless.
@@ -1300,10 +1334,15 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     // arrive relative to that row, which is what `uploadInto` appends
                     // to the row's own path.
                     onUpload={(relPath, files) => {
-                      // `uploadInto` addresses the directory the way the explorer does:
-                      // absolute under the mount. A root-level drop has no row of its
-                      // own, so `relPath` there is '' and the target is the root itself.
-                      void uploadInto(kbRoot, relPath === '' ? kbRoot : joinPath(kbRoot, relPath), files as never)
+                      // The row's own path, with the owner segment restored for `personal`.
+                      // A root-level drop has no row of its own, so `relPath` is '' and the
+                      // target is the mount root.
+                      const target = resolveUploadDir(relPath, callerId)
+                      if (target === undefined) {
+                        reportDropRefused()
+                        return
+                      }
+                      void uploadInto(kbRoot, target === '' ? kbRoot : joinPath(kbRoot, target), files as never)
                     }}
                     refreshTick={refreshTick}
                     onRenamed={() => { setRefreshTick(t => t + 1) }}
@@ -1502,13 +1541,10 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 // A file dropped anywhere on the table lands in the reader's own
                 // folder: `global` is the bucket everyone reads, so defaulting there
                 // would publish a private draft without asking.
-                dropDirectory={(() => {
-                  // The reader's own folder, named by the id the Host reports for them.
-                  // Without that id there is no personal folder to aim at, so the drop
-                  // falls back to the mount root rather than to a path ending in '/'.
-                  const me = state.kind === 'ready' ? state.status.caller?.userId : undefined
-                  return me === undefined || me === '' ? '' : 'personal/' + me
-                })()}
+                // The reader's own folder. `resolveUploadDir` refuses when the Host has
+                // not reported an id yet, which the drop handler turns into a visible
+                // refusal instead of writing somewhere invisible.
+                dropDirectory={resolveUploadDir('personal', callerId) ?? ''}
                 onUpload={(directory, files) => {
                   void uploadInto(config.mountPoint, directory === '' ? config.mountPoint : joinPath(config.mountPoint, directory), files as never)
                 }}

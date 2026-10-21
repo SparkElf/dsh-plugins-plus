@@ -47,6 +47,7 @@ import {
   isContainedRelPath,
   isSafeUserId,
   moveEntry,
+  bucketOf,
   copyEntry,
   discardPendingWrite,
   expectedViewPathFor,
@@ -76,6 +77,7 @@ import {
   writeStorageSettings,
   writeTreeState,
   writeViewMode,
+  usableDepartmentPath,
   type KnowledgeAuditEntry,
   type KnowledgeStorageSettings,
   type ResolvedPath,
@@ -590,7 +592,28 @@ export async function syncCallerView(
   if (trash.kind === 'unreadable') {
     host.logger?.warn?.(`knowledge-base: unusable trash record for ${caller.userId}: ${trash.reason}`)
   }
-  const hidden = trash.kind === 'ready' ? trash.entries.map(entry => entry.relPath) : []
+  // A tombstone stores the path the CALLER named, which is the authoritative one
+  // (`personal/<uid>/note.md`). `syncView` compares against the VIEW path it is about
+  // to create (`personal/note.md` -- the owner segment is dropped, see `bucketOf`).
+  // For `global` and nested departments the two are the same string, which is why
+  // removal appeared to work; for `personal` and legacy flat department paths they
+  // differ, so the tombstone never matched and the deleted document stayed in the
+  // list. Measured on the live deployment: deleting `personal/<uid>/probe.md` wrote
+  // the tombstone and left the file visible.
+  //
+  // Both forms are emitted here rather than teaching `syncView` about two coordinate
+  // systems: the view builder has ONE rule for what to hide, and the caller is what
+  // knows where a path came from. Emitting both keeps old tombstones working with no
+  // migration -- the raw form is already what they contain.
+  const hidden = trash.kind === 'ready'
+    ? trash.entries.flatMap(entry => {
+      const placement = bucketOf(entry.relPath, usableDepartmentPath(caller.departmentPathCodes))
+      const viewPath = placement === undefined ? undefined : placement.bucket + '/' + placement.inner
+      return viewPath === undefined || viewPath === entry.relPath
+        ? [entry.relPath]
+        : [entry.relPath, viewPath]
+    })
+    : []
   // Two facts travel here that `syncView` cannot work out for itself.
   //
   // `fullScan`: `paths === undefined` means the candidate list came from walking the

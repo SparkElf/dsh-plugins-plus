@@ -68,7 +68,7 @@ const PANEL_ID = 'knowledge-base'
  * `workspaces` is the other half: the mention is spelled relative to the workspace that
  * owns the session, so the insert needs that root to project the path.
  */
-export const inject = ['slots', 'locale', 'uiSession', 'sessions', 'workspaces']
+export const inject = ['slots', 'locale', 'uiSession', 'sessions', 'workspaces', 'uiWorkspace']
 
 /**
  * Register the knowledge-base navigation entry and Settings section.
