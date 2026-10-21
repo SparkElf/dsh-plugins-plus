@@ -31,6 +31,8 @@ import { departmentPathLabels, folderLabelOf, type DepartmentPath } from './depa
 import { VIEW_METADATA_FILENAMES } from '../viewMetadata.ts'
 import styles from './KnowledgeFileTree.module.css'
 import { batchRowsFor } from './referenceTargets.ts'
+import { KB_API, kbApiPath } from '../api.ts'
+import { en, zh } from './locales.ts'
 
 /**
  * Files the explorer must not list.
@@ -339,6 +341,26 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
       refreshTick={refreshTick}
       onUploadRequest={onUploadRequest}
       busy={busy}
+      {...({
+        // `extraMenuItems` is the explorer's append hook: the native rows stay exactly as
+        // they are and these land after a separator. Cast because the installed explorer
+        // typings may predate the prop; the runtime ignores unknown props.
+        extraMenuItems: [
+          {
+            id: 'kb-extract-markdown',
+            label: (typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en).menuExtractMarkdown,
+            when: (target: { relPath: string; isDir: boolean }) => !target.isDir,
+            onSelect: (target: { relPath: string; isDir: boolean }) => {
+              if (target.isDir) return
+              void fetch(kbApiPath(KB_API.extractRetry), {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ relPath: target.relPath, wait: true }),
+              })
+            },
+          },
+        ],
+      } as Record<string, unknown>)}
       visible={props.visible ?? true}
       // The tree is already scoped to the knowledge root, so a row naming that root
       // would repeat a level the reader never navigates through.
