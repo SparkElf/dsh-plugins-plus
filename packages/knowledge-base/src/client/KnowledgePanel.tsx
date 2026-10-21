@@ -77,12 +77,7 @@ import { KnowledgeProgressPanel, type UploadTaskView } from './KnowledgeProgress
 import { failureReason } from './progressRules.ts'
 import { KnowledgeIconButton, KnowledgeSectionHeader } from './KnowledgeSectionHeader.tsx'
 import { useFavorites } from './useFavorites.ts'
-import {
-  KnowledgeContextMenu,
-  type ContextTarget,
-  type TreeClipboard,
-} from './KnowledgeContextMenu.tsx'
-import { shareCopyFor } from './knowledgeMenuCopy.ts'
+import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
 import { usePinnedPaths } from './usePinnedPaths.ts'
 import { useTreeState } from './useTreeState.ts'
 import { useViewMode } from './useViewMode.ts'
@@ -627,19 +622,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    *
    * One instance for the whole page rather than one per surface: the home table and the
    * tree must offer the same actions, and two instances would be two places to keep in
-   * step. Each surface reports the row the reader right-clicked and where, and this
-   * renders the menu.
    */
-  const [treeMenu, setTreeMenu] = useState<{
-    target: ContextTarget
-    at: { x: number; y: number }
-    /** The rows a batch entry acts on, when the click landed inside a multi-selection. */
-    selection?: readonly ContextTarget[]
-  } | null>(null)
   /** The cut/copied entry, shared by both surfaces so a copy on one pastes on the other. */
   const [clipboard, setClipboard] = useState<TreeClipboard | null>(null)
-  /** Copy for the share dialog. */
-  const shareCopy = useMemo(() => shareCopyFor(props.locale), [props.locale])
 
   /**
    * The directory a paste would land in for one row.
@@ -647,11 +632,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * A folder pastes into itself; a file pastes beside itself. `''` is the tree root,
    * which is a real destination rather than "unknown".
    */
-  const pasteTargetFor = useCallback((relPath: string, isDir: boolean): string | null => {
-    if (isDir) return relPath
-    const cut = relPath.lastIndexOf('/')
-    return cut === -1 ? '' : relPath.slice(0, cut)
-  }, [])
 
   /**
    * The rows the batch bar acts on.
@@ -1302,18 +1282,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     // star in both places instead of each surface keeping its own set.
                     isFavorite={favorites.has}
                     favoriteMarkLabel={t('favoriteMark')}
-                    // The explorer builds its own menu inside itself; this hands the
-                    // gesture to the page's shared menu instead, so the tree and the home
-                    // table offer one action set rather than two that can drift.
-                    onRowContextMenu={(relPath, isDir, at, selection) => {
-                      setTreeMenu({
-                        target: { relPath, name: relPath.split('/').pop() ?? relPath, isDir },
-                        at,
-                        // Present only when the click landed inside a multi-selection;
-                        // the menu says how many rows that is in its labels.
-                        selection,
-                      })
-                    }}
                   />
                 ) : (
                   // The plugin's own listing rather than the borrowed tree.
@@ -1372,32 +1340,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     )}
                   />
                 )}
-              {/* The page's shared row menu, one instance for both surfaces. Rendered
-                  outside the tree's scroll container so it is never clipped by it. */}
-              <KnowledgeContextMenu
-                target={treeMenu?.target ?? null}
-                at={treeMenu?.at ?? null}
-                t={t}
-                shareCopy={shareCopy}
-                pinned={treeMenu === null ? false : pins.has(treeMenu.target.relPath)}
-                favorite={treeMenu === null ? false : favorites.has(treeMenu.target.relPath)}
-                clipboard={clipboard}
-                pasteInto={treeMenu === null ? null : pasteTargetFor(treeMenu.target.relPath, treeMenu.target.isDir)}
-                onClose={() => { setTreeMenu(null) }}
-                onGrant={(path) => { openPermissions(path) }}
-                onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
-                onFavorite={(path, favorite) => { favorites.setFavorite(path, favorite) }}
-                onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
-                onClipboard={(entry) => { setClipboard(entry) }}
-                onRenamed={() => { setRefreshTick(t => t + 1) }}
-                onDeleted={() => { setRefreshTick(t => t + 1) }}
-                onMoved={() => {
-                  // A cut consumes the clipboard; a copy keeps it so one entry can be
-                  // pasted into a second folder.
-                  setClipboard(current => (current?.cut === true ? null : current))
-                  setRefreshTick(t => t + 1)
-                }}
-              />
               {/* The batch bar closes the tree's own scroll container, so it sits
                   below every row rather than over them and never shifts the tree the
                   way a top bar would. It appears only while rows are selected: an
@@ -1416,6 +1358,80 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     for (const path of selectedPaths) pins.setPinned(path, true)
                     setSelectedPaths([])
                   }}
+                  // The actions that used to be reached by right-clicking a row. The
+                  // explorer's own menu cannot be extended, so they live here instead
+                  // of replacing it.
+                  allPinned={selectedPaths.length > 0 && selectedPaths.every(path => pins.has(path))}
+                  onShare={() => {
+                    // A share dialog names one principal for one path; a batch share
+                    // would need a different form. Acting on the first selected path
+                    // with the count visible is honest about what it does.
+                    const first = selectedPaths[0]
+                    if (first !== undefined) openPermissions(first)
+                  }}
+                  allFavorite={selectedPaths.length > 0 && selectedPaths.every(path => favorites.has(path))}
+                  onFavorite={() => {
+                    const all = selectedPaths.every(path => favorites.has(path))
+                    for (const path of selectedPaths) favorites.setFavorite(path, !all)
+                    setSelectedPaths([])
+                  }}
+                  onReference={() => {
+                    const first = selectedPaths[0]
+                    if (first === undefined) return
+                    askReferenceTarget(
+                      first,
+                      false,
+                      selectedPaths.map(path => ({ relPath: path, isDir: false })),
+                    )
+                  }}
+                  onPermissions={() => {
+                    const first = selectedPaths[0]
+                    if (first !== undefined) openPermissions(first)
+                  }}
+                  onCut={() => {
+                    setClipboard({
+                      entries: selectedPaths.map(path => ({ relPath: path, name: path.split('/').pop() ?? path })),
+                      cut: true,
+                    })
+                    setSelectedPaths([])
+                  }}
+                  onPaste={() => {
+                    // Paste lands in the directory shared by the selection; a selection
+                    // spanning two directories has no single destination, so the first
+                    // row's directory is used and the bar states the count.
+                    const first = selectedPaths[0]
+                    if (first === undefined) return
+                    const cut = first.lastIndexOf('/')
+                    const into = cut === -1 ? '' : first.slice(0, cut)
+                    const clip = clipboard
+                    if (clip === null) return
+                    void (async () => {
+                      setBatchBusy(true)
+                      try {
+                        for (const entry of clip.entries) {
+                          const response = await fetch(kbApiPath(clip.cut ? KB_API.move : KB_API.copy), {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json' },
+                            body: JSON.stringify({ from: entry.relPath, to: into }),
+                            cache: 'no-store',
+                          })
+                          if (!response.ok) {
+                            const body = (await response.json().catch(() => ({}))) as { error?: string }
+                            throw new Error(body.error ?? 'HTTP ' + String(response.status))
+                          }
+                        }
+                        if (clip.cut) setClipboard(null)
+                        setSelectedPaths([])
+                        setRefreshTick(t => t + 1)
+                      } catch (failure: unknown) {
+                        setBatchError(t('moveFailed').replace('{reason}', failure instanceof Error ? failure.message : String(failure)))
+                        setRefreshTick(t => t + 1)
+                      } finally {
+                        setBatchBusy(false)
+                      }
+                    })()
+                  }}
+                  canPaste={clipboard !== null && selectedPaths.length > 0}
                   onClear={() => { setSelectedPaths([]) }}
                 />
               )}

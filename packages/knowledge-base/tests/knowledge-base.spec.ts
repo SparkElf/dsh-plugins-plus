@@ -5253,6 +5253,51 @@ describe('the @-mention target picker', () => {
     expect(home).not.toMatch(/KB_API\.share[A-Z]/u)
   })
 
+  /**
+   * The explorer's own context menu must survive.
+   *
+   * It offers six actions the plugin never had (upload here, new folder, new file,
+   * zip-and-download, copy relative/absolute address). An earlier revision intercepted
+   * the gesture in the capture phase and replaced that menu with the plugin's, which
+   * took all six away -- the reported bug. These assertions pin the retreat: the tree
+   * does not touch the event at all, and nothing is left half-disabled.
+   */
+  it('never intercepts the explorer context menu', async () => {
+    const tree = await read('KnowledgeFileTree.tsx')
+    // No capture-phase listener on the container.
+    expect(tree).not.toMatch(/addEventListener\(\s*'contextmenu'/u)
+    expect(tree).not.toMatch(/onContextCapture/u)
+    // And no leftover prop that would let a caller reinstate the interception.
+    expect(tree).not.toMatch(/onRowContextMenu/u)
+  })
+
+  it('leaves no commented-out interception behind', async () => {
+    // A disabled copy is what a later reader turns back on. The removal must be real:
+    // no comment line may still contain the listener registration, which is the form a
+    // "just disable it" edit leaves behind.
+    const tree = await read('KnowledgeFileTree.tsx')
+    expect(tree).not.toMatch(/^\s*(\/\/|\*).*addEventListener\(\s*'contextmenu'/imu)
+    expect(tree).not.toMatch(/^\s*(\/\/|\*).*onContextCapture/imu)
+  })
+
+  it('keeps the plugin actions reachable from the selection bar', async () => {
+    // The actions moved rather than vanished. Each must be offered by the bar the
+    // reader gets after selecting rows.
+    const bar = await read('KnowledgeSelectionBar.tsx')
+    for (const handler of ['onShare', 'onFavorite', 'onReference', 'onPermissions', 'onCut', 'onPaste']) {
+      expect(bar).toContain(handler)
+    }
+    // The bar is a real toolbar, so no bespoke popover was introduced for this.
+    expect(bar).toMatch(/role="toolbar"/u)
+  })
+
+  it('wires every one of those actions at the page', async () => {
+    const panel = await read('KnowledgePanel.tsx')
+    for (const handler of ['onShare', 'onFavorite', 'onReference', 'onPermissions', 'onCut', 'onPaste']) {
+      expect(panel).toContain(handler + '=')
+    }
+  })
+
   it('declares every string it uses in both locales', async () => {
     const picker = await read('KnowledgeReferencePicker.tsx')
     const locales = await read('locales.ts')

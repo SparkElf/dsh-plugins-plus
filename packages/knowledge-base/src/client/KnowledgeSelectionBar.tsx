@@ -29,6 +29,34 @@ export interface KnowledgeSelectionBarProps {
   onMove: () => void
   /** Pin every selected path. */
   onPin: () => void
+  /**
+   * The plugin's own actions, which used to live in a row context menu.
+   *
+   * They are here because the explorer's context menu cannot be extended: intercepting
+   * it meant REPLACING the six actions a reader already relies on (upload here, new
+   * folder, new file, zip-and-download, copy relative/absolute address). The bar is the
+   * honest place for them -- it appears on selection, offers no competition with the
+   * explorer's own menu, and is itself a primitive-shaped toolbar.
+   *
+   * Each is optional so a read-only surface can pass only what it supports.
+   */
+  onShare?: () => void
+  /** Favourite every selected path (or unfavourite, when all are already starred). */
+  onFavorite?: () => void
+  /** Whether every selected path is currently favourited, which picks the label. */
+  allFavorite?: boolean
+  /** Ask a conversation to reference every selected path. */
+  onReference?: () => void
+  /** Open the permission surface for the selection. */
+  onPermissions?: () => void
+  /** Put the selection on the clipboard. */
+  onCut?: () => void
+  /** Paste the clipboard into the selection's directory, when there is one. */
+  onPaste?: () => void
+  /** Whether a paste is possible: clipboard non-empty and a destination known. */
+  canPaste?: boolean
+  /** True when every selected path is pinned, which picks the pin label. */
+  allPinned?: boolean
   /** Drop the selection. */
   onClear: () => void
   /**
@@ -73,8 +101,71 @@ export function KnowledgeSelectionBar(props: KnowledgeSelectionBarProps) {
           disabled={props.busy === true}
           onClick={props.onPin}
         >
-          {props.t('pinSelected')}
+          {props.allPinned === true ? props.t('actionUnpin') : props.t('pinSelected')}
         </button>
+        {/* The actions that used to be reachable only by right-clicking a row. They
+            live here because the explorer's own menu cannot be appended to, and
+            replacing it would take away the six actions a reader already uses. */}
+        {props.onShare !== undefined && (
+          <button
+            type="button"
+            className={styles.action}
+            disabled={props.busy === true}
+            onClick={props.onShare}
+          >
+            {props.t('actionShare')}
+          </button>
+        )}
+        {props.onFavorite !== undefined && (
+          <button
+            type="button"
+            className={styles.action}
+            disabled={props.busy === true}
+            onClick={props.onFavorite}
+          >
+            {props.allFavorite === true ? props.t('actionUnfavorite') : props.t('actionFavorite')}
+          </button>
+        )}
+        {props.onReference !== undefined && (
+          <button
+            type="button"
+            className={styles.action}
+            disabled={props.busy === true}
+            onClick={props.onReference}
+          >
+            {props.t('actionReference')}
+          </button>
+        )}
+        {props.onPermissions !== undefined && (
+          <button
+            type="button"
+            className={styles.action}
+            disabled={props.busy === true}
+            onClick={props.onPermissions}
+          >
+            {props.t('actionPermissions')}
+          </button>
+        )}
+        {props.onCut !== undefined && (
+          <button
+            type="button"
+            className={styles.action}
+            disabled={props.busy === true}
+            onClick={props.onCut}
+          >
+            {props.t('actionCut')}
+          </button>
+        )}
+        {props.onPaste !== undefined && (
+          <button
+            type="button"
+            className={styles.action}
+            disabled={props.busy === true || props.canPaste === false}
+            onClick={props.onPaste}
+          >
+            {props.t('actionPaste')}
+          </button>
+        )}
         <button
           type="button"
           className={styles.action}
