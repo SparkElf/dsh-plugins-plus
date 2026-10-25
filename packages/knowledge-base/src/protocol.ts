@@ -114,6 +114,19 @@ export interface KnowledgeStatus {
   lastSyncAt: string | null
   /** The in-flight index job, when one is running. */
   indexing: { running: boolean; jobId?: string; progress?: number }
+  /** Optional vector index coverage; reported only by hosts that have this feature. */
+  vector?: {
+    enabled: boolean
+    provider?: string
+    model?: string
+    embeddedChunks: number
+    totalChunks: number
+    embeddedDocs: number
+    totalDocs: number
+    failed: number
+    canManageVector?: boolean
+    indexing: { running: boolean; total?: number; done?: number; embedded?: number; failed?: number; error?: string }
+  }
 }
 
 /**

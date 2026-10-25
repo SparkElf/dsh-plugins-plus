@@ -41,6 +41,7 @@ interface FakeOptions {
   chunkGet?: KnowledgeFileToolHost['chunkGet']
   outline?: KnowledgeFileToolHost['outline']
   outlineSave?: KnowledgeFileToolHost['outlineSave']
+  vectorize?: KnowledgeFileToolHost['vectorize']
 }
 
 const makeHost = (options: FakeOptions = {}) => {
@@ -60,6 +61,7 @@ const makeHost = (options: FakeOptions = {}) => {
     ...(options.chunkGet === undefined ? {} : { chunkGet: options.chunkGet }),
     ...(options.outline === undefined ? {} : { outline: options.outline }),
     ...(options.outlineSave === undefined ? {} : { outlineSave: options.outlineSave }),
+    ...(options.vectorize === undefined ? {} : { vectorize: options.vectorize }),
     resolveCaller: async () => caller,
     canRead: async relPath => options.canRead?.(relPath) ?? true,
     canWrite: async relPath => options.canWrite?.(relPath) ?? true,
@@ -130,6 +132,7 @@ describe('kb_file tool surface', () => {
       'kb_outline_rewrite',
       'kb_outline_save',
       'kb_search',
+      'kb_vectorize',
     ])
     for (const forbidden of ['kb_read', 'kb_explore']) {
       expect(names).not.toContain(forbidden)
@@ -643,5 +646,34 @@ describe('kb_outline_save', () => {
     const { host: noSaver } = makeHost()
     await expect(execute(noSaver, 'kb_outline_save', { docId: 1, summary: '摘要' }))
       .rejects.toMatchObject({ code: 'not-configured' })
+  })
+})
+
+describe('kb_vectorize explicit tool', () => {
+  it('forwards exactly one target and reports the host result', async () => {
+    let seen: Record<string, unknown> | undefined
+    const { host } = makeHost({
+      vectorize: async input => {
+        seen = input as Record<string, unknown>
+        return { ok: true, documents: [{ docId: 4, embedded: 2, skipped: 1, failed: 0 }], totals: { embedded: 2 } }
+      },
+    })
+    const result = await execute(host, 'kb_vectorize', { docId: 4, dryRun: true })
+    expect(seen).toEqual({ docId: 4, dryRun: true })
+    expect(result).toMatchObject({ ok: true, documents: [{ docId: 4, embedded: 2 }] })
+  })
+
+  it('refuses when the feature is disabled instead of falling back', async () => {
+    const { host } = makeHost()
+    await expect(execute(host, 'kb_vectorize', { path: 'personal' }))
+      .rejects.toMatchObject({ code: 'not-configured' })
+  })
+
+  it('requires read permission and exactly one target', async () => {
+    const { host } = makeHost({ permission: false })
+    await expect(execute(host, 'kb_vectorize', { docId: 1 })).rejects.toMatchObject({ code: 'forbidden' })
+    const { host: allowed } = makeHost({ vectorize: async () => ({ ok: true }) })
+    await expect(execute(allowed, 'kb_vectorize', {})).rejects.toMatchObject({ code: 'invalid' })
+    await expect(execute(allowed, 'kb_vectorize', { docId: 1, path: 'a' })).rejects.toMatchObject({ code: 'invalid' })
   })
 })

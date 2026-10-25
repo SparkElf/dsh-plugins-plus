@@ -15,6 +15,7 @@ import { extractGroundingTokens, planOutlineSave } from '../src/outlineGuard.ts'
 import {
   Config,
   KB_SUMMARIZE_SKILL_NAME,
+  KB_VECTORIZE_SKILL_NAME,
   KNOWLEDGE_SKILL_NAME,
   knowledgeBaseSkillProvider,
 } from '../src/index.ts'
@@ -345,7 +346,7 @@ describe('kb-summarize skill registration', () => {
   it('lists both bundled candidates and reads each SKILL.md', async () => {
     const provider = knowledgeBaseSkillProvider()
     const candidates = await provider.list({})
-    expect(candidates.map(candidate => candidate.name).sort()).toEqual([KB_SUMMARIZE_SKILL_NAME, KNOWLEDGE_SKILL_NAME].sort())
+    expect(candidates.map(candidate => candidate.name).sort()).toEqual([KB_SUMMARIZE_SKILL_NAME, KB_VECTORIZE_SKILL_NAME, KNOWLEDGE_SKILL_NAME].sort())
     const summarize = candidates.find(candidate => candidate.name === KB_SUMMARIZE_SKILL_NAME)
     expect(summarize).toMatchObject({ source: 'bundled', provider: 'dsh-knowledge-base' })
     const loaded = await provider.get(summarize!, {})
@@ -353,6 +354,9 @@ describe('kb-summarize skill registration', () => {
     expect(loaded?.content).toContain('kb_outline_save')
     expect(loaded?.content).toContain('kb_chunk_get')
     expect(loaded?.content).toContain('引用')
+    const vectorize = await provider.get(candidates.find(candidate => candidate.name === KB_VECTORIZE_SKILL_NAME)!, {})
+    expect(vectorize?.content).toContain('kb_vectorize')
+    expect(vectorize?.content).toContain('dryRun')
     const general = await provider.get(candidates.find(candidate => candidate.name === KNOWLEDGE_SKILL_NAME)!, {})
     expect(general?.content).toContain('kb-summarize')
   })

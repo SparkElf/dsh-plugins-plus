@@ -13,6 +13,8 @@
  * @module @sparkelf/dsh-knowledge-base/api
  */
 
+import type { VectorRetrievalConfig } from './embeddings.ts'
+
 /** Prefix the Host registers and the browser calls. */
 export const KB_API_PREFIX = '/knowledge-base/api'
 
@@ -53,6 +55,8 @@ export const KB_API = {
   viewsSync: 'views.sync',
   /** Rescan the mounted tree and report its shape. */
   index: 'index',
+  /** Explicitly rebuild the whole optional vector index (requires confirmation). */
+  vectorRebuild: 'vector.rebuild',
   /**
    * Report the mounted tree's per-directory shape.
    *
@@ -285,6 +289,8 @@ export interface KnowledgeConfigView {
   storageProtocol?: 'nfs' | 'sshfs'
   /** SSHFS transport, present so the panel can show and edit what it will mount. */
   ssh?: KnowledgeSshView
+  /** Optional hybrid retrieval configuration, safe to render (credential reference only). */
+  retrieval?: { vector: VectorRetrievalConfig }
 }
 
 /** One transport field the panel may persist. */
@@ -378,6 +384,19 @@ export interface KnowledgeStatusView {
    */
   /** Backend DSH permission keys for this caller; used only to hide dead-end menus. */
   permissions?: readonly string[]
+  /** Optional vector index coverage/progress. */
+  vector?: {
+    enabled: boolean
+    provider?: string
+    model?: string
+    embeddedChunks: number
+    totalChunks: number
+    embeddedDocs: number
+    totalDocs: number
+    failed: number
+    canManageVector?: boolean
+    indexing: { running: boolean; total?: number; done?: number; embedded?: number; failed?: number; error?: string }
+  }
   caller?: {
     userId: string
     label: string

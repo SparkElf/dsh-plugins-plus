@@ -152,6 +152,7 @@ import {
   syncIndex,
   type FtsIndexStats,
   type FtsSearchHit,
+  type VectorSearchInput,
 } from './ftsIndex.ts'
 import {
   createKnowledgeFileTools,
@@ -168,6 +169,25 @@ import {
 } from './knowledgeTools.ts'
 import { markInternalMutation, startExternalChangeWatcher } from './externalChange.ts'
 import type { OutlineSectionSubmission } from './outlineGuard.ts'
+import { DatabaseSync } from 'node:sqlite'
+import {
+  DEFAULT_VECTOR_RETRIEVAL,
+  EmbeddingProviderError,
+  embedTexts,
+  normalizeVectorRetrieval,
+  type VectorRetrievalConfig,
+} from './embeddings.ts'
+import {
+  chunksForDocuments,
+  embeddingContentHash,
+  embeddingStates,
+  ensureVectorSchema,
+  putEmbedding,
+  recordVectorFailure,
+  vectorDocuments,
+  vectorIndexStats,
+  type VectorIndexStats,
+} from './vectorIndex.ts'
 
 /** The stable citation token shared by search, chunk and resolve responses. */
 const citationTokenForChunk = (docId: number, chunkKey: string | undefined, chunkId: number): string => (
@@ -279,6 +299,8 @@ export interface Config {
   publishDir: string
   /** Sidecar directory for the SQLite FTS5 index (outside the agent-visible tree). */
   indexDir?: string
+  /** Optional hybrid retrieval. Disabled by default; no provider is called unless enabled. */
+  retrieval: { vector: import('./embeddings.ts').VectorRetrievalConfig }
   /**
    * Outline generation policy.
    *
@@ -376,6 +398,28 @@ export const Config: z<Config> = z.object({
   mineruMemoryMaxMiB: z.number().default(4096),
   publishDir: z.string().default(''),
   indexDir: z.string().default('/nas/kb/index'),
+  retrieval: z.object({
+    vector: z.object({
+      enabled: z.boolean().default(false),
+      provider: z.union([z.const('openai-compatible'), z.const('ollama')]).default('openai-compatible'),
+      baseUrl: z.string().default(''),
+      model: z.string().default(''),
+      dimensions: z.number().default(0),
+      credentialRef: z.string().default(''),
+      rrfK: z.number().default(60),
+      candidateK: z.number().default(50),
+      ftsWeight: z.number().default(1),
+      vectorWeight: z.number().default(0.5),
+    }).default({
+      enabled: false, provider: 'openai-compatible', baseUrl: '', model: '', dimensions: 0,
+      credentialRef: '', rrfK: 60, candidateK: 50, ftsWeight: 1, vectorWeight: 0.5,
+    }),
+  }).default({
+    vector: {
+      enabled: false, provider: 'openai-compatible', baseUrl: '', model: '', dimensions: 0,
+      credentialRef: '', rrfK: 60, candidateK: 50, ftsWeight: 1, vectorWeight: 0.5,
+    },
+  }),
   // Summaries are model work, not an upload side effect. Keep the structure (TOC and
   // section ids) automatic so navigation and citations work immediately; leave the
   // prose empty until `kb-summarize` calls `kb_outline_save`.
@@ -618,6 +662,7 @@ export function localConfig(
   backendConfigured: boolean
   storageProtocol: 'nfs' | 'sshfs'
   ssh: KnowledgeSshView
+  retrieval: import('./embeddings.ts').VectorRetrievalConfig
 } {
   return {
     mountPoint: config.mountPoint,
@@ -638,6 +683,7 @@ export function localConfig(
       keyRef: config.sshKeyRef,
       keyConfigured: sshKeyConfigured,
     },
+    retrieval: config.retrieval?.vector ?? DEFAULT_VECTOR_RETRIEVAL,
   }
 }
 
@@ -2579,6 +2625,9 @@ export function withStoredStorage(config: Config, stored: KnowledgeStorageSettin
   if (stored.sshRemotePath !== undefined) next.sshRemotePath = stored.sshRemotePath
   if (stored.sshMountOptions !== undefined) next.sshMountOptions = stored.sshMountOptions
   if (stored.sshKeyRef !== undefined) next.sshKeyRef = stored.sshKeyRef
+  if (stored.retrieval !== undefined) {
+    next.retrieval = { vector: { ...(config.retrieval?.vector ?? DEFAULT_VECTOR_RETRIEVAL), ...stored.retrieval.vector } }
+  }
   return next
 }
 
@@ -2772,6 +2821,9 @@ export const KNOWLEDGE_SKILL_NAME = 'knowledge-base'
 /** Second bundled skill: the explicit, model-authored summarisation workflow. */
 export const KB_SUMMARIZE_SKILL_NAME = 'kb-summarize'
 
+/** Third bundled skill: explicit document/directory vectorization. */
+export const KB_VECTORIZE_SKILL_NAME = 'kb-vectorize'
+
 /**
  * Short description shown in the skill list.
  *
@@ -2794,6 +2846,11 @@ export const KNOWLEDGE_SKILL_DESCRIPTION =
 export const KB_SUMMARIZE_SKILL_DESCRIPTION =
   '为知识库文档显式生成摘要：先 kb_outline 拿目录，逐章读原文 chunk，再由 agent 生成 doc/section summary + keyFacts，'
   + '最后用 kb_outline_save 落库。摘要只作导航，引用仍用原文 chunk token；上传/抽取不会自动生成摘要。'
+
+/** Short description of the explicit vectorization skill. */
+export const KB_VECTORIZE_SKILL_DESCRIPTION =
+  '为指定文档或目录显式建立/补齐向量索引：kb_vectorize 可 dryRun 预估，默认只补缺失/过期向量，目录递归且跳过无权文档；'
+  + '不要自动对全库执行。向量只影响召回，不改变 citation/token/摘要。'
 
 /**
  * Where this package's SKILL.md lives, from either build layout.
@@ -2820,6 +2877,12 @@ export function knowledgeSkillPath(): string {
 export function kbSummarizeSkillPath(): string {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url))
   return join(moduleDirectory, '..', 'skills', KB_SUMMARIZE_SKILL_NAME, 'SKILL.md')
+}
+
+/** Where the bundled `kb-vectorize` skill lives. */
+export function kbVectorizeSkillPath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
+  return join(moduleDirectory, '..', 'skills', KB_VECTORIZE_SKILL_NAME, 'SKILL.md')
 }
 
 /**
@@ -2850,6 +2913,8 @@ export const KNOWLEDGE_SKILL_RANK = 640
 
 /** The summary skill is more specialised, so it sorts after the general KB skill. */
 export const KB_SUMMARIZE_SKILL_RANK = 650
+/** Vectorization is another explicit, specialised action. */
+export const KB_VECTORIZE_SKILL_RANK = 660
 
 /** Both a human and the model may invoke this skill. */
 export const KNOWLEDGE_SKILL_INVOCATION = { modelInvocable: true, userInvocable: true } as const
@@ -2894,6 +2959,17 @@ export function knowledgeBaseSkillProvider(): {
       resourceBase: { kind: 'directory', path: dirname(kbSummarizeSkillPath()) },
       rank: KB_SUMMARIZE_SKILL_RANK,
       locator: kbSummarizeSkillPath(),
+    },
+    {
+      name: KB_VECTORIZE_SKILL_NAME,
+      description: KB_VECTORIZE_SKILL_DESCRIPTION,
+      invocation: KNOWLEDGE_SKILL_INVOCATION,
+      source: 'bundled',
+      provider: KNOWLEDGE_SKILL_PROVIDER,
+      path: kbVectorizeSkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(kbVectorizeSkillPath()) },
+      rank: KB_VECTORIZE_SKILL_RANK,
+      locator: kbVectorizeSkillPath(),
     },
   ]
   return {
@@ -3388,7 +3464,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // report a save that did not happen.
             const allowed = new Set([
               'storageMode', 'storageProtocol', 'nfsServer',
-              'sshHost', 'sshUser', 'sshPort', 'sshRemotePath', 'sshMountOptions', 'sshKeyRef',
+              'sshHost', 'sshUser', 'sshPort', 'sshRemotePath', 'sshMountOptions', 'sshKeyRef', 'retrieval',
             ])
             const refused: { field: string; reason: string }[] = []
             for (const field of Object.keys(body)) {
@@ -3396,10 +3472,28 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 refused.push({ field, reason: 'not a storage setting this route may write' })
               }
             }
-            if (!(await canManageGrants(host, config))) {
+            const storageManage = await canManageGrants(host, config)
+            const vectorManage = await canManageVectorConfig()
+            if (!storageManage && !vectorManage) {
               return writeJson(res, 403, {
-                error: 'changing the deployment storage requires grant-management access',
+                error: 'changing deployment settings requires grant-management or config-management access',
                 refused: [{ field: '*', reason: 'authorization' }],
+              })
+            }
+            const storageFields = new Set([
+              'storageMode', 'storageProtocol', 'nfsServer',
+              'sshHost', 'sshUser', 'sshPort', 'sshRemotePath', 'sshMountOptions', 'sshKeyRef',
+            ])
+            if (!storageManage && Object.keys(body).some(field => storageFields.has(field))) {
+              return writeJson(res, 403, {
+                error: 'changing storage requires grant-management access',
+                refused: [{ field: '*', reason: 'authorization' }],
+              })
+            }
+            if (!vectorManage && body.retrieval !== undefined) {
+              return writeJson(res, 403, {
+                error: 'changing vector retrieval requires kb:config:manage',
+                refused: [{ field: 'retrieval', reason: 'authorization' }],
               })
             }
             const patch: KnowledgeStorageSettings = storageSettingsOf(body)
@@ -3432,12 +3526,14 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // The mounted layout is the answer, and it is the container's own fact rather
             // than a remote one, so nothing is fetched from DataOps here. The SSH key is the
             // one exception: whether the credential resolves is what decides if the mount
-            // step can run, and only the credential store can answer it.
+            // step can run, and only the credential store can answer it. The panel's saved
+            // choices (including the vector group) must read back immediately.
+            const liveConfig = withStoredStorage(config, await readStorageSettings(config.mountPoint))
             const sshKeyConfigured = await ctx.credentials
-              .resolve(credentialRef(config.sshKeyRef))
+              .resolve(credentialRef(liveConfig.sshKeyRef))
               .then(resolved => resolved !== undefined && resolved.value.trim() !== '')
               .catch(() => false)
-            return writeJson(res, 200, localConfig(config, sshKeyConfigured))
+            return writeJson(res, 200, localConfig(liveConfig, sshKeyConfigured))
           }
           case 'status': {
             // Provision the tree before answering, because this reply describes it.
@@ -3570,6 +3666,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                   // same tree and the same missing document.
                   ...(lastSyncFailure === undefined ? {} : { lastSyncFailure }),
                   ...(lastPruneSkipped === undefined ? {} : { pruneSkipped: lastPruneSkipped }),
+                  vector: await vectorStatusPayload(),
                 })
               }
 
@@ -5405,7 +5502,28 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // Indexing is not a remote job: the index is what the mounted tree
             // already serves, so a rebuild reports the tree's current shape
             // rather than pretending to have scheduled work elsewhere.
-            return writeJson(res, 200, await localStatus(config))
+            return writeJson(res, 200, {
+              ...await localStatus(config),
+              vector: await vectorStatusPayload(),
+            })
+          }
+          case 'vector.rebuild': {
+            if (!(await canManageVectorConfig())) {
+              return writeJson(res, 403, { error: 'rebuilding the vector index requires kb:config:manage', code: 'forbidden' })
+            }
+            const body = await readJsonBody(req)
+            if (body.confirmed !== true) {
+              return writeJson(res, 400, { error: 'full vector rebuild requires explicit confirmation', code: 'confirmation-required' })
+            }
+            const vector = await liveVectorConfig()
+            if (!vector.enabled || vector.baseUrl.trim() === '' || vector.model.trim() === '') {
+              return writeJson(res, 400, { error: 'vector retrieval is disabled or has no provider configured', code: 'not-configured' })
+            }
+            // Refresh the chunk table before enumerating it, then let the job run in the
+            // background; the settings page polls `status.vector` for progress.
+            await syncKnowledgeIndex(true, false)
+            startVectorJob(true)
+            return writeJson(res, 200, { started: true })
           }
           case 'index.dirs': {
             // The table the indexing page renders. Read-only and derived from the
@@ -5579,13 +5697,301 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     return target
   }
 
+  /** One document's vectorization outcome. */
+  interface VectorizeDocumentReport {
+    docId: number
+    path: string
+    chunks: number
+    embedded: number
+    skipped: number
+    failed: number
+    wouldEmbed?: number
+    error?: string
+  }
+
+  interface VectorizeReport {
+    ok: boolean
+    dryRun: boolean
+    rebuild: boolean
+    model: string
+    documents: VectorizeDocumentReport[]
+    denied: Array<{ docId: number; path: string; reason: string }>
+    totals: { documents: number; chunks: number; embedded: number; skipped: number; failed: number; wouldEmbed: number }
+    stats: VectorIndexStats
+  }
+
+  /** Read the live vector settings; the panel may have changed them since boot. */
+  const liveVectorConfig = async (): Promise<VectorRetrievalConfig> => {
+    const live = withStoredStorage(config, await readStorageSettings(config.mountPoint))
+    return live.retrieval?.vector ?? DEFAULT_VECTOR_RETRIEVAL
+  }
+
+  /** Resolve the embedding credential. The value lives only in this call frame. */
+  const vectorApiKey = async (vector: VectorRetrievalConfig): Promise<string> => {
+    if (vector.credentialRef.trim() === '') return ''
+    const resolved = await ctx.credentials.resolve(credentialRef(vector.credentialRef)).catch(() => undefined)
+    if (resolved === undefined || resolved.value.trim() === '') {
+      throw new EmbeddingProviderError(`embedding credential "${vector.credentialRef}" is not available`)
+    }
+    return resolved.value
+  }
+
+  /** Open the existing sidecar and ensure the vector tables exist. */
+  const openVectorDatabase = (): DatabaseSync => {
+    const db = new DatabaseSync(knowledgeIndexPath())
+    ensureVectorSchema(db)
+    return db
+  }
+
+  /** Counts shown by the settings page and the explicit tool. */
+  const readVectorStats = (model: string): VectorIndexStats => {
+    const db = openVectorDatabase()
+    try { return vectorIndexStats(db, model) } finally { db.close() }
+  }
+
+  let vectorAutoAt = 0
+  let vectorJob: Promise<void> | undefined
+  let vectorProgress: {
+    running: boolean
+    total: number
+    done: number
+    embedded: number
+    failed: number
+    startedAt: string
+    finishedAt?: string
+    error?: string
+  } | undefined
+
+  /**
+   * Vectorize explicit targets, or (for the settings rebuild) the whole index.
+   *
+   * One document is the transaction boundary: a provider error records failures for that
+   * document and leaves its old vectors untouched, then the next document still runs.
+   */
+  const vectorizeTargets = async (input: {
+    docId?: number
+    path?: string
+    scope?: string
+    rebuild?: boolean
+    dryRun?: boolean
+    all?: boolean
+    checkRead?: boolean
+    onProgress?: (progress: { total: number; done: number; embedded: number; failed: number }) => void
+  }): Promise<VectorizeReport> => {
+    const vector = await liveVectorConfig()
+    if (!vector.enabled) throw new Error('vector retrieval is disabled; enable retrieval.vector in knowledge-base settings first')
+    if (vector.baseUrl.trim() === '' || vector.model.trim() === '') {
+      throw new Error('vector retrieval needs a provider baseUrl and model before documents can be vectorized')
+    }
+    // dryRun must be safe before a credential is configured: it only counts targets.
+    const apiKey = input.dryRun === true ? '' : await vectorApiKey(vector)
+    const db = openVectorDatabase()
+    try {
+      const targets = vectorDocuments(db, {
+        ...(input.docId === undefined ? {} : { docId: input.docId }),
+        ...(input.path === undefined ? {} : { path: input.path }),
+        ...(input.scope === undefined ? {} : { scope: input.scope }),
+        ...(input.all === true ? { all: true } : {}),
+      })
+      const reports: VectorizeDocumentReport[] = []
+      const denied: Array<{ docId: number; path: string; reason: string }> = []
+      let totals = { documents: 0, chunks: 0, embedded: 0, skipped: 0, failed: 0, wouldEmbed: 0 }
+      if (targets.length === 0) {
+        const stats = vectorIndexStats(db, vector.model)
+        return { ok: true, dryRun: input.dryRun === true, rebuild: input.rebuild === true, model: vector.model, documents: [], denied, totals, stats }
+      }
+      const perDocumentBatch = 16
+      input.onProgress?.({ total: targets.length, done: 0, embedded: 0, failed: 0 })
+      for (const target of targets) {
+        if (input.checkRead !== false && !await canReadPath(host, config, target.path)) {
+          denied.push({ docId: target.id, path: target.path, reason: 'forbidden: read access is required' })
+          continue
+        }
+        const chunks = chunksForDocuments(db, [target.id])
+        const states = embeddingStates(db, vector.model, chunks.map(chunk => chunk.id))
+        const pending = chunks.filter(chunk => input.rebuild === true
+          || states.get(chunk.id)?.contentHash !== embeddingContentHash(chunk.content))
+        const report: VectorizeDocumentReport = {
+          docId: target.id,
+          path: target.path,
+          chunks: chunks.length,
+          embedded: 0,
+          skipped: chunks.length - pending.length,
+          failed: 0,
+          ...(input.dryRun === true ? { wouldEmbed: pending.length } : {}),
+        }
+        totals.documents += 1
+        totals.chunks += chunks.length
+        totals.skipped += report.skipped
+        if (input.dryRun === true) {
+          totals.wouldEmbed += pending.length
+          reports.push(report)
+          continue
+        }
+        if (pending.length > 0) {
+          try {
+            const vectors: number[][] = []
+            for (let offset = 0; offset < pending.length; offset += perDocumentBatch) {
+              const batch = pending.slice(offset, offset + perDocumentBatch)
+              vectors.push(...await embedTexts(vector, batch.map(chunk => chunk.content), apiKey))
+            }
+            if (vectors.length !== pending.length) throw new Error('embedding response count did not match chunk count')
+            db.exec('BEGIN')
+            try {
+              const now = new Date().toISOString()
+              for (const [index, chunk] of pending.entries()) {
+                putEmbedding(db, {
+                  chunkId: chunk.id,
+                  docId: chunk.docId,
+                  path: chunk.path,
+                  model: vector.model,
+                  vector: vectors[index] as number[],
+                  contentHash: embeddingContentHash(chunk.content),
+                  updatedAt: now,
+                })
+              }
+              db.exec('COMMIT')
+            } catch (error) {
+              db.exec('ROLLBACK')
+              throw error
+            }
+            report.embedded = pending.length
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            report.failed = pending.length
+            report.error = message
+            const now = new Date().toISOString()
+            for (const chunk of pending) {
+              recordVectorFailure(db, { chunkId: chunk.id, docId: chunk.docId, path: chunk.path, model: vector.model, error: message, updatedAt: now })
+            }
+          }
+        }
+        totals.embedded += report.embedded
+        totals.failed += report.failed
+        reports.push(report)
+        input.onProgress?.({ total: targets.length, done: totals.documents, embedded: totals.embedded, failed: totals.failed })
+      }
+      const stats = vectorIndexStats(db, vector.model)
+      return {
+        ok: reports.every(report => report.failed === 0),
+        dryRun: input.dryRun === true,
+        rebuild: input.rebuild === true,
+        model: vector.model,
+        documents: reports,
+        denied,
+        totals,
+        stats,
+      }
+    } finally {
+      db.close()
+    }
+  }
+
+  /** Start one background whole-index pass, coalescing callers into the active job. */
+  const startVectorJob = (rebuild: boolean): void => {
+    if (vectorJob !== undefined) return
+    vectorProgress = {
+      running: true,
+      total: 0,
+      done: 0,
+      embedded: 0,
+      failed: 0,
+      startedAt: new Date().toISOString(),
+    }
+    vectorJob = (async () => {
+      try {
+        const report = await vectorizeTargets({
+          all: true,
+          rebuild,
+          checkRead: false,
+          onProgress: progress => {
+            vectorProgress = {
+              ...vectorProgress!,
+              total: progress.total,
+              done: progress.done,
+              embedded: progress.embedded,
+              failed: progress.failed,
+            }
+          },
+        })
+        vectorProgress = {
+          ...vectorProgress!,
+          running: false,
+          total: report.totals.documents,
+          done: report.totals.documents,
+          embedded: report.totals.embedded,
+          failed: report.totals.failed,
+          finishedAt: new Date().toISOString(),
+        }
+      } catch (error) {
+        vectorProgress = {
+          ...vectorProgress!,
+          running: false,
+          error: error instanceof Error ? error.message : String(error),
+          finishedAt: new Date().toISOString(),
+        }
+      } finally {
+        vectorJob = undefined
+      }
+    })()
+  }
+
+  /** Who may edit the vector group: local owner, or a team caller with kb:config:manage. */
+  const canManageVectorConfig = async (): Promise<boolean> => {
+    if (!isTeamDeployment(config)) return true
+    try {
+      return (await managementHost.context()).permissions.includes('kb:config:manage')
+    } catch {
+      return false
+    }
+  }
+
+  /** Status payload for the settings page; never throws into the status route. */
+  const vectorStatusPayload = async (): Promise<Record<string, unknown>> => {
+    let vector: VectorRetrievalConfig
+    try { vector = await liveVectorConfig() } catch { return { enabled: false, indexing: { running: false } } }
+    let stats: VectorIndexStats | undefined
+    if (vector.model.trim() !== '') {
+      try { stats = readVectorStats(vector.model) } catch { stats = undefined }
+    }
+    return {
+      enabled: vector.enabled,
+      provider: vector.provider,
+      model: vector.model,
+      embeddedChunks: stats?.embeddedChunks ?? 0,
+      totalChunks: stats?.totalChunks ?? 0,
+      embeddedDocs: stats?.embeddedDocs ?? 0,
+      totalDocs: stats?.totalDocs ?? 0,
+      failed: stats?.failed ?? 0,
+      canManageVector: await canManageVectorConfig(),
+      indexing: vectorProgress === undefined ? { running: false } : {
+        running: vectorProgress.running,
+        total: vectorProgress.total,
+        done: vectorProgress.done,
+        embedded: vectorProgress.embedded,
+        failed: vectorProgress.failed,
+        ...(vectorProgress.error === undefined ? {} : { error: vectorProgress.error }),
+      },
+    }
+  }
+
+  /** Kick a missing/stale pass after a sync, at most once a minute. */
+  const scheduleVectorAutoIndex = (): void => {
+    if (vectorJob !== undefined) return
+    if (Date.now() - vectorAutoAt < 60_000) return
+    vectorAutoAt = Date.now()
+    void liveVectorConfig().then(vector => {
+      if (vector.enabled && vector.baseUrl.trim() !== '' && vector.model.trim() !== '') startVectorJob(false)
+    }).catch(() => undefined)
+  }
+
   let lastIndexSyncAt = 0
   let lastIndexStats: FtsIndexStats | undefined
   /**
    * Incremental sync shared by search/index/status. A short freshness window avoids
    * walking the tree for every query; an explicit rebuild bypasses it.
    */
-  const syncKnowledgeIndex = async (force = false): Promise<FtsIndexStats> => {
+  const syncKnowledgeIndex = async (force = false, scheduleAuto = true): Promise<FtsIndexStats> => {
     if (!force && lastIndexStats !== undefined && Date.now() - lastIndexSyncAt < 3_000) return lastIndexStats
     const stats = await syncIndex({
       actualRoot: localConfig(config).actualRoot,
@@ -5594,7 +6000,51 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     })
     lastIndexStats = stats
     lastIndexSyncAt = Date.now()
+    if (scheduleAuto) scheduleVectorAutoIndex()
     return stats
+  }
+
+  /** Embed the query for hybrid retrieval; a provider failure degrades to FTS. */
+  const prepareVectorQuery = async (query: string): Promise<{ vector?: VectorSearchInput; warning?: string }> => {
+    let vectorConfig: VectorRetrievalConfig
+    try { vectorConfig = await liveVectorConfig() } catch { return {} }
+    if (!vectorConfig.enabled) return {}
+    if (vectorConfig.baseUrl.trim() === '' || vectorConfig.model.trim() === '') {
+      return { warning: 'vector retrieval is enabled but provider baseUrl/model is not configured' }
+    }
+    let stats: VectorIndexStats
+    try { stats = readVectorStats(vectorConfig.model) } catch (error) {
+      return { warning: `vector index is unavailable: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    if (stats.embeddedChunks === 0) {
+      // No vectors yet: FTS is the honest answer, and no provider call is wasted.
+      return { vector: {
+        model: vectorConfig.model,
+        queryVector: [],
+        candidateK: vectorConfig.candidateK,
+        rrfK: vectorConfig.rrfK,
+        ftsWeight: vectorConfig.ftsWeight,
+        vectorWeight: vectorConfig.vectorWeight,
+        coverage: 0,
+      } }
+    }
+    try {
+      const apiKey = await vectorApiKey(vectorConfig)
+      const [queryVector] = await embedTexts(vectorConfig, [query], apiKey)
+      if (queryVector === undefined) throw new Error('embedding provider returned no query vector')
+      const coverage = stats.totalDocs === 0 ? 0 : stats.embeddedDocs / stats.totalDocs
+      return { vector: {
+        model: vectorConfig.model,
+        queryVector,
+        candidateK: vectorConfig.candidateK,
+        rrfK: vectorConfig.rrfK,
+        ftsWeight: vectorConfig.ftsWeight,
+        vectorWeight: vectorConfig.vectorWeight,
+        coverage,
+      } }
+    } catch (error) {
+      return { warning: `vector query embedding failed; using FTS only: ${error instanceof Error ? error.message : String(error)}` }
+    }
   }
 
   const knowledgeToolHost: KnowledgeFileToolHost = {
@@ -5607,9 +6057,27 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         return true
       }
     },
+    vectorize: async input => {
+      try {
+        await syncKnowledgeIndex(false, false)
+        return await vectorizeTargets(input) as unknown as Record<string, unknown>
+      } catch (error) {
+        // The explicit tool reports a disabled/misconfigured vector feature as a
+        // structured failure; it never silently runs a pure-FTS pass.
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          documents: [],
+          denied: [],
+          totals: { documents: 0, chunks: 0, embedded: 0, skipped: 0, failed: 0, wouldEmbed: 0 },
+        }
+      }
+    },
     searchIndex: async (input) => {
       const context = await managementHost.context()
-      const stats = await syncKnowledgeIndex()
+      await syncKnowledgeIndex()
+      scheduleVectorAutoIndex()
+      const vectorQuery = await prepareVectorQuery(input.query)
       const departments = [...new Set([
         ...context.dataScope.departmentCodes,
         ...(context.departmentCode === null || context.departmentCode === undefined ? [] : [context.departmentCode]),
@@ -5623,6 +6091,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         locale: config.scopeLocale,
         caller: { callerId: context.userId, departmentCodes: departments, global: isGlobalAdmin(context) },
         canRead: relPath => canReadPath(host, config, relPath),
+        ...(vectorQuery.vector === undefined ? {} : { vector: vectorQuery.vector }),
       })
       const plan = localConfig(config)
       const mapHit = (hit: FtsSearchHit): FtsSearchHit => {
@@ -5644,6 +6113,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       return {
         ...result,
         hits: result.hits.map(mapHit),
+        ...(vectorQuery.warning === undefined ? {} : { vectorWarning: vectorQuery.warning }),
       }
     },
     chunkGet: async (input) => {

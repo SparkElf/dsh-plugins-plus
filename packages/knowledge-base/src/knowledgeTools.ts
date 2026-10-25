@@ -49,6 +49,7 @@ export type KnowledgeToolErrorCode =
   | 'invalid-regex'
   | 'invalid-citation'
   | 'invalid-summary'
+  | 'invalid'
 
 /** Structured, model-readable failure. Thrown; never returned as a silent `false`. */
 export class KnowledgeToolError extends Error {
@@ -155,6 +156,14 @@ export interface KnowledgeFileToolHost {
   searchIndex?(input: { query: string; scope?: string; topK: number }): Promise<FtsSearchResult>
   /** Incremental index sync. */
   syncIndex?(): Promise<FtsIndexStats>
+  /** Explicitly vectorize one document, a directory subtree, or all targets. */
+  vectorize?(input: {
+    docId?: number
+    path?: string
+    scope?: string
+    rebuild?: boolean
+    dryRun?: boolean
+  }): Promise<Record<string, unknown>>
   /** Resolve a citation token to its original source + anchors. */
   chunkGet?(input: { docId: number; chunkId: number | string }): Promise<{
     docId: number
@@ -515,6 +524,13 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
         ...(hit.occurrence === undefined ? {} : { occurrence: hit.occurrence }),
         ...(hit.approximate === undefined ? {} : { approximate: hit.approximate }),
         ...(hit.boxes === undefined ? {} : { boxes: hit.boxes }),
+        ...(hit.retrieval === undefined ? {} : { retrieval: hit.retrieval }),
+        ...(hit.ftsRank === undefined ? {} : { ftsRank: hit.ftsRank }),
+        ...(hit.vectorRank === undefined ? {} : { vectorRank: hit.vectorRank }),
+        ...(hit.rrfScore === undefined ? {} : { rrfScore: hit.rrfScore }),
+        ...(hit.ftsScore === undefined ? {} : { ftsScore: hit.ftsScore }),
+        ...(hit.vectorScore === undefined ? {} : { vectorScore: hit.vectorScore }),
+        ...(hit.retrievalReason === undefined ? {} : { retrievalReason: hit.retrievalReason }),
       }))
       return {
         ok: true,
@@ -523,10 +539,52 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
         relaxed: result.relaxed,
         queries: result.queries,
         hits,
+        ...(result.retrieval === undefined ? {} : { retrieval: result.retrieval }),
+        ...(result.floorReplacements === undefined ? {} : { floorReplacements: result.floorReplacements }),
+        ...(result.vectorWarning === undefined ? {} : { vectorWarning: result.vectorWarning }),
         ...(result.relatedSections === undefined || result.relatedSections.length === 0 ? {} : {
           relatedSections: result.relatedSections.map(section => ({ ...section, navigationOnly: true })),
         }),
       }
+    }),
+  }),
+
+  defineTool({
+    name: 'kb_vectorize',
+    description: 'Explicitly build/refresh the optional vector index for ONE document or ONE directory subtree. '
+      + 'Use only when the user asks to vectorize / 建向量索引 / 补向量 for a named document or directory; never run it on the whole library on your own. '
+      + 'Requires read access to every target; unauthorized documents are skipped and reported. '
+      + 'When vector retrieval is disabled or has no provider, the tool fails loudly instead of silently falling back. '
+      + 'dryRun estimates without writing; rebuild refreshes current chunks, otherwise only missing/stale vectors are written. '
+      + 'Vectors affect recall only: citations, chunk tokens, summaries and outlines do not change.',
+    parameters: {
+      docId: { type: 'number', description: 'One document id from kb_search/kb_file_list.' },
+      path: { type: 'string', description: 'View-relative file or directory path. A directory is processed recursively.' },
+      scope: { type: 'string', description: 'Optional personal|department|global narrowing.' },
+      rebuild: { type: 'boolean', description: 'Re-embed current chunks even when their model/hash is current.' },
+      dryRun: { type: 'boolean', description: 'Count what would be embedded without calling the provider or writing.' },
+    },
+    output: jsonOutput,
+    execute: async (args: { docId?: number; path?: string; scope?: string; rebuild?: boolean; dryRun?: boolean }) => run(args.path, async () => {
+      await requirePermission(host, 'kb:file:read')
+      if (host.vectorize === undefined) throw new KnowledgeToolError('not-configured', 'vector indexing is unavailable')
+      const hasDocId = args.docId !== undefined
+      const hasPath = typeof args.path === 'string' && args.path.trim() !== ''
+      if (hasDocId === hasPath) throw new KnowledgeToolError('invalid', 'provide exactly one of docId or path')
+      if (args.scope !== undefined && !['personal', 'department', 'global'].includes(args.scope)) {
+        throw new KnowledgeToolError('invalid', 'scope must be personal, department or global')
+      }
+      const targetPath = hasPath ? assertToolPath(args.path) : undefined
+      if (hasDocId && (!Number.isInteger(args.docId) || (args.docId as number) <= 0)) {
+        throw new KnowledgeToolError('invalid', 'docId must be a positive integer')
+      }
+      return await host.vectorize({
+        ...(hasDocId ? { docId: args.docId } : {}),
+        ...(targetPath === undefined ? {} : { path: targetPath }),
+        ...(args.scope === undefined ? {} : { scope: args.scope }),
+        ...(args.rebuild === undefined ? {} : { rebuild: args.rebuild }),
+        ...(args.dryRun === undefined ? {} : { dryRun: args.dryRun }),
+      })
     }),
   }),
 

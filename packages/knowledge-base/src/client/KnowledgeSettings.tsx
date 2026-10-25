@@ -22,9 +22,10 @@
 /**
  * The settings surface of the management page.
  *
- * This page is now only the review switch: a DECISION about whether other people's
- * contributions take effect immediately, so it is a control and it needs write
- * access. The queue that decision governs and the trail of what it settled both
+ * This page carries the review switch and the shared vector-retrieval group: the
+ * switch is a DECISION about whether other people's contributions take effect
+ * immediately, so it needs write access; the vector group is the same component the
+ * DSH settings section renders, which keeps a profile without that slot usable. The queue that decision governs and the trail of what it settled both
  * moved to the Audit page, which is the surface an operator opens to get through
  * work; parking a worklist under a configuration switch made them scroll past the
  * setting to reach today's arrivals, and left two duplicate entry points pointing
@@ -42,6 +43,7 @@ import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath } from '../api.ts'
 import tableStyles from './KnowledgePermissions.module.css'
 import styles from './KnowledgePanel.module.css'
+import { VectorSettingsGroup } from './VectorSettingsGroup.tsx'
 
 /** This knowledge base's review settings, as the Host reports them. */
 export interface KnowledgeSettingsView {
@@ -197,6 +199,9 @@ export function KnowledgeSettings(props: KnowledgeSettingsProps) {
         </div>
         {!canEdit && <p className={tableStyles.pageHint}>{c('settingsReadOnly')}</p>}
         {notice !== undefined && <p className={tableStyles.pageHint}>{notice}</p>}
+      </section>
+      <section className={styles.surface}>
+        <VectorSettingsGroup t={c as (key: string) => string} />
       </section>
 
     </div>

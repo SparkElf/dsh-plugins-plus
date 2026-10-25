@@ -317,6 +317,7 @@ describe('host plugin', () => {
       'kb_search',
       'kb_chunk_get',
       'kb_outline',
+      'kb_outline_rewrite',
       'kb_outline_save',
       'workflow_publish',
       'kb_audit_list',
@@ -328,6 +329,7 @@ describe('host plugin', () => {
       'kb_review_decide',
       'kb_review_list',
       'kb_sync',
+      'kb_vectorize',
       'workflow_list',
       'workflow_review_decide',
       'workflow_review_list',
@@ -534,9 +536,9 @@ describe('host plugin', () => {
   it('disposes every registration through the effect scope', () => {
     const { ctx, tools, disposers } = fakeHost({ token: 't' })
     apply(ctx as never, CONFIG)
-    expect(tools).toHaveLength(25)
+    expect(tools).toHaveLength(27)
     // 18 are this plugin's kb_* tools; DataOps `kb_read` is external.
-    expect(tools.filter(tool => tool.name.startsWith('kb_'))).toHaveLength(18)
+    expect(tools.filter(tool => tool.name.startsWith('kb_'))).toHaveLength(20)
     for (const removed of ['kb_file_read', 'kb_file_search', 'kb_index', 'kb_bucket_list', 'kb_file_list', 'kb_status']) {
       expect(tools.map(tool => tool.name)).not.toContain(removed)
     }

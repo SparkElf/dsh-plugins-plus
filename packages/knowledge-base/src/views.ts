@@ -21,6 +21,7 @@
 import { appendFile, copyFile, link, lstat, mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, sep } from 'node:path'
 import { VIEW_METADATA_FILENAMES } from './viewMetadata.ts'
+import { normalizeVectorRetrieval, type VectorRetrievalConfig } from './embeddings.ts'
 import { markInternalMutation } from './externalChange.ts'
 
 /** One path a user may read, as DataOps resolved it. */
@@ -1137,6 +1138,8 @@ export interface KnowledgeStorageSettings {
   sshMountOptions?: string
   /** SSHFS: credential reference holding the private key -- a name, never the key. */
   sshKeyRef?: string
+  /** Optional vector retrieval settings, stored deployment-wide. */
+  retrieval?: { vector: VectorRetrievalConfig }
 }
 
 /** Whether a write must be reviewed before it counts as published. */
@@ -1208,6 +1211,10 @@ export function storageSettingsOf(raw: Record<string, unknown>): KnowledgeStorag
   if (typeof raw.sshRemotePath === 'string') out.sshRemotePath = raw.sshRemotePath
   if (typeof raw.sshMountOptions === 'string') out.sshMountOptions = raw.sshMountOptions
   if (typeof raw.sshKeyRef === 'string') out.sshKeyRef = raw.sshKeyRef
+  if (raw.retrieval !== undefined && raw.retrieval !== null && typeof raw.retrieval === 'object') {
+    const vector = (raw.retrieval as Record<string, unknown>).vector
+    if (vector !== undefined) out.retrieval = { vector: normalizeVectorRetrieval(vector) }
+  }
   return out
 }
 
@@ -1298,6 +1305,7 @@ export async function writeSettings(
     // Round-tripped through the validator so a caller cannot store a value the reader
     // would reject, and omitted fields stay omitted rather than becoming `undefined` keys.
     ...storageSettingsOf({ ...settings } as unknown as Record<string, unknown>),
+    ...(settings.retrieval === undefined ? {} : { retrieval: settings.retrieval }),
   }
   await mkdir(viewDir, { recursive: true })
   const target = settingsPathFor(viewDir)

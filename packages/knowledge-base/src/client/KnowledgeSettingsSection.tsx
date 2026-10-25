@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, StateDot, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   KB_API,
@@ -15,6 +15,7 @@ import {
 import { hasDeployTarget } from './deployTarget.ts'
 import type { en } from './locales.ts'
 import styles from './KnowledgeSettingsSection.module.css'
+import { VectorSettingsGroup } from './VectorSettingsGroup.tsx'
 
 /** Values injected by the DSH Settings slot. */
 export interface KnowledgeSettingsInjected {
@@ -551,6 +552,8 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
                 {!mineru.canEdit && <p className={styles.detail}>{t('settingsReadOnly')}</p>}
               </>
             )}
+
+          <VectorSettingsGroup t={t} />
 
           {/* One save for the whole section, last: both groups are one settings record
               edited on one page, and two buttons made every visit a question of which to

@@ -34,6 +34,7 @@ import {
   type OutlineSectionSubmission,
   type OutlineSummaryKind,
 } from './outlineGuard.ts'
+import { cosineSimilarity, ensureVectorSchema, unpackVector, vectorCandidates } from './vectorIndex.ts'
 
 /** Prefix used for the sidecar directory when no explicit index dir is configured. */
 export const DEFAULT_INDEX_DIR = '/nas/kb/index'
@@ -54,6 +55,12 @@ export interface FtsSearchResult {
   hits: FtsSearchHit[]
   relaxed: boolean
   queries: string[]
+  /** Set when hybrid retrieval ran; absent in pure-FTS answers. */
+  retrieval?: 'fts' | 'vector' | 'hybrid'
+  /** Provider/vector failure that made the answer fall back to FTS. */
+  vectorWarning?: string
+  /** How many vector-only slots the FTS floor reclaimed. */
+  floorReplacements?: number
   /**
    * Summary chunks that matched the query, for navigation only.
    *
@@ -209,6 +216,32 @@ export interface FtsSearchHit {
   sectionLevel?: number
   /** Extractive document summary; navigation only, never a citation. */
   docSummary?: string
+  /** Which retrieval channel produced this hit in hybrid mode. */
+  retrieval?: 'fts' | 'vector' | 'hybrid'
+  /** One-based rank in the FTS candidate list. */
+  ftsRank?: number
+  /** One-based rank in the vector candidate list. */
+  vectorRank?: number
+  /** Weighted reciprocal-rank-fusion score. */
+  rrfScore?: number
+  /** Raw BM25 score, when the FTS channel found this chunk. */
+  ftsScore?: number
+  /** Raw cosine similarity, when the vector channel found this chunk. */
+  vectorScore?: number
+  /** Set when the FTS floor put this hit back into the final window. */
+  retrievalReason?: 'fts-floor'
+}
+
+/** Query-side vector inputs for hybrid retrieval. */
+export interface VectorSearchInput {
+  model: string
+  queryVector: readonly number[]
+  candidateK: number
+  rrfK: number
+  ftsWeight: number
+  vectorWeight: number
+  /** Share of the corpus that has vectors; scales only the vector contribution. */
+  coverage: number
 }
 
 /** Counts reported by an index sync/rebuild. */
@@ -975,6 +1008,7 @@ function ensureSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS kb_summary_chunks_doc ON kb_summary_chunks(doc_id);
     CREATE VIRTUAL TABLE IF NOT EXISTS kb_summary_fts USING fts5(content, tokenize = 'trigram');
   `)
+  ensureVectorSchema(db)
 }
 
 export const CHUNKER_VERSION = 'structure-v3-keyed'
@@ -1356,6 +1390,8 @@ export async function searchIndex(options: {
   locale?: ScopeLocale
   caller: FtsCallerScope
   canRead: (relPath: string) => Promise<boolean>
+  /** Present only when vector retrieval is enabled and the query embedded successfully. */
+  vector?: VectorSearchInput
 }): Promise<FtsSearchResult> {
   return withIndexLock(() => withBusyRetry(() => searchIndexUnlocked(options)))
 }
@@ -1387,10 +1423,14 @@ async function searchIndexUnlocked(options: {
   locale?: ScopeLocale
   caller: FtsCallerScope
   canRead: (relPath: string) => Promise<boolean>
+  vector?: VectorSearchInput
 }): Promise<FtsSearchResult> {
   const query = options.query.trim()
   if (query === '') return { hits: [], relaxed: false, queries: [] }
   const topK = Math.max(1, Math.min(50, Math.trunc(options.topK)))
+  const candidateWindow = options.vector === undefined
+    ? topK * 4
+    : Math.max(topK * 4, Math.max(1, Math.trunc(options.vector.candidateK)))
   const db = new DatabaseSync(options.indexPath)
   try {
     ensureSchema(db)
@@ -1432,12 +1472,12 @@ async function searchIndexUnlocked(options: {
       FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id LEFT JOIN kb_chunk_boxes b ON b.chunk_id = c.id
       WHERE c.content LIKE ? AND (${clauses.join(' OR ')})${scopeClause}
       LIMIT ?
-    `).all('%' + term + '%', ...params, ...scopeParams, topK * 4) as Row[]
+    `).all('%' + term + '%', ...params, ...scopeParams, candidateWindow) as Row[]
     const runTerm = (term: string): Row[] => {
       if ([...term].length < 3) return likeFallback(term)
       const ftsQuery = '"' + term.replace(/"/gu, '""') + '"'
       try {
-        return db.prepare(sql).all(ftsQuery, ...params, ...scopeParams, topK * 4) as Row[]
+        return db.prepare(sql).all(ftsQuery, ...params, ...scopeParams, candidateWindow) as Row[]
       } catch {
         return likeFallback(term)
       }
@@ -1490,9 +1530,9 @@ async function searchIndexUnlocked(options: {
       sectionCache.set(docId, map)
       return map
     }
-    const hits: FtsSearchHit[] = []
-    for (const row of ordered) {
-      if (!await options.canRead(row.path)) continue
+    const toHit = async (row: Row): Promise<FtsSearchHit | undefined> => {
+
+      if (!await options.canRead(row.path)) return undefined
       const rawBoxes = boxRows.all(row.chunk_id) as Array<{
         page: number; bbox_json: string; block_index: number | null;
         occurrence: number | null; confidence: number | null;
@@ -1522,7 +1562,7 @@ async function searchIndexUnlocked(options: {
       const highlights = queryHighlights(query, row.snippet, row.content)
       const section = sectionsForDocument(row.doc_id).get(row.chunk_id)
       const docSummary = row.doc_summary ?? undefined
-      hits.push({
+      return {
         path: sourcePath,
         ...(options.locale === undefined ? {} : { displayPath: localizedScopeForPath(sourcePath, options.locale) }),
         markdownPath,
@@ -1553,8 +1593,106 @@ async function searchIndexUnlocked(options: {
         ...(firstBox?.blockIndex === undefined ? {} : { blockIndex: firstBox.blockIndex }),
         ...(firstBox?.occurrence === undefined ? {} : { occurrence: firstBox.occurrence }),
         ...(approximate ? { approximate: true } : {}),
+      }
+    }
+    const hits: FtsSearchHit[] = []
+    const hitWindow = options.vector === undefined ? topK : candidateWindow
+    for (const row of ordered) {
+      const hit = await toHit(row)
+      if (hit === undefined) continue
+      hits.push(hit)
+      if (hits.length >= hitWindow) break
+    }
+
+    let finalHits = hits
+    let floorReplacements = 0
+    if (options.vector !== undefined) {
+      const vector = options.vector
+      const vectorRows = vectorCandidates(db, {
+        model: vector.model,
+        query: vector.queryVector,
+        clauses,
+        params,
+        scopeClause,
+        scopeParams,
+        candidateK: Math.max(1, Math.trunc(vector.candidateK)),
       })
-      if (hits.length >= topK) break
+      if (vectorRows.length > 0) {
+        const hydrated = db.prepare(`
+          SELECT c.path AS path, c.line AS line, c.content AS content, c.id AS chunk_id, c.doc_id AS doc_id,
+                 d.mime AS mime, d.source_path AS source_path, d.markdown_path AS markdown_path,
+                 c.chunk_key AS chunk_key, c.heading AS heading, c.ord AS ord, c.sheet AS sheet, c.cell AS cell,
+                 d.summary AS doc_summary, 0 AS score,
+                 COALESCE(b.page, c.page) AS page, COALESCE(b.bbox_json, c.bbox) AS bbox,
+                 COALESCE(b.block_index, c.block_index) AS block_index, COALESCE(b.occurrence, c.occurrence) AS occurrence,
+                 substr(c.content, 1, 240) AS snippet
+          FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id LEFT JOIN kb_chunk_boxes b ON b.chunk_id = c.id
+          WHERE c.id = ?
+        `)
+        const ftsById = new Map<number, { hit: FtsSearchHit; rank: number }>()
+        for (const [index, hit] of hits.entries()) ftsById.set(hit.chunkId, { hit, rank: index + 1 })
+        const vectorById = new Map<number, { hit: FtsSearchHit; rank: number; score: number }>()
+        for (const [index, candidate] of vectorRows.entries()) {
+          const known = ftsById.get(candidate.chunkId)
+          if (known !== undefined) {
+            vectorById.set(candidate.chunkId, { hit: known.hit, rank: index + 1, score: candidate.score })
+            continue
+          }
+          const row = hydrated.get(candidate.chunkId) as Row | undefined
+          if (row === undefined) continue
+          const hit = await toHit(row)
+          if (hit === undefined) continue
+          hit.score = Number(candidate.score.toFixed(6))
+          vectorById.set(candidate.chunkId, { hit, rank: index + 1, score: candidate.score })
+        }
+        const coverage = Math.max(0, Math.min(1, vector.coverage))
+        const union = new Set<number>([...ftsById.keys(), ...vectorById.keys()])
+        const fused: FtsSearchHit[] = []
+        for (const chunkId of union) {
+          const fts = ftsById.get(chunkId)
+          const vec = vectorById.get(chunkId)
+          const hit = fts?.hit ?? vec?.hit
+          if (hit === undefined) continue
+          const ftsPart = fts === undefined ? 0 : vector.ftsWeight / (vector.rrfK + fts.rank)
+          const vectorPart = vec === undefined ? 0 : (vector.vectorWeight * coverage) / (vector.rrfK + vec.rank)
+          hit.retrieval = fts !== undefined && vec !== undefined ? 'hybrid' : fts !== undefined ? 'fts' : 'vector'
+          if (fts !== undefined) {
+            hit.ftsRank = fts.rank
+            hit.ftsScore = hit.score
+          }
+          if (vec !== undefined) {
+            hit.vectorRank = vec.rank
+            hit.vectorScore = Number(vec.score.toFixed(6))
+          }
+          hit.rrfScore = Number((ftsPart + vectorPart).toFixed(8))
+          hit.score = hit.rrfScore
+          fused.push(hit)
+        }
+        fused.sort((left, right) => (right.rrfScore ?? 0) - (left.rrfScore ?? 0)
+          || (left.ftsRank ?? Number.MAX_SAFE_INTEGER) - (right.ftsRank ?? Number.MAX_SAFE_INTEGER)
+          || left.chunkId - right.chunkId)
+        const selected = fused.slice(0, topK)
+        const selectedIds = new Set(selected.map(hit => hit.chunkId))
+        const floor = hits.slice(0, Math.min(10, Math.max(1, Math.trunc(vector.candidateK))))
+        for (const floorHit of floor) {
+          if (selectedIds.has(floorHit.chunkId)) continue
+          let replacement = -1
+          for (let index = selected.length - 1; index >= 0; index -= 1) {
+            if (selected[index]?.retrieval === 'vector') { replacement = index; break }
+          }
+          if (replacement < 0) break
+          const removed = selected[replacement]
+          selected[replacement] = floorHit
+          selectedIds.delete(removed?.chunkId ?? -1)
+          selectedIds.add(floorHit.chunkId)
+          floorHit.retrieval = 'fts'
+          floorHit.retrievalReason = 'fts-floor'
+          floorHit.rrfScore = Number((vector.ftsWeight / (vector.rrfK + (floorHit.ftsRank ?? floor.indexOf(floorHit) + 1))).toFixed(8))
+          floorHit.score = floorHit.rrfScore
+          floorReplacements += 1
+        }
+        finalHits = selected
+      }
     }
     const relatedSections = await searchRelatedSections(db, {
       query,
@@ -1566,9 +1704,11 @@ async function searchIndexUnlocked(options: {
       canRead: options.canRead,
     })
     return {
-      hits,
+      hits: finalHits,
       relaxed,
       queries,
+      ...(options.vector === undefined ? {} : { retrieval: finalHits.some(hit => hit.retrieval === 'hybrid') ? 'hybrid' as const : finalHits.some(hit => hit.retrieval === 'vector') ? 'vector' as const : 'fts' as const }),
+      ...(floorReplacements === 0 ? {} : { floorReplacements }),
       ...(relatedSections.length === 0 ? {} : { relatedSections }),
     }
   } finally {
