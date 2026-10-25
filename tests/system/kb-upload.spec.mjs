@@ -23,6 +23,18 @@
 // **伪造输入的形状会掩盖真实输入的形状错误** —— 这正是这条用例必须构造真实
 // `File` + 真实 `DataTransfer` 的理由。
 //
+// ## 这条用例补上的第二个漏洞：走错入口
+//
+// 上面那个相对路径 bug 修好之后，有一条更隐蔽的同类问题：**系统测试走的是主页表格的
+// 拖放区，那是三个上传入口里唯一正确的一个**。用户实际走的是左侧文件树的「个人」行
+// 或列表视图的目录行，而那两个入口把视图里的 `personal`（owner 段被视图隐藏）原样当
+// 目标，于是文件落到 `personal/` 根下 —— 进度条说「已完成」，用户在 `personal/<uid>/`
+// 里永远看不到它。
+//
+// 教训：**测试覆盖了正确的路径，等于没覆盖坏的那条**。一个功能有几个入口，就要从
+// 用户真正会走的那个入口验，而不是从实现最顺手的那个入口验。所以下面加了一条从
+// 「个人」行上传的用例，断言文件出现在 `personal/<uid>/` 下。
+//
 // ## 清理
 //
 // 这个插件没有真正的删除路由：`trash.remove` 只写墓碑（trash.ts 的注释说明在硬链接
@@ -266,18 +278,22 @@ test.describe('拖放上传', () => {
     // 必须等这一次的结果落定再读进度区。上传是异步的，drop 只是派发事件；早读的
     // 时候行还停在「正在上传…」，而那正是诊断里看到的情形。等的是"不再显示进行中"，
     // 不是固定时长。
-    const stripEarly = frame.locator('section[aria-label="进度"], section[aria-label="Progress"]').first()
+    // 判据必须只看**上传组**。原来的写法是"文本里出现 N 个失败就算落定"，但摘要里
+    // 还有提取组那一半（`0 个已提取，3 个失败`），历史提取任务的失败数会提前让正则命中，
+    // 于是在上传还停在「正在上传…」时就被判成已落定 —— 一条被测过、又因为断言写松而
+    // 失效的等待。现在改为等这一行自己不再显示进行中。
     const settled = await (async () => {
       const deadline = Date.now() + 20_000
       while (Date.now() < deadline) {
-        const text = await stripEarly.innerText().catch(() => '')
-        // 一旦出现「失败」计数即为终态；轮询中也会看到「正在上传」，那说明还没完。
-        if (/[1-9]\d* 个失败/u.test(text) || /\d+ failed/u.test(text)) return true
+        // 读这一行（用文件名定位），它的文本只有这一行的状态：进行中 / 已完成 / 失败原因。
+        const row = frame.getByText(name, { exact: true }).locator('xpath=ancestor::li[1]')
+        const rowText = await row.innerText().catch(() => '')
+        if (rowText !== '' && !/(正在上传|Uploading)/u.test(rowText)) return true
         await frame.waitForTimeout(200)
       }
       return false
     })()
-    expect(settled, '第二次（重名）上传一直没有落到终态，20 秒内仍显示进行中').toBe(true)
+    expect(settled, '第二次（重名）上传一直没有落到终态，20 秒内该行仍显示进行中').toBe(true)
 
     // 失败文案必须带原因，而且必须在**进度区里**——整页正则会被别处的文案蒙混过关。
     //
@@ -322,5 +338,52 @@ test.describe('拖放上传', () => {
       && problem.includes('409')
       && problem.includes('console error')
     expect(problems.filter(problem => !isAmbientNoise(problem) && !expectedConflict(problem))).toEqual([])
+  })
+})
+
+test.describe('从「个人」目录行上传', () => {
+  test('拖到列表视图的「个人」行，文件落在 personal/<uid>/ 而不是 personal 根', async ({ page }) => {
+    const problems = []
+    observePage(page, '个人行上传', problems)
+    const frame = await enterKnowledgeBase(page)
+    await expect(frame.getByText('主页', { exact: true }).first()).toBeVisible({ timeout: 25_000 })
+
+    // 切到列表视图（默认是 list，但显式点一次，避免默认值将来变化让这条测试失去意义）。
+    const listTab = frame.getByRole('button', { name: /^(列表|List)$/u }).first()
+    if (await listTab.count() > 0) {
+      await listTab.click({ force: true })
+      await frame.waitForTimeout(600)
+    }
+
+    const name = RUN_TAG + '-personalrow.md'
+    uploaded.push({ name, dir: 'personal/<uid>' })
+
+    // 找树上/列表里的「个人」行，拖到它上面。这一行在视图里携带的路径是 `personal`，
+    // 不含 owner —— 正是曾经把文件写进 personal 根的那条路径。
+    const personalRow = frame.getByText('个人', { exact: true }).first()
+    await expect(personalRow).toBeVisible({ timeout: 25_000 })
+
+    const transfer = await makeTransfer(frame, [{ name, content: '# personal row drop\n' }])
+    const handle = await personalRow.elementHandle()
+    if (handle === null) throw new Error('「个人」行没有 element handle')
+    // 事件派发到行本身；行的 dragover handler 才决定接不接受外来文件。
+    await frame.evaluate(({ element, transferHandle }) => {
+      const init = { bubbles: true, cancelable: true, dataTransfer: transferHandle }
+      element.dispatchEvent(new DragEvent('dragenter', init))
+      element.dispatchEvent(new DragEvent('dragover', init))
+      element.dispatchEvent(new DragEvent('drop', init))
+    }, { element: handle, transferHandle: transfer })
+    await transfer.dispose()
+
+    // 关键断言：文件必须出现在**视图里**。视图只挂 `personal/<uid>/`，所以"出现在视图中"
+    // 等价于"落在了正确的位置"。落到 personal 根的文件永远读不到这一行。
+    const appeared = await waitForRow(frame, name, 8_000)
+    expect(
+      appeared,
+      '文件没有出现在视图里：它很可能被写到了 personal 根（那里视图不显示），'
+        + '正是"进度条说成功、文件夹里找不到"的那个缺陷',
+    ).toBe(true)
+
+    expect(problems.filter(problem => !isAmbientNoise(problem))).toEqual([])
   })
 })

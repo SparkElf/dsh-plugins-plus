@@ -9,7 +9,7 @@ import {
   WanxiangSidebarName,
 } from './WanxiangBrand.tsx'
 
-const BRAND_TITLE = '万相数据平台 Harness'
+const BRAND_TITLE = '万相AI中台 Harness'
 const SLOT_PRIORITY = -100
 const FAVICON_ID = 'dataops-wanxiang-favicon'
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 54 58"><style>:root{color:#1b1b1d}@media(prefers-color-scheme:dark){:root{color:#f7f7f8}}</style><g transform="translate(15 0)" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 0 24 7 12 14 0 7Z" fill="none"/><path d="M0 7 12 14v16L0 23Z" fill="currentColor"/><path d="M12 14 24 7v16L12 30Z" fill="currentColor" fill-opacity=".18"/></g><g transform="translate(0 16)" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 0 24 7 12 14 0 7Z" fill="none"/><path d="M0 7 12 14v16L0 23Z" fill="currentColor"/><path d="M12 14 24 7v16L12 30Z" fill="currentColor" fill-opacity=".18"/></g><g transform="translate(30 16)" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 0 24 7 12 14 0 7Z" fill="none"/><path d="M0 7 12 14v16L0 23Z" fill="currentColor"/><path d="M12 14 24 7v16L12 30Z" fill="currentColor" fill-opacity=".18"/></g><g transform="translate(15 27)" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 0 24 7 12 14 0 7Z" fill="none"/><path d="M0 7 12 14v16L0 23Z" fill="currentColor"/><path d="M12 14 24 7v16L12 30Z" fill="currentColor" fill-opacity=".18"/></g></svg>`

@@ -12,6 +12,19 @@ import {
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { en } from './locales.ts'
 import { fetchPlaza, postPlazaAction, type PlazaListing, type PlazaSkill } from './skill-plaza-client.ts'
+import { decideReview, fetchReviewContext, reviewDemoMode, scanReview } from './review-client.ts'
+import type { ReviewContext, ReviewTab, RiskReport } from './review-types.ts'
+import {
+  canReview,
+  filterByReview,
+  notificationTab,
+  normalizeReviewStatus,
+  reviewCounts,
+  reviewTabsFor,
+  visibilityTag,
+} from './review-types.ts'
+import { demoPlazaSkills } from './review-demo.ts'
+import { NotificationBell } from './NotificationBell.tsx'
 import styles from './SkillPlazaSection.module.css'
 
 /** Values the skill center passes to a contributed section. */
@@ -38,67 +51,62 @@ type PlazaState =
   | { kind: 'ready'; listing: PlazaListing }
   | { kind: 'failed' }
 
-/**
- * One skill as a card in the plaza grid.
- *
- * A plaza entry carries a name, a description, tags, and its own actions; a full-width row left
- * most of that width empty and forced every entry onto its own line. The card stacks the same
- * parts vertically, so a grid column count can change without the content reflowing into a
- * different shape.
- *
- * @param props - the card's skill, its actions, and the dictionary resolver.
- * @returns the rendered card.
- */
-function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
+/** Tab counts from the same visible rows the cards render. */
+function countsOf(skills: readonly PlazaSkill[]): NonNullable<PlazaListing['counts']> {
+  const counted = reviewCounts(skills)
+  return {
+    approved: counted.approved,
+    pending: counted.pending,
+    rejected: skills.filter(row => row.reviewStatus === 'rejected').length,
+    total: counted.all,
+  }
+}
+
+/** One skill as a card in the plaza grid. */
+function PlazaCard({ skill, busy, canAudit, onInstall, onUnshare, onReview, t }: {
   skill: PlazaSkill
   busy: boolean
+  canAudit: boolean
   onInstall: () => void
   onUnshare: () => void
+  onReview: () => void
   t: (key: keyof typeof en) => string
 }): ReactNode {
   const [open, setOpen] = useState(false)
+  const status = normalizeReviewStatus(skill.reviewStatus)
+  const tag = visibilityTag(skill)
   return (
-    <li className={styles.card}>
+    <li className={styles.card} data-review-status={status}>
       <div className={styles.cardTop}>
         <span className={styles.cardIcon}><IconSkillOutlineRegular size={16} /></span>
         <div className={styles.cardTitle}>{skill.name}</div>
-        {skill.sharedByMe ? <span className={styles.mark}>{t('plazaMine')}</span> : null}
+        <span className={styles.tagTop} title={tag.detail}>{tag.label}</span>
       </div>
-      {skill.description === undefined ? null : (
-        <div className={styles.cardDesc}>{skill.description}</div>
-      )}
-      {skill.tags.length === 0 ? null : (
-        <div className={styles.cardMarks}>
-          {skill.tags.map((item) => <span className={styles.mark} key={item}>{item}</span>)}
-        </div>
-      )}
+      <div className={styles.cardMarks}>
+        {skill.sharedByMe ? <span className={styles.sharedTag}>{t('plazaSharedTag')}</span> : null}
+        {status === 'pending' ? <span className={styles.pendingTag}>{t('plazaTabPending')}</span> : null}
+        {status === 'rejected' ? <span className={styles.rejectedTag}>{t('plazaReject')}</span> : null}
+        {skill.tags.map(item => <span className={styles.mark} key={item}>{item}</span>)}
+      </div>
+      <div className={styles.cardDesc}>{skill.description ?? ''}</div>
+      {status === 'rejected' && skill.reviewNote !== null && skill.reviewNote !== undefined ? (
+        <p className={styles.reviewNote}>{skill.reviewNote}</p>
+      ) : null}
       <div className={styles.cardEnd}>
-        <Button
-          variant="outline"
-          size="sm"
-          icon={<IconDownloadOutlineRegular size={16} />}
-          disabled={busy}
-          onClick={onInstall}
-        >
+        {canAudit && status === 'pending' ? (
+          <Button variant="outline" size="sm" className={styles.reviewButton} onClick={onReview}>
+            {t('plazaReview')}
+          </Button>
+        ) : null}
+        <Button variant="outline" size="sm" icon={<IconDownloadOutlineRegular size={16} />} disabled={busy} onClick={onInstall}>
           {t('plazaInstall')}
         </Button>
         {skill.sharedByMe ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={<IconTrashOutlineRegular size={16} />}
-            disabled={busy}
-            onClick={onUnshare}
-          >
+          <Button variant="ghost" size="sm" icon={<IconTrashOutlineRegular size={16} />} disabled={busy} onClick={onUnshare}>
             {t('plazaUnshare')}
           </Button>
         ) : null}
-        <Button
-          variant="outline"
-          size="sm"
-          className={styles.detailButton}
-          onClick={() => { setOpen(true) }}
-        >
+        <Button variant="outline" size="sm" className={styles.detailButton} onClick={() => { setOpen(true) }}>
           {t('plazaShowDetail')}
         </Button>
       </div>
@@ -108,60 +116,124 @@ function PlazaCard({ skill, busy, onInstall, onUnshare, t }: {
         title={skill.name}
         closeLabel={t('plazaClose')}
         className={styles.dialog as string}
-        footer={(
-          <Button variant="outline" onClick={() => { setOpen(false) }}>{t('plazaClose')}</Button>
-        )}
+        footer={<Button variant="outline" onClick={() => { setOpen(false) }}>{t('plazaClose')}</Button>}
       >
         <dl className={styles.detail}>
-          <div className={styles.detailRow}>
-            <dt className={styles.detailLabel}>{t('plazaDetailUpdated')}</dt>
-            <dd className={styles.detailValue}>{skill.updatedAt}</dd>
-          </div>
-          <div className={styles.detailRow}>
-            <dt className={styles.detailLabel}>{t('plazaDetailBody')}</dt>
-            <dd className={styles.detailValue}>{skill.instruction}</dd>
-          </div>
+          <div className={styles.detailRow}><dt className={styles.detailLabel}>{t('plazaDetailUpdated')}</dt><dd className={styles.detailValue}>{skill.updatedAt}</dd></div>
+          <div className={styles.detailRow}><dt className={styles.detailLabel}>{t('plazaDetailBody')}</dt><dd className={styles.detailValue}>{skill.instruction}</dd></div>
         </dl>
       </Modal>
     </li>
   )
 }
 
+/** The AI report block inside the audit dialog. */
+function RiskReportView({ report, busy, failed, onScan, t }: {
+  report: RiskReport | null
+  busy: boolean
+  failed: boolean
+  onScan: () => void
+  t: (key: keyof typeof en) => string
+}): ReactNode {
+  return (
+    <section className={styles.risk}>
+      <div className={styles.riskHead}>
+        <strong>{t('plazaRiskTitle')}</strong>
+        <Button variant="outline" size="sm" disabled={busy} onClick={onScan}>
+          {busy ? t('plazaRiskScanning') : t('plazaRiskScan')}
+        </Button>
+      </div>
+      {failed ? <p className={styles.riskFailed}>{t('plazaRiskFailed')}</p> : null}
+      {report === null ? (busy ? null : <p className={styles.riskEmpty}>{t('plazaRiskNone')}</p>) : (
+        <>
+          <div className={styles.riskSummary}>
+            {report.score === undefined ? null : <span className={styles.riskScore}>{t('plazaRiskScore')} {report.score}</span>}
+            {report.severity === undefined ? null : <span className={styles.severity} data-severity={report.severity}>{report.severity}</span>}
+            {report.summary === undefined ? null : <span>{report.summary}</span>}
+          </div>
+          <ul className={styles.findings}>
+            {report.findings.map((finding, index) => (
+              <li key={String(index)} className={styles.finding}>
+                <span className={styles.severity} data-severity={finding.severity}>{finding.severity}</span>
+                <strong>{finding.category}</strong>
+                {finding.evidence === undefined ? null : <span className={styles.findingText}>{finding.evidence}</span>}
+                {finding.recommendation === undefined ? null : <span className={styles.findingHint}>{finding.recommendation}</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
 /**
  * Browse, share, and install skills other users published.
  *
- * The section appears only where this plugin is installed: the skill center renders the slot,
- * and an empty slot renders nothing. Every action goes through this plugin's Host route, so a
- * workspace without DataOps never reaches these calls.
- * @param props - Skill center injection values.
- * @returns The plaza section, or nothing before injection.
+ * Review is a permissioned overlay on the same plaza: the tab strip and the audit dialog only
+ * appear when the Host says the caller may review, and the Host additionally narrows the pending
+ * list to the caller's department subtree.
  */
 export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
   const { t } = props
   const [state, setState] = useState<PlazaState>({ kind: 'loading' })
+  const [context, setContext] = useState<ReviewContext | null | undefined>(undefined)
+  const [tab, setTab] = useState<ReviewTab>('approved')
   const [tag, setTag] = useState('')
   const [busy, setBusy] = useState(false)
-  // The page owns the search text and filters its own list with it, so this section reads the
-  // same value rather than keeping a second copy that could disagree.
-  const query = props.query ?? ''
   const [notice, setNotice] = useState<string | null>(null)
+  const [audit, setAudit] = useState<PlazaSkill | null>(null)
+  const [risk, setRisk] = useState<RiskReport | null>(null)
+  const [riskBusy, setRiskBusy] = useState(false)
+  const [riskFailed, setRiskFailed] = useState(false)
+  const [reviewNote, setReviewNote] = useState('')
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const query = props.query ?? ''
+  const allowed = canReview(context)
 
-  const load = useCallback(async (filter: { tag?: string; query?: string }) => {
+  useEffect(() => {
+    let live = true
+    void fetchReviewContext().then((next) => { if (live) setContext(next) }).catch(() => { if (live) setContext(null) })
+    return () => { live = false }
+  }, [])
+
+  const load = useCallback(async (filter: { tab: ReviewTab; tag: string; query: string }) => {
     try {
-      const listing = await fetchPlaza(filter)
-      setState(listing === null ? { kind: 'unavailable' } : { kind: 'ready', listing })
+      // The demo fixture is complete on its own: mixing it with a live list would still call a
+      // backend whose review endpoints have not shipped, which is exactly what the fixture exists
+      // to review without.
+      if (reviewDemoMode()) {
+        const demo = demoPlazaSkills()
+        setState({
+          kind: 'ready',
+          listing: {
+            skills: [...filterByReview(demo, filter.tab)],
+            tags: ['性能', '数据', '数据库', '质量', '经营', '日报', '客户'],
+            counts: countsOf(demo),
+          },
+        })
+        return
+      }
+      // One visible snapshot per query/tag. The tab is a client-side filter, so the count on
+      // each tab is always the number of cards that tab will actually show.
+      const listing = await fetchPlaza({ tag: filter.tag, query: filter.query, status: allowed ? 'all' : 'approved' })
+      if (listing === null) {
+        setState({ kind: 'unavailable' })
+        return
+      }
+      const visible = allowed ? listing.skills : listing.skills.filter(row => normalizeReviewStatus(row.reviewStatus) === 'approved')
+      setState({ kind: 'ready', listing: { ...listing, skills: [...filterByReview(visible, filter.tab)], counts: countsOf(visible) } })
     } catch {
       setState({ kind: 'failed' })
     }
-  }, [])
+  }, [allowed])
 
-  // The page's search text arrives as a prop, so a change to it is what reloads the listing:
-  // the plaza filters on the Host, where the whole catalogue is known.
-  useEffect(() => { void load({ query }) }, [load, query])
+  useEffect(() => { void load({ tab, tag, query }) }, [load, tab, tag, query])
 
-  const refresh = useCallback(async (nextTag = tag, nextQuery = query) => {
-    await load({ tag: nextTag, query: nextQuery })
-  }, [load, tag, query])
+  const refresh = useCallback(async (nextTab = tab, nextTag = tag) => {
+    await load({ tab: nextTab, tag: nextTag, query })
+  }, [load, tab, tag, query])
 
   const act = useCallback(async (body: Record<string, unknown>, message: string) => {
     setBusy(true)
@@ -177,18 +249,72 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
     }
   }, [refresh, t])
 
+  const runScan = async (skill: PlazaSkill): Promise<void> => {
+    setRiskBusy(true)
+    setRiskFailed(false)
+    try {
+      const report = await scanReview('skill', [skill.id])
+      if (report === null) setRiskFailed(true)
+      else setRisk(report)
+    } catch {
+      setRiskFailed(true)
+    } finally {
+      setRiskBusy(false)
+    }
+  }
+
+  const openAudit = (skill: PlazaSkill): void => {
+    setAudit(skill)
+    setRisk(skill.riskReport ?? null)
+    setRiskFailed(false)
+    setReviewNote('')
+    setReviewError(null)
+    if (skill.riskReport === null || skill.riskReport === undefined) void runScan(skill)
+  }
+
+  const submitReview = async (decision: 'approve' | 'reject'): Promise<void> => {
+    if (audit === null || reviewBusy) return
+    if (decision === 'reject' && reviewNote.trim() === '') {
+      setReviewError(t === undefined ? null : t('plazaReviewNote'))
+      return
+    }
+    setReviewBusy(true)
+    setReviewError(null)
+    try {
+      const ok = await decideReview('skill', [audit.id], decision, reviewNote.trim())
+      if (!ok) {
+        setReviewError(t === undefined ? null : t('plazaReviewFailed'))
+        return
+      }
+      setAudit(null)
+      setNotice(t === undefined ? null : t('plazaReviewDone'))
+      await refresh('pending')
+    } catch {
+      setReviewError(t === undefined ? null : t('plazaReviewFailed'))
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
   if (t === undefined) return null
   if (state.kind === 'loading') return null
 
-  // The section names itself once; the states below swap only what sits under the heading. The
-  // count sits beside the title as the skill center's own group headings carry theirs, so both
-  // halves of the page announce a group the same way.
   const head = (count: number | null): ReactNode => (
     <div className={styles.head}>
-      <h2 className={styles.title}>
-        {t('plazaTitle')}
-        {count === null ? null : <span className={styles.titleCount}>{count}</span>}
-      </h2>
+      <div className={styles.headRow}>
+        <h2 className={styles.title}>
+          {t('plazaTitle')}
+          {count === null ? null : <span className={styles.titleCount}>{count}</span>}
+        </h2>
+        {reviewDemoMode() ? <span className={styles.demoTag}>{t('plazaDemo')}</span> : null}
+        <NotificationBell
+          label={t('plazaTitle') + '通知'}
+          onOpen={(item) => {
+            const next = notificationTab(item)
+            if (next !== undefined) setTab(next)
+          }}
+        />
+      </div>
     </div>
   )
 
@@ -202,37 +328,45 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
         <div className={styles.empty} role="alert">
           <span className={styles.emptyIcon}><IconSkillOutlineRegular size={28} /></span>
           <p className={styles.emptyText}>{t('plazaLoadFailed')}</p>
-          <Button variant="outline" size="sm" icon={<IconRefreshOutlineRegular size={16} />} onClick={() => { void refresh() }}>
-            {t('plazaRetry')}
-          </Button>
+          <Button variant="outline" size="sm" icon={<IconRefreshOutlineRegular size={16} />} onClick={() => { void refresh() }}>{t('plazaRetry')}</Button>
         </div>
       </section>
     )
   }
 
   const { listing } = state
+  const counts: Record<ReviewTab, number> = listing.counts === undefined
+    ? reviewCounts(listing.skills)
+    : { approved: listing.counts.approved, pending: listing.counts.pending, all: listing.counts.total }
+  const tabs = reviewTabsFor(context)
+  const tabLabel = (item: ReviewTab): string => item === 'approved' ? t('plazaTabApproved') : item === 'pending' ? t('plazaTabPending') : t('plazaTabAll')
+
   return (
     <section className={styles.section}>
-      {head(listing.skills.length)}
+      {head(counts[tab])}
+      {tabs.length > 1 ? (
+        <div className={styles.tabs} role="tablist" aria-label={t('plazaTitle')}>
+          {tabs.map(item => (
+            <button
+              key={item}
+              type="button"
+              role="tab"
+              aria-selected={tab === item}
+              className={tab === item ? styles.tab + ' ' + styles.tabActive : styles.tab}
+              onClick={() => { setTab(item); void load({ tab: item, tag, query }) }}
+            >
+              {tabLabel(item)}
+              <span className={styles.tabCount}>{counts[item]}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {listing.tags.length === 0 ? null : (
         <div className={styles.tagBar}>
-          <button
-            type="button"
-            className={tag === '' ? styles.chip + ' ' + styles.chipOn : styles.chip}
-            onClick={() => { setTag(''); void refresh('', query) }}
-          >
-            {t('plazaAllTags')}
-          </button>
-          {listing.tags.map((item) => (
-            <button
-              type="button"
-              key={item}
-              className={tag === item ? styles.chip + ' ' + styles.chipOn : styles.chip}
-              onClick={() => { setTag(item); void refresh(item, query) }}
-            >
-              {item}
-            </button>
+          <button type="button" className={tag === '' ? styles.chip + ' ' + styles.chipOn : styles.chip} onClick={() => { setTag(''); void refresh(tab, '') }}>{t('plazaAllTags')}</button>
+          {listing.tags.map(item => (
+            <button key={item} type="button" className={tag === item ? styles.chip + ' ' + styles.chipOn : styles.chip} onClick={() => { setTag(item); void refresh(tab, item) }}>{item}</button>
           ))}
         </div>
       )}
@@ -242,22 +376,55 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
       {listing.skills.length === 0 ? (
         <div className={styles.empty}>
           <span className={styles.emptyIcon}><IconShareOutlineRegular size={28} /></span>
-          <p className={styles.emptyText}>{t('plazaEmpty')}</p>
+          <p className={styles.emptyText}>{tab === 'pending' ? t('plazaPendingEmpty') : t('plazaEmpty')}</p>
         </div>
       ) : null}
 
       <ul className={styles.cards}>
-        {listing.skills.map((skill) => (
+        {listing.skills.map(skill => (
           <PlazaCard
             key={skill.id}
             skill={skill}
             busy={busy}
+            canAudit={allowed}
             t={t}
             onInstall={() => { void act({ action: 'install', id: skill.id }, t('plazaInstalled')) }}
             onUnshare={() => { void act({ action: 'unshare', id: skill.id }, t('plazaUnshared')) }}
+            onReview={() => { openAudit(skill) }}
           />
         ))}
       </ul>
+
+      <Modal
+        open={audit !== null}
+        onClose={() => { if (!reviewBusy) setAudit(null) }}
+        title={t('plazaAuditTitle')}
+        closeLabel={t('plazaClose')}
+        className={styles.auditDialog as string}
+        footer={(
+          <div className={styles.auditFooter}>
+            <Button variant="outline" disabled={reviewBusy} onClick={() => { setAudit(null) }}>{t('plazaClose')}</Button>
+            <Button variant="outline" disabled={reviewBusy} onClick={() => { void submitReview('reject') }}>{t('plazaReject')}</Button>
+            <Button variant="primary" disabled={reviewBusy} onClick={() => { void submitReview('approve') }}>{t('plazaApprove')}</Button>
+          </div>
+        )}
+      >
+        {audit === null ? null : (
+          <div className={styles.audit}>
+            <dl className={styles.detail}>
+              <div className={styles.detailRow}><dt className={styles.detailLabel}>{t('plazaAuditSource')}</dt><dd className={styles.detailValue}>{audit.ownerName ?? '—'} · {visibilityTag(audit).detail}</dd></div>
+              <div className={styles.detailRow}><dt className={styles.detailLabel}>{t('plazaAuditVisibility')}</dt><dd className={styles.detailValue}>{visibilityTag(audit).label}</dd></div>
+              <div className={styles.detailRow}><dt className={styles.detailLabel}>{t('plazaShowDetail')}</dt><dd className={styles.detailValue}>{audit.description ?? '—'}</dd></div>
+            </dl>
+            <RiskReportView report={risk} busy={riskBusy} failed={riskFailed} onScan={() => { void runScan(audit) }} t={t} />
+            <label className={styles.noteField}>
+              <span>{t('plazaReviewNote')}</span>
+              <textarea value={reviewNote} placeholder={t('plazaReviewNotePlaceholder')} onChange={(event) => { setReviewNote(event.target.value) }} />
+            </label>
+            {reviewError === null ? null : <p className={styles.reviewError} role="alert">{reviewError}</p>}
+          </div>
+        )}
+      </Modal>
     </section>
   )
 }

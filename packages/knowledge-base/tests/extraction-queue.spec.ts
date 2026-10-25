@@ -32,6 +32,7 @@ describe('the extraction queue', () => {
     const queue = createExtractionQueue({
       run: runner.run,
       isExtractable: () => true,
+      isAlreadyMarkdown: () => false,
     })
 
     queue.enqueue('a.docx')
@@ -55,7 +56,8 @@ describe('the extraction queue', () => {
 
   it('moves a task through pending, running, then succeeded', async () => {
     const runner = controlledRunner()
-    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true })
+    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true,
+      isAlreadyMarkdown: () => false })
 
     const accepted = queue.enqueue('report.pdf')
     // The upload that enqueued it has already answered; this is what it reports.
@@ -76,7 +78,8 @@ describe('the extraction queue', () => {
 
   it('records the extractor reason when a run fails', async () => {
     const runner = controlledRunner()
-    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true })
+    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true,
+      isAlreadyMarkdown: () => false })
 
     queue.enqueue('scan.pdf')
     await settle()
@@ -90,9 +93,13 @@ describe('the extraction queue', () => {
 
   it('answers an unsupported type immediately instead of spending the worker', async () => {
     const runner = controlledRunner()
-    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => false })
+    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => false,
+      isAlreadyMarkdown: () => false })
 
-    const task = queue.enqueue('notes.md')
+    // `.zip` is the shape this branch is about: a format no extractor exists for. It used
+    // to be tested with `.md`, which is wrong now that Markdown is recognised as needing no
+    // extraction at all -- `.md` has its own successful outcome, not this failure.
+    const task = queue.enqueue('archive.zip')
     expect(task.state).toBe('unsupported')
     expect(task.reason).toContain('no extractor')
     await settle()
@@ -102,7 +109,8 @@ describe('the extraction queue', () => {
 
   it('joins a duplicate instead of spending two parses on one document', async () => {
     const runner = controlledRunner()
-    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true })
+    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true,
+      isAlreadyMarkdown: () => false })
 
     const first = queue.enqueue('report.pdf')
     const second = queue.enqueue('report.pdf')
@@ -121,6 +129,7 @@ describe('the extraction queue', () => {
     const queue = createExtractionQueue({
       run: async () => { throw new Error('spawn soffice ENOENT') },
       isExtractable: () => true,
+      isAlreadyMarkdown: () => false,
     })
 
     queue.enqueue('legacy.doc')
@@ -133,7 +142,8 @@ describe('the extraction queue', () => {
 
   it('reports what is running and what is waiting', async () => {
     const runner = controlledRunner()
-    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true })
+    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true,
+      isAlreadyMarkdown: () => false })
 
     expect(queue.snapshot()).toEqual({ running: undefined, size: 0, tasks: [] })
 
@@ -158,7 +168,8 @@ describe('the extraction queue', () => {
 
   it('passes the caller address through to the runner', async () => {
     const runner = controlledRunner()
-    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true })
+    const queue = createExtractionQueue({ run: runner.run, isExtractable: () => true,
+      isAlreadyMarkdown: () => false })
 
     queue.enqueue('report.pdf', 'http://mineru.internal:8000')
     await settle()
@@ -169,7 +180,139 @@ describe('the extraction queue', () => {
   })
 
   it('resolves drain immediately on an idle queue', async () => {
-    const queue = createExtractionQueue({ run: async () => ({ state: 'succeeded' }), isExtractable: () => true })
+    const queue = createExtractionQueue({ run: async () => ({ state: 'succeeded' }), isExtractable: () => true,
+      isAlreadyMarkdown: () => false })
     await expect(queue.drain()).resolves.toBeUndefined()
+  })
+})
+
+describe('the extraction queue tells Markdown apart from an unsupported format', () => {
+  /**
+   * 用户报的缺陷：`.md` 文件显示「该文件类型无解析器」。`.md` 本身就是 Markdown，
+   * 需要的是「无需提取」这个成功结论，而不是「没有解析器」这个失败结论。
+   *
+   * 直接测队列而不是只测辅助函数：状态是由 `enqueue` 决定的，缺陷也在那一行。
+   */
+  it('resolves a Markdown document immediately, without occupying the worker', async () => {
+    const runner = controlledRunner()
+    const queue = createExtractionQueue({
+      run: runner.run,
+      isExtractable: () => false,
+      isAlreadyMarkdown: path => path.endsWith('.md'),
+    })
+
+    const task = queue.enqueue('notes.md')
+    expect(task.state).toBe('already-markdown')
+    // 不是失败：没有原因可报，也没有解析器被请求。
+    expect(task.reason).toBeUndefined()
+    await settle()
+    // 关键：它不占 running 槽位，队列里真正需要解析的任务照常进行。
+    expect(runner.calls).toHaveLength(0)
+  })
+
+  it('still reports a genuinely unsupported format as unsupported', async () => {
+    // 这条防的是"把所有文本类型都当成 Markdown"的过度修正。
+    const runner = controlledRunner()
+    const queue = createExtractionQueue({
+      run: runner.run,
+      isExtractable: () => false,
+      isAlreadyMarkdown: path => path.endsWith('.md'),
+    })
+
+    const task = queue.enqueue('archive.zip')
+    expect(task.state).toBe('unsupported')
+    expect(task.reason).toContain('no extractor')
+  })
+
+  it('does not block a real extraction behind a Markdown one', async () => {
+    // 真实队列里两者混排：Markdown 立即终结，pdf 仍然被调度。
+    const runner = controlledRunner()
+    const queue = createExtractionQueue({
+      run: runner.run,
+      isExtractable: path => path.endsWith('.pdf'),
+      isAlreadyMarkdown: path => path.endsWith('.md'),
+    })
+
+    const md = queue.enqueue('a.md')
+    const pdf = queue.enqueue('b.pdf')
+    expect(md.state).toBe('already-markdown')
+    expect(pdf.state).toBe('pending')
+    await settle()
+    expect(runner.calls.map(call => call.relPath)).toEqual(['b.pdf'])
+  })
+})
+
+describe('a failed task always explains itself', () => {
+  /**
+   * 用户截图上出现过「失败：」——冒号后面什么都没有。那比没有提示更糟：读者既不知道
+   * 发生了什么，也不知道该不该重试。任何 `failed` 都必须带非空文本。
+   *
+   * 三种会走到兜底的输入都被钉住：抛出的 Error、抛出的空 message Error、抛出的非
+   * Error 值。最后一种最容易漏（`String(error)` 可能是空串）。
+   */
+  const failWith = async (thrown: unknown): Promise<string | undefined> => {
+    const runner = controlledRunner()
+    const queue = createExtractionQueue({
+      run: async () => { throw thrown },
+      isExtractable: () => true,
+      isAlreadyMarkdown: () => false,
+    })
+    queue.enqueue('x.pdf')
+    await queue.drain()
+    return queue.get('x.pdf')?.reason
+  }
+
+  it('carries the exception message when there is one', async () => {
+    const reason = await failWith(new Error('mineru is unreachable'))
+    expect(reason).toBe('mineru is unreachable')
+  })
+
+  it('never leaves the reason blank for an error with no message', async () => {
+    // 这正是截图里那一幕的来源：一个 message 为空的 Error。
+    const reason = await failWith(new Error(''))
+    expect(reason).toBeDefined()
+    expect(reason?.trim()).not.toBe('')
+  })
+
+  it('never leaves the reason blank for a thrown non-Error', async () => {
+    // `String(undefined)` 是 'undefined'，但 `String('')` 是空串。
+    const reason = await failWith('')
+    expect(reason).toBeDefined()
+    expect(reason?.trim()).not.toBe('')
+  })
+
+  it('gives every failure a reason, whatever was thrown', async () => {
+    // 一组真实会出现的抛出物，逐个断言非空。
+    const thrown = [new Error('boom'), new Error(''), '', undefined, null, 42, { code: 'X' }]
+    for (const value of thrown) {
+      const reason = await failWith(value)
+      expect(reason, 'thrown: ' + String(value)).toBeDefined()
+      expect(reason?.trim(), 'thrown: ' + String(value)).not.toBe('')
+    }
+  })
+})
+
+describe('extraction progress steps', () => {
+  it('reports parse → chunk → index → done and keeps a failure reason', async () => {
+    let reportStep: ((step: 'parse' | 'chunk' | 'index' | 'done') => void) | undefined
+    let resolveRun: ((value: { state: 'succeeded'; markdown: string }) => void) | undefined
+    const queue = createExtractionQueue({
+      run: (_relPath, _url, report) => {
+        reportStep = report
+        return new Promise(resolve => { resolveRun = resolve })
+      },
+      isExtractable: () => true,
+      isAlreadyMarkdown: () => false,
+    })
+    queue.enqueue('a.pdf')
+    await settle()
+    expect(queue.get('a.pdf')).toMatchObject({ state: 'running', step: 'parse' })
+    reportStep?.('chunk')
+    expect(queue.get('a.pdf')?.step).toBe('chunk')
+    reportStep?.('index')
+    expect(queue.get('a.pdf')?.step).toBe('index')
+    resolveRun?.({ state: 'succeeded', markdown: 'a.pdf.md' })
+    await settle()
+    expect(queue.get('a.pdf')).toMatchObject({ state: 'succeeded', step: 'done' })
   })
 })

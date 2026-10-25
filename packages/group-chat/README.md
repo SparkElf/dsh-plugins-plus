@@ -80,6 +80,33 @@ the session id because `SessionHeader` carries no free-form metadata field. An
 ordinary session never matches that prefix, which is the second half of how this
 plugin stays out of the way.
 
+Opening a room is a **resolve-or-create**: the plugin resolves the persisted session
+first and only calls the controller's create path when the session does not exist. A
+create call is not a create-or-reuse call — once the named session has run a turn the
+controller mints a fresh `session-<uuid>` instead — so calling it on every host restart
+would leave a throwaway session directory behind. Older builds did exactly that; a
+room could grow to thousands of directories and slow the shell's `session/list`.
+
+A workspace upgraded from such a build can report or remove the leftovers for one room:
+
+```bash
+# Report (default; no writes)
+curl -sS -X POST http://127.0.0.1:3080/dsh-group-chat/api/rooms/<roomId>/sessions/cleanup \
+  -H 'content-type: application/json' -d '{}'
+
+# Archive: mark them hidden from grouping surfaces, keep the files
+curl -sS -X POST .../rooms/<roomId>/sessions/cleanup \
+  -H 'content-type: application/json' -d '{"dryRun":false}'
+
+# Purge: delete the throwaway directories (canonical room session and subagent children are kept)
+curl -sS -X POST .../rooms/<roomId>/sessions/cleanup \
+  -H 'content-type: application/json' -d '{"dryRun":false,"purge":true,"confirm":"<roomId>"}'
+```
+
+The canonical `group-room-<roomId>` session is never a cleanup candidate, so the
+room's history stays openable. If a room has already been dissolved and is no longer
+listed by the backend, pass its project directory explicitly with `"directory": "..."`.
+
 ## Known limits
 
 - **Display names are not authentication.** The backend verifies *who* a caller is

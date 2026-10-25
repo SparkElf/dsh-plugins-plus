@@ -18,7 +18,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseArgs } from 'node:util'
@@ -412,7 +412,10 @@ OPTIONS
   --container <name>     Container name (default ${DEFAULT_CONTAINER}).
   --model-source <name>  modelscope (default) or huggingface.
   --memory-gb <n>        Optional container memory ceiling.
-  --force                Remove an existing container and start it again.
+  --force                Recreate the container even if it already exists.
+  --compose <path>       Deploy with \`docker compose -f <path> up -d\` instead of
+                         \`docker run\`. For the bundled deploy/mineru/docker-compose.yml.
+                         The image must already be loaded on the target.
   --ask-pass             Prompt for an SSH password (never written to disk).
   --dry-run              Print every command that would run, and change nothing.
 
@@ -433,6 +436,7 @@ OPTIONS
                          Default when --host is given: http://<host>:<port>.
   --host <user@host>     Derive the URL from a deploy target.
   --tier <name>          Tier to request (default basic).
+  --file <path>          PDF to send (default: a generated one-page sample).
   --timeout-ms <n>       Total wait for the parse (default 300000).
   --dry-run              Print the request instead of sending it.`)
 }
@@ -473,9 +477,11 @@ function parseCommandLine(argv) {
       'build-from': { type: 'string' },
       'memory-gb': { type: 'string' },
       'timeout-ms': { type: 'string' },
+      file: { type: 'string' },
       'include-models': { type: 'boolean' },
       force: { type: 'boolean' },
       'ask-pass': { type: 'boolean' },
+      compose: { type: 'string' },
       'dry-run': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -922,7 +928,12 @@ async function commandDeploy(values) {
     console.log(`  $ scp ${sshArgs.join(' ')} -r ${bundle}/. ${host}:${remoteDir}/`)
     console.log(`  $ ${sshPrefix} "docker image inspect ${image} >/dev/null 2>&1 && echo present || docker load -i ${remoteDir}/mineru-image.tar"`)
     console.log(`  $ ${sshPrefix} "docker rm -f ${container} 2>/dev/null || true"   # only with --force`)
-    console.log(`  $ ${sshPrefix} "docker ${runArgs.join(' ')}"`)
+    if (values.compose === undefined) {
+      console.log(`  $ ${sshPrefix} "docker ${runArgs.join(' ')}"`)
+    } else {
+      console.log(`  $ scp ${sshArgs.join(' ')} ${resolve(values.compose)} ${host}:${remoteDir}/docker-compose.yml`)
+      console.log(`  $ ${sshPrefix} "cd ${remoteDir} && docker compose -f ${remoteDir}/docker-compose.yml up -d"`)
+    }
     console.log(`  $ ${sshPrefix} "curl -fsS http://127.0.0.1:8000/v1/health"`)
     console.log('\nwould then print:')
     console.log(`  MinerU 服务地址: http://${host.split('@').pop()}:${port}`)
@@ -954,6 +965,40 @@ async function commandDeploy(values) {
   }
 
   step('start the service')
+  // Two supported starts, because they fail differently:
+  //   * `docker run` -- everything on the command line, easy to reason about;
+  //   * `docker compose up -d` -- the operator got a compose file with the image, and
+  //     starting it by hand with different flags would drift from that file.
+  // The compose path is given a copy of the file on the target so `docker compose logs`
+  // and a later `up -d` behave the same way the operator would run them.
+  if (values.compose !== undefined) {
+    const composePath = resolve(values.compose)
+    if (!existsSync(composePath)) {
+      fail('deploy/compose', `no compose file at ${composePath}`, 'pass --compose with a path that exists')
+    }
+    const remoteCompose = `${remoteDir}/docker-compose.yml`
+    note(`compose file: ${composePath} → ${remoteCompose}`)
+    await mustRun('deploy/compose', 'ssh', [...sshArgs, host, `mkdir -p ${remoteDir}`],
+      { timeoutMs: 120_000, env: ssh.env }, 'confirm SSH works and that the user may write /opt')
+    await mustRun('deploy/compose', 'scp', [...sshArgs, composePath, `${host}:${remoteCompose}`],
+      { timeoutMs: 300_000, env: ssh.env }, 'check that the target directory is writable')
+    await mustRun('deploy/compose', 'ssh',
+      [...sshArgs, host, `cd ${remoteDir} && docker compose -f ${remoteCompose} up -d`],
+      { echo: true, timeoutMs: 600_000, env: ssh.env },
+      'check `docker compose version` on the target (the v2 plugin is required) and that the image is loaded')
+    note('started with docker compose')
+    const composeReady = await waitForHealth(values, host, sshArgs, 'http://127.0.0.1:8000/v1/health', ssh.env)
+    if (!composeReady) {
+      const logs = await run('ssh',
+        [...sshArgs, host, `cd ${remoteDir} && docker compose -f ${remoteCompose} logs --tail 40 2>&1`],
+        { timeoutMs: 120_000, env: ssh.env })
+      fail('deploy/health', logs.stdout,
+        `the compose service did not answer. Check \`docker compose -f ${remoteCompose} logs\` on the target`)
+    }
+    note('API is answering')
+    printServiceSummary(host.split('@').pop() ?? host, port)
+    return
+  }
   const exists = await run('ssh', [...sshArgs, host, `docker container inspect ${container} >/dev/null 2>&1 && echo present || echo absent`],
     { timeoutMs: 120_000, env: ssh.env })
   if (exists.code !== 0) {
@@ -1066,15 +1111,29 @@ async function commandVerify(values) {
 
   if (dryRun) {
     console.log('\nrequest:')
-    console.log(`  $ curl -F "files=@sample.pdf" "${url.toString()}"`)
-    console.log('  (a minimal one-page PDF would be generated and sent; nothing was sent)')
+    const shown = values.file === undefined ? 'sample.pdf' : resolve(values.file)
+    console.log(`  $ curl -F "files=@${shown}" "${url.toString()}"`)
+    console.log(values.file === undefined
+      ? '  (a minimal one-page PDF would be generated and sent; nothing was sent)'
+      : '  (this file would be sent as the `files` field; nothing was sent)')
     return
   }
+
+  // The caller may name the PDF to send. That matters for a real acceptance run: a
+  // generated sample proves the route works, while the customer's own document proves
+  // the parser works on the kind of file it will actually see.
+  const samplePath = values.file === undefined ? undefined : resolve(values.file)
+  if (samplePath !== undefined && !existsSync(samplePath)) {
+    fail('verify/options', `no such file: ${samplePath}`, 'pass --file with a path that exists')
+  }
+  const sampleBytes = samplePath === undefined ? minimalPdf() : await readFile(samplePath)
+  const sampleName = samplePath === undefined ? 'mineru-verify.pdf' : basename(samplePath)
+  note(`file: ${sampleName} (${humanBytes(sampleBytes.byteLength)})`)
 
   const form = new FormData()
   // A minimal PDF with extractable text, so a pass means text really came back rather
   // than that the endpoint merely answered.
-  form.append('files', new Blob([minimalPdf()], { type: 'application/pdf' }), 'mineru-verify.pdf')
+  form.append('files', new Blob([sampleBytes], { type: 'application/pdf' }), sampleName)
 
   let response
   try {
@@ -1084,7 +1143,7 @@ async function commandVerify(values) {
       `check that the service is running and reachable: curl -v ${url.origin}/v1/health`)
   }
 
-  const text = await response.text()
+  let text = await response.text()
   if (!response.ok) {
     fail('verify/request', `HTTP ${String(response.status)}\n${text.slice(0, 300)}`,
       'the service refused the request; the response body above names why')
@@ -1097,9 +1156,38 @@ async function commandVerify(values) {
     fail('verify/response', text.slice(0, 300), 'the endpoint did not answer JSON; check the URL points at MinerU')
   }
 
-  // 4.x answers a completed task with files[].content.markdown. Accept the inline
-  // shape, and also the plain `{markdown}` an older or wrapped deployment may return.
-  const markdown = extractMarkdown(payload)
+  // A parse that finishes inside the server's inline window answers 200 with the text
+  // attached. A longer document answers 202 and only a `task_id`, so the caller polls
+  // `/v1/tasks/<id>` until the task reports a terminal status. Handling only the first
+  // shape made `verify` time out on exactly the large scanned PDFs this feature exists
+  // for: the request had succeeded, and the script was waiting for a body that the
+  // server had already answered.
+  if (response.status === 202 || payload.status === 'pending' || payload.status === 'running') {
+    const taskId = typeof payload.task_id === 'string' ? payload.task_id : ''
+    if (taskId === '') {
+      fail('verify/response', text.slice(0, 300),
+        'the service accepted the task but did not return a task_id to poll')
+    }
+    note(`accepted as task ${taskId}; polling for the result`)
+    payload = await pollTask(url.origin, taskId, timeoutMs)
+    text = JSON.stringify(payload)
+  }
+
+  // A completed task carries the text in one of two places, and the difference is not
+  // cosmetic:
+  //   * small documents answerinline with files[].content.markdown;
+  //   * a large document's task body has content: null and only a file id under
+  //     output_files.markdown, because the text is stored as a separate file.
+  // Reading only the first shape made `verify` report "carried no Markdown" for a parse
+  // that had actually succeeded -- the bytes existed, under a file id.
+  let markdown = extractMarkdown(payload)
+  if (markdown === undefined) {
+    const fileId = extractMarkdownFileId(payload)
+    if (fileId !== undefined) {
+      note(`markdown stored as ${fileId}; downloading it`)
+      markdown = await downloadFileText(url.origin, fileId)
+    }
+  }
   if (markdown === undefined) {
     fail('verify/response', text.slice(0, 300),
       'the request was accepted but carried no Markdown. Check the parse result for a file-level error')
@@ -1110,6 +1198,51 @@ async function commandVerify(values) {
   note(markdown.split('\n').slice(0, 6).join('\n  '))
   console.log('\nThe knowledge-base plugin can use this service.')
   printServiceSummary(new URL(base).hostname, Number(new URL(base).port || 80))
+}
+
+/**
+ * Poll `/v1/tasks/<id>` until the task reaches a terminal status.
+ *
+ * MinerU's API is asynchronous whenever the parse outlives its inline window, so the
+ * only correct way to read a result is to poll the task it handed back.
+ * @param origin - service origin, e.g. http://10.0.0.12:8000.
+ * @param taskId - the id from the 202 body.
+ * @param timeoutMs - total budget for the whole parse.
+ * @returns the terminal task body.
+ */
+async function pollTask(origin, taskId, timeoutMs) {
+  const url = new URL(`/v1/tasks/${encodeURIComponent(taskId)}`, origin)
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    let response
+    try {
+      response = await fetch(url, { signal: AbortSignal.timeout(30_000) })
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error)
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 2000))
+      continue
+    }
+    const body = await response.text()
+    if (!response.ok) {
+      fail('verify/poll', `HTTP ${String(response.status)}\n${body.slice(0, 300)}`,
+        `the task ${taskId} could not be read; check the service log`)
+    }
+    let parsed
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      last = body.slice(0, 200)
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 2000))
+      continue
+    }
+    const status = String(parsed.status ?? '')
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') return parsed
+    last = status
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 3000))
+  }
+  fail('verify/poll', `task ${taskId} did not finish within ${String(Math.round(timeoutMs / 1000))}s (last status: ${last})`,
+    'raise --timeout-ms; a 400+ page scan on CPU can take many minutes')
 }
 
 /**
@@ -1134,6 +1267,53 @@ function extractMarkdown(payload) {
     if (typeof record[key] === 'string' && record[key].trim() !== '') return record[key]
   }
   return undefined
+}
+
+/**
+ * The id of the task's Markdown output file, when the body references one.
+ * @param payload - a terminal task body.
+ * @returns the file id, or undefined.
+ */
+function extractMarkdownFileId(payload) {
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const files = payload.files
+  if (!Array.isArray(files)) return undefined
+  for (const file of files) {
+    if (typeof file !== 'object' || file === null) continue
+    const outputs = file.output_files
+    if (typeof outputs !== 'object' || outputs === null) continue
+    const markdown = outputs.markdown
+    if (typeof markdown === 'object' && markdown !== null && typeof markdown.file_id === 'string' && markdown.file_id !== '') {
+      return markdown.file_id
+    }
+  }
+  return undefined
+}
+
+/**
+ * Fetch one produced file's text.
+ *
+ * MinerU exposes parse outputs as files under `/v1/files/<id>/content`; the JSON
+ * metadata lives at `/v1/files/<id>`, which is not where the text is.
+ * @param origin - service origin.
+ * @param fileId - the produced file id.
+ * @returns the text.
+ */
+async function downloadFileText(origin, fileId) {
+  const url = new URL(`/v1/files/${encodeURIComponent(fileId)}/content`, origin)
+  let response
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(120_000) })
+  } catch (error) {
+    fail('verify/download', error instanceof Error ? error.message : String(error),
+      'the task finished but its output file could not be downloaded; check the service log')
+  }
+  const text = await response.text()
+  if (!response.ok) {
+    fail('verify/download', `HTTP ${String(response.status)}\n${text.slice(0, 300)}`,
+      'the task finished but its output file could not be read')
+  }
+  return text
 }
 
 /**

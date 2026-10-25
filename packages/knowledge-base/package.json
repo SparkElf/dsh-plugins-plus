@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-knowledge-base",
-  "version": "0.1.5",
+  "version": "0.1.12",
   "description": "DataOps-backed knowledge base for DeepSeek Harness: a left-sidebar destination, Settings configuration, and index tooling over a mounted NAS view.",
   "type": "module",
   "main": "./lib/index.js",
@@ -43,6 +43,7 @@
     "README.md",
     "LICENSE",
     "SKILL.md",
+    "万相AI使用教程.html",
     "i18n/*.json",
     "skills/**/SKILL.md",
     "skills/**/i18n/*.json"

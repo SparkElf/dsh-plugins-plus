@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { readKnowledgeJson } from '../src/api.ts'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, readFile, readlink, lstat, rm, stat, symlink, chmod, writeFile, appendFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, readlink, lstat, rm, stat, symlink, chmod, writeFile, appendFile, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createServer, type Server } from 'node:http'
@@ -34,8 +34,16 @@ import {
   syncCallerView,
   name,
   mineruUrlFor,
+  permissionForKbRoute,
+  actualRelPathForView,
   revokeGrant,
   withStoredStorage,
+  isTeamDeployment,
+  checkLocalPath,
+  resolveMineruUrl,
+  LOCAL_USER_ID,
+  canWritePath,
+  readSharedMineruUrl,
   type KnowledgeError,
 } from '../src/index.ts'
 import {
@@ -105,6 +113,7 @@ const CONFIG = {
   mountPoint: '/nas/kb/views/current',
   actualRoot: '/nas/kb/actual',
   viewRoot: '/nas/kb/views',
+  indexDir: '/tmp/kb-test-index-unused',
   permitted: '10.0.0.5',
   nfsServer: 'nas.example',
   mineruTier: 'basic' as const,
@@ -296,10 +305,36 @@ describe('host plugin', () => {
     expect(inject).toContain('webServer')
   })
 
-  it('registers exactly the two knowledge tools', () => {
+  it('registers the KB tools, five kb_file_* tools, kb_search, kb_chunk_get and kb_outline', () => {
     const { ctx, tools } = fakeHost({ token: 't' })
     apply(ctx as never, CONFIG)
-    expect(tools.map(tool => tool.name).sort()).toEqual(['kb_index', 'kb_status'])
+    expect(tools.map(tool => tool.name).sort()).toEqual([
+      'kb_file_delete',
+      'kb_file_extract',
+      'kb_file_mkdir',
+      'kb_file_move',
+      'kb_file_write',
+      'kb_search',
+      'kb_chunk_get',
+      'kb_outline',
+      'kb_outline_save',
+      'workflow_publish',
+      'kb_audit_list',
+      'kb_config_get',
+      'kb_config_update',
+      'kb_grant_list',
+      'kb_grant_set',
+      'kb_index_rebuild',
+      'kb_review_decide',
+      'kb_review_list',
+      'kb_sync',
+      'workflow_list',
+      'workflow_review_decide',
+      'workflow_review_list',
+      'workflow_review_scan',
+      'workflow_unpublish',
+      'workflow_update',
+    ].sort())
   })
 
   it('reports an unavailable credential instead of calling the backend', async () => {
@@ -487,10 +522,24 @@ describe('host plugin', () => {
     expect(status.indexing.running).toBe(false)
   })
 
+  it('answers the read route with 403 when DataOps says the caller cannot read', async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify({ canRead: false }), { status: 200 })) as unknown as typeof fetch
+    const { ctx, routes } = fakeHost({ token: 't', fetchImpl })
+    apply(ctx as never, CONFIG)
+    const result = await callRouteWithStatus(routes, 'read', { path: 'dept/a.md' })
+    expect(result.status).toBe(403)
+    expect(result.body).toMatchObject({ code: 'forbidden' })
+  })
+
   it('disposes every registration through the effect scope', () => {
     const { ctx, tools, disposers } = fakeHost({ token: 't' })
     apply(ctx as never, CONFIG)
-    expect(tools).toHaveLength(2)
+    expect(tools).toHaveLength(25)
+    // 18 are this plugin's kb_* tools; DataOps `kb_read` is external.
+    expect(tools.filter(tool => tool.name.startsWith('kb_'))).toHaveLength(18)
+    for (const removed of ['kb_file_read', 'kb_file_search', 'kb_index', 'kb_bucket_list', 'kb_file_list', 'kb_status']) {
+      expect(tools.map(tool => tool.name)).not.toContain(removed)
+    }
     for (const dispose of disposers) dispose()
     expect(tools).toHaveLength(0)
   })
@@ -984,20 +1033,24 @@ describe('listing visibility', () => {
     }
   })
 
-  it('omits every row when no permission backend is configured', async () => {
-    // An unconfigured deployment has no per-user view of its own, so it has nothing
-    // verified to list. The empty answer is reported through permissionsResolved.
+  it('lists every row when no permission backend is configured', async () => {
+    // A personal deployment has no grants to consult: one operator reads the tree, bounded
+    // by the knowledge root. Returning an empty list -- which is what this used to assert --
+    // made the page show a knowledge base with nothing in it, because an empty listing is
+    // indistinguishable from an empty folder.
     const fetchImpl = vi.fn()
     const { ctx, disposers } = fakeHost({ fetchImpl: fetchImpl as unknown as typeof fetch })
     const f = await listingFixture()
     try {
-      await expect(listDirectoryWithPermissions(
+      const rows = await listDirectoryWithPermissions(
         ctx as never,
         { ...CONFIG, baseUrl: '   ' },
         f.root,
         f.root,
         'alice',
-      )).resolves.toEqual([])
+      )
+      expect(rows.map(row => row.name).sort()).toEqual(['granted.md', 'secret.md'])
+      // Nothing to ask, so nothing is asked: a personal deployment makes no backend call.
       expect(fetchImpl).not.toHaveBeenCalled()
     } finally {
       for (const dispose of disposers) dispose()
@@ -1886,17 +1939,36 @@ describe('pinned paths', () => {
     }
   })
 
-  it('refuses a pin write when no backend can answer', async () => {
-    // Without an authority there is no way to prove readability, and an unproven
-    // pin must not be stored. This is the fail-closed direction.
+  it('stores a pin when no backend is configured, bounded by the knowledge root', async () => {
+    // A personal deployment has no authority to consult, and it needs none: the one operator
+    // may pin what is inside the tree. This used to refuse the write outright, which made
+    // pinning a personal-only feature that never worked.
     const root = await mkdtemp(join(tmpdir(), 'kb-pins-nobackend-'))
     const config = { ...CONFIG, baseUrl: '', actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
     const { ctx, routes, disposers } = fakeHost({ token: 't' })
     try {
       apply(ctx as never, config as never)
       const reply = await callRoute(routes, 'pins.set', { relPaths: ['a.md'] })
+      expect(reply.error).toBeUndefined()
+      expect(reply.relPaths).toEqual(['a.md'])
+      // Stored under the local view's directory, which is the id the deployment acts as.
+      await expect(readPins(join(root, 'views', LOCAL_USER_ID))).resolves.toEqual(['a.md'])
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('refuses a pin that climbs out of the knowledge root, even personally', async () => {
+    // The boundary survives the absence of grants: with no authority to ask, a path outside
+    // the tree is still refused rather than stored.
+    const root = await mkdtemp(join(tmpdir(), 'kb-pins-nobackend-escape-'))
+    const config = { ...CONFIG, baseUrl: '', actualRoot: join(root, 'actual'), viewRoot: join(root, 'views'), mountPoint: join(root, 'mnt') }
+    const { ctx, routes, disposers } = fakeHost({ token: 't' })
+    try {
+      apply(ctx as never, config as never)
+      const reply = await callRoute(routes, 'pins.set', { relPaths: ['../other-user/secret.md'] })
       expect(reply.error).toBeDefined()
-      expect(reply.relPaths).toBeUndefined()
+      expect(reply.refused).toEqual(['../other-user/secret.md'])
     } finally {
       for (const dispose of disposers) dispose()
     }
@@ -1975,13 +2047,12 @@ describe('management page layout', () => {
     expect(source).toMatch(/catch \{/u)
   })
 
-  it('orders the menu home, permissions, indexing, trash, audit', async () => {
+  it('orders the menu home, permissions, trash, audit, settings', async () => {
     const source = await read('KnowledgePanel.tsx')
     const order = [...source.matchAll(/key: '(menu\.[a-z]+)'/gu)].map(m => m[1])
     expect(order).toEqual([
       'menu.home',
       'menu.permissions',
-      'menu.indexing',
       'menu.trash',
       'menu.audit',
       'menu.settings',
@@ -2362,7 +2433,7 @@ describe('the first load repairs a missing pointer', () => {
     const status = source.slice(source.indexOf("case 'status'"))
     // Both conditions on the repair, so a healthy deployment pays no per-load cost
     // on the shared filesystem.
-    expect(status).toMatch(/mountState === 'pointer-missing' && config\.baseUrl\.trim\(\) !== ''/u)
+    expect(status).toMatch(/mountState === 'pointer-missing' && isTeamDeployment\(config\)/u)
     // And the state is re-read from the filesystem afterwards rather than assumed,
     // because a caller with nothing granted still has no pointer.
     const repair = status.slice(status.indexOf('syncCallerView(host, config)'))
@@ -2418,7 +2489,7 @@ describe('the automatic repair runs at most once per caller', () => {
     // The identity fetch sits inside the pointer-missing condition, and the
     // not-yet-repaired check sits outside it.
     const identity = guard.indexOf('await fetchCaller(host, config)')
-    const condition = guard.indexOf("mountState === 'pointer-missing' && config.baseUrl.trim() !== ''")
+    const condition = guard.indexOf("mountState === 'pointer-missing' && isTeamDeployment(config)")
     expect(condition).toBeGreaterThan(-1)
     expect(identity).toBeGreaterThan(condition)
   })
@@ -2535,14 +2606,35 @@ describe('move route authorization', () => {
     }
   })
 
-  it('refuses a move while no permission API is configured', async () => {
-    // Without a backend there is no authority to ask, so there is no move.
+  it('moves inside the tree when no permission API is configured', async () => {
+    // A personal deployment has no authority to ask, and needs none: the one operator may
+    // move a document within the knowledge root. This used to be refused, which made the
+    // whole file-manager surface unusable on a personal deployment.
     const root = await mkdtemp(join(tmpdir(), 'kb-move-nobackend-'))
     const { ctx, routes, disposers } = fakeHost({ token: 't' })
     try {
-      await apply(ctx as never, { ...isolatedConfig(root), baseUrl: '' } as never)
+      const config = { ...isolatedConfig(root), baseUrl: '' }
+      await apply(ctx as never, config as never)
+      const plan = localConfig(config as never)
+      await mkdir(join(plan.actualRoot, 'docs'), { recursive: true })
+      await writeFile(join(plan.actualRoot, 'docs', 'a.md'), 'content')
       const reply = await callRoute(routes, 'move', { from: 'docs/a.md', to: 'archive' })
-      expect(reply.error).toMatch(/not configured/u)
+      expect(reply.error).toBeUndefined()
+      await expect(readFile(join(plan.actualRoot, 'archive', 'a.md'), 'utf8')).resolves.toBe('content')
+    } finally {
+      for (const dispose of disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a move whose destination leaves the knowledge root', async () => {
+    // No grants does not mean no boundary: a destination outside the tree is still refused.
+    const root = await mkdtemp(join(tmpdir(), 'kb-move-nobackend-escape-'))
+    const { ctx, routes, disposers } = fakeHost({ token: 't' })
+    try {
+      await apply(ctx as never, { ...isolatedConfig(root), baseUrl: '' } as never)
+      const reply = await callRoute(routes, 'move', { from: 'docs/a.md', to: '../outside' })
+      expect(reply.error).toBeDefined()
     } finally {
       for (const dispose of disposers) dispose()
       await rm(root, { recursive: true, force: true })
@@ -3233,41 +3325,48 @@ describe('writing into the authoritative tree', () => {
     }
   })
 
-  it('refuses an upload over the size ceiling before writing', async () => {
+  // The ceiling is injected here, so the boundary is verified with a 1 MiB body instead of
+  // one at the production limit. `MAX_KNOWLEDGE_WRITE_BYTES` is a product decision that has
+  // already moved once (1 MiB -> 500 MiB); a test that allocates the CURRENT limit measures
+  // the machine's string throughput, not the comparison. What has to hold is the comparison.
+  it('refuses a document over the ceiling before writing anything', async () => {
     const root = await writeRoot()
     const config = writeConfig(root)
-    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'big.md': { canWrite: true } }) })
-    try {
-      apply(ctx as never, config as never)
-      const reply = await callRoute(routes, 'upload', {
-        relPath: 'big.md',
-        content: 'x'.repeat(MAX_KNOWLEDGE_WRITE_BYTES + 1),
-      })
-      expect(reply.code).toBe('too-large')
-      expect(reply.limitBytes).toBe(MAX_KNOWLEDGE_WRITE_BYTES)
-      await expect(stat(join(config.actualRoot, 'big.md'))).rejects.toThrow()
-    } finally {
-      for (const dispose of disposers) dispose()
-    }
+    const limit = 1024 * 1024
+    await expect(createKnowledgeEntry(config, 'big.md', {
+      directory: false,
+      content: 'x'.repeat(limit + 1),
+      limitBytes: limit,
+    })).rejects.toMatchObject({ code: 'too-large' })
+    // Nothing was written: the refusal happens before the file is opened.
+    await expect(stat(join(config.actualRoot as string, 'big.md'))).rejects.toThrow()
   })
 
-  it('accepts an upload at exactly the ceiling', async () => {
+  it('accepts a document at exactly the ceiling', async () => {
     // The bound is inclusive, so the largest allowed document is not refused.
     const root = await writeRoot()
     const config = writeConfig(root)
-    const { ctx, routes, disposers } = fakeHost({ token: 't', fetchImpl: permFetch({ 'ok.md': { canWrite: true } }) })
-    try {
-      apply(ctx as never, config as never)
-      const reply = await callRoute(routes, 'upload', {
-        relPath: 'ok.md',
-        content: 'x'.repeat(MAX_KNOWLEDGE_WRITE_BYTES),
-      })
-      expect(reply.error).toBeUndefined()
-      await expect(stat(join(config.actualRoot, 'ok.md'))).resolves.toBeDefined()
-    } finally {
-      for (const dispose of disposers) dispose()
-    }
+    const limit = 1024 * 1024
+    await expect(createKnowledgeEntry(config, 'ok.md', {
+      directory: false,
+      content: 'x'.repeat(limit),
+      limitBytes: limit,
+    })).resolves.toMatchObject({ kind: 'file' })
+    await expect(stat(join(config.actualRoot as string, 'ok.md'))).resolves.toBeDefined()
   })
+
+  it('names the limit it actually applied', async () => {
+    // 文案里的数字必须是被应用的那个上限，否则读者按提示改名也没用。
+    const root = await writeRoot()
+    const config = writeConfig(root)
+    const limit = 4096
+    await expect(createKnowledgeEntry(config, 'big.md', {
+      directory: false,
+      content: 'x'.repeat(limit + 1),
+      limitBytes: limit,
+    })).rejects.toThrow(String(limit))
+  })
+
 })
 
 describe('the write path is bounded by its own errors', () => {
@@ -3470,17 +3569,55 @@ describe('the view switcher fits the section band', () => {
    * section name at any narrower rail. The band's own control is a 28px icon button,
    * so the two modes belong in a menu behind one.
    */
-  it('opens the display setting from a 28px icon button, not an inline control', async () => {
+  it('offers ordering and filtering from one 28px icon button', async () => {
     const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
-    // The menu carries the mode names; the anchor is the band's own icon button.
+    // The band's menu carries the orderings and the filter, and the anchor is the band's
+    // own icon button -- the labelled inline control the measurements ruled out is gone.
     expect(panel).toMatch(/<MenuItemButton/u)
-    expect(panel).toMatch(/viewList/u)
-    expect(panel).toMatch(/viewGrid/u)
-    // And the oversized inline control is gone.
     expect(panel).not.toMatch(/<SegmentedControl/u)
-    const actions = panel.slice(panel.indexOf('label={t(\'actionNew\')}'))
-    const band = actions.slice(0, actions.indexOf('</KnowledgeSectionHeader>'))
-    expect(band).toMatch(/<Menu/u)
+    // Every ordering the menu offers is named by a locale key rather than inline text.
+    for (const key of ['sortByMtime', 'sortByName', 'sortBySize', 'sortByType']) {
+      expect(panel, key).toContain("t('" + key + "')")
+    }
+    // Filtering shares the same menu, under its own heading, separated from the orderings.
+    expect(panel).toContain("t('filterHeading')")
+    expect(panel).toContain("t('actionFilter')")
+    expect(panel).toMatch(/menuSeparator/u)
+  })
+
+  it('puts the one sliders control BEFORE the new-document button, as the FIRST slider', async () => {
+    // The reader's complaint was a SECOND sliders button appearing to the right of the
+    // new-document one. The control has to sit where the filter button used to be: before
+    // `actionNew`, and first among the band's controls.
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    const bandStart = panel.indexOf('<KnowledgeSectionHeader')
+    const band = panel.slice(bandStart, panel.indexOf('</KnowledgeSectionHeader>', bandStart))
+    const sliders = band.indexOf('label={t(\'actionSortAndFilter\')}')
+    const plus = band.indexOf('label={t(\'actionNew\')}')
+    expect(sliders).toBeGreaterThan(0)
+    expect(plus).toBeGreaterThan(0)
+    expect(sliders, '排序与过滤必须在新建之前').toBeLessThan(plus)
+  })
+
+  it('renders exactly one sliders glyph in the whole panel', async () => {
+    // Two identical glyphs is the defect itself; the icons are the observable count.
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    const imports = panel.slice(0, panel.indexOf('} from \'@deepseek-ai/dsh-client-ui-primitives\''))
+    const body = panel.slice(imports.length)
+    // One import line plus exactly one JSX usage: no second button can borrow the glyph.
+    expect(body.match(/<IconSlidersTwoOutlineRegular/gu) ?? []).toHaveLength(1)
+  })
+
+  it('no longer offers a view-mode switcher', async () => {
+    // The reader asked for it to go: they do not change views. Removing the ENTRY must not
+    // remove the stored preference, so the hook stays and only the control is gone.
+    const panel = await readFile(new URL('../src/client/KnowledgePanel.tsx', import.meta.url), 'utf8')
+    expect(panel).not.toMatch(/viewList/u)
+    expect(panel).not.toMatch(/viewGrid/u)
+    expect(panel).not.toMatch(/viewExplorer/u)
+    expect(panel).not.toContain('viewMode.setMode')
+    // …but the preference is still read, so a reader who once chose the explorer keeps it.
+    expect(panel).toContain('useViewMode(')
   })
 
   it('carries four 28px controls in the band, which is what fits 280px', async () => {
@@ -4523,10 +4660,14 @@ describe('the loading animation is honest about itself', () => {
     // The theme ships in a release tree outside this package, so it is resolved from
     // HOME rather than from the test file: a relative `../../..` walk would encode this
     // checkout's exact depth and break on any move.
-    const themeDir = join(
-      process.env['HOME'] ?? '/root',
-      '.dsh/releases/plus/plus-021a2-final/packages/client/ui-theme/src/styles',
-    )
+    // Resolved by scanning the release root rather than naming one release: the directory
+    // carries the release's own build name, so a hard-coded name turns this check into a
+    // failure about a missing path instead of a failure about a missing variable.
+    const releaseRoot = join(process.env['HOME'] ?? '/root', '.dsh/releases/plus')
+    const releases = (await readdir(releaseRoot).catch(() => [] as string[])).sort()
+    const themeDir = releases.length === 0
+      ? join(releaseRoot, 'missing')
+      : join(releaseRoot, releases[releases.length - 1], 'packages/client/ui-theme/src/styles')
     const files = await readdir(themeDir).catch(() => [] as string[])
     // If the release tree is absent this cannot be checked, and a silent pass would
     // claim a check that did not run.
@@ -5348,6 +5489,32 @@ describe('the @-mention target picker', () => {
     expect(tree).not.toMatch(/explorerTime/u)
     // Keep the mark protectable from the name's ellipsis.
     expect(tree).toMatch(/flex:none/u)
+  })
+
+  /**
+   * The reference must land in a COMPOSER THAT IS ON SCREEN.
+   *
+   * The reported bug was a dialog that reported success (`landed=1/1`) while the
+   * composer stayed empty: the insert targeted a conversation whose composer was not
+   * mounted, and that other conversation's draft revision really did change, so the
+   * insert's own success test passed. These pin the two things that prevent it -- the
+   * insert runs against the page's bound session, and it waits for that session's
+   * composer before writing.
+   */
+  it('targets the bound conversation instead of guessing one', async () => {
+    const picker = await read('KnowledgeReferencePicker.tsx')
+    // The bound session is the target; the catalog diff is not used to pick a target.
+    expect(picker).toMatch(/const target = selectedSessionId\?\.\(\)/u)
+    expect(picker).not.toMatch(/ids\[ids\.length - 1\]/u)
+  })
+
+  it('waits for the target conversation composer before inserting', async () => {
+    const picker = await read('KnowledgeReferencePicker.tsx')
+    // Readiness is decided by the composer element plus that session's input shell.
+    expect(picker).toMatch(/data-composer-input/u)
+    expect(picker).toMatch(/composerReady/u)
+    // A conversation is opened before the insert so its composer mounts.
+    expect(picker).toMatch(/openSession\?\.\(\{\s*kind:\s*'known'/u)
   })
 
   it('declares every string it uses in both locales', async () => {
@@ -6498,11 +6665,15 @@ describe('the settings section shows only controls and dynamic state', () => {
     }
   })
 
-  it('keeps the dynamic status text that carries information', async () => {
+  it('does not duplicate the MinerU heading or explain the address source', async () => {
     const source = await settings()
-    // How the address in effect was arrived at is state, not explanation, so it stays.
-    expect(source).toContain("t('settingsMineruDerived')")
-    expect(source).toContain("t('settingsMineruExplicit')")
+    // The field sits under the group heading; a second visible label with the same
+    // text was the duplicate the reader asked to remove. The accessible name stays.
+    expect(source).not.toContain('htmlFor="kb-mineru-base-url"')
+    expect(source).not.toContain("t('settingsMineruDerived')")
+    expect(source).not.toContain("t('settingsMineruExplicit')")
+    expect(source).not.toContain("t('settingsMineruShared')")
+    expect(source).toContain('aria-label={t(\'settingsMineruHeading\')}')
   })
 
   it('leaves no heading standing over an empty block', async () => {
@@ -6550,13 +6721,30 @@ describe('the MinerU field shows the address in effect, not a blank', () => {
     expect(source).toMatch(/if \(mineruChanged\) \{/u)
   })
 
-  it('reports the Host-derived address in the settings route', async () => {
+  it('reports the Host-resolved address and where it came from in the settings route', async () => {
     const host = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
-    const branch = host.slice(host.indexOf("case 'settings.get'"))
-    expect(branch.slice(0, 2600)).toMatch(/mineruUrlFor\(config\)/u)
-    // Sent only when it resolves: an undefined address is left out rather than shown
-    // as the string "undefined".
-    expect(branch.slice(0, 2600)).toMatch(/mineruUrl === undefined \? \{\} : \{ mineruUrl \}/u)
+    // Widened past the previous 2600-character window: the branch now also resolves the
+    // shared value and checks for a refused stored one, and the reply object moved beyond
+    // where that window ended.
+    const branch = host.slice(host.indexOf("case 'settings.get'"), host.indexOf("case 'settings.set'"))
+    // The route resolves through the same precedence the extractor uses, so the page
+    // cannot disagree with what a parse would actually call. It must reach for the shared
+    // value the 「文档识别」 plugin's administrator set, not only this plugin's own config.
+    expect(branch).toMatch(/resolveMineruUrl\(config, await readSharedMineruUrl\(host, config\)\)/u)
+    // Sent only when it resolves: an undefined address is left out rather than shown as
+    // the string "undefined".
+    expect(branch).toMatch(/mineruUrl: resolution\.url/u)
+    // The origin travels with it, because the page renders a different caption for a
+    // shared address than for one the reader typed.
+    expect(branch).toMatch(/mineruSource: resolution\.source/u)
+  })
+
+  it('never writes the shared OCR address back into this caller\'s settings file', async () => {
+    // The shared value belongs to the OCR plugin's administrator. A copy here would stop
+    // following a later change and become a second source of truth.
+    const host = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    const branch = host.slice(host.indexOf("case 'settings.set'"))
+    expect(branch.slice(0, 2600)).not.toMatch(/mineruUrl:/u)
   })
 })
 
@@ -6660,14 +6848,23 @@ describe('the settings write keeps older callers working', () => {
     // The whole point: a stored value nothing reads is not a feature. The upload route
     // must pass the caller's own address to `extractBeside`.
     const source = await settingsSource()
-    expect(source).toMatch(/export async function extractBeside\(\s*config: Config,\s*relPath: string,\s*mineruUrl\?: string,/u)
+    expect(source).toMatch(/export async function extractBeside\(\s*config: Config,\s*relPath: string,\s*mineruUrl\?: string,\s*readSharedUrl\?:/u)
     // The call site names the caller's stored address; the local variable was renamed
     // when the upload path moved onto the extraction queue, so match the argument rather
     // than one spelling of it.
-    expect(source).toMatch(/extractBeside\(config, relPath, [A-Za-z.]*mineruBaseUrl\)/u)
-    // And the override outranks the deployment answer inside the extractor.
+    expect(source).toMatch(/extractBeside\(config, relPath, [A-Za-z.]*mineruBaseUrl/u)
+    // And the caller's override outranks both fallbacks inside the extractor.
     const body = source.slice(source.indexOf('export async function extractBeside'))
-    expect(body.slice(0, 1400)).toMatch(/mineruUrl !== undefined && mineruUrl !== '' \? mineruUrl : mineruUrlFor\(config\)/u)
+    expect(body.slice(0, 1800)).toMatch(/mineruUrl !== undefined && mineruUrl !== ''/u)
+    expect(body.slice(0, 1800)).toMatch(/mineruUrlFor\(config, sharedUrl\)/u)
+  })
+
+  it('reads the shared address only when the caller has none of their own', async () => {
+    // A caller who configured their own address must not cause a backend round trip, and
+    // a deployment without the OCR plugin must never call one at all.
+    const source = await settingsSource()
+    const body = source.slice(source.indexOf('export async function extractBeside'))
+    expect(body.slice(0, 1800)).toMatch(/mineruUrl !== undefined && mineruUrl !== ''\s*\n\s*\? undefined\s*\n\s*: await readSharedUrl\?\.\(\)/u)
   })
 })
 
@@ -6767,5 +6964,256 @@ describe('audit trail ordering and paging', () => {
     const one = paginate(twenty, 1, 20)
     // Exactly one full page: the pager shows no navigation, because pageCount is 1.
     expect([one.pageCount, one.rows.length]).toEqual([1, 20])
+  })
+})
+
+/**
+ * A PERSONAL deployment: no DataOps backend at all.
+ *
+ * This is the shape the plugin must support standalone -- one operator, a local directory,
+ * no accounts, no grants, no shared settings. The four flows below are the whole product
+ * surface for such a deployment, and they are asserted end to end through the Host routes
+ * rather than against the helpers, so a regression in wiring fails here.
+ *
+ * What is deliberately NOT covered, because it does not exist without a backend: member
+ * management, per-path permissions, shared configuration and the templates catalogue. Those
+ * surfaces gate on `isTeamDeployment` and are exercised by the team tests above.
+ */
+describe('no DataOps backend (personal deployment)', () => {
+  /**
+   * A config rooted entirely inside a fresh temporary directory, with no backend.
+   *
+   * `mountPoint` and `actualRoot` are the SAME directory here, which is the honest shape for
+   * a personal deployment: there is no share and no per-user view to point a symlink at, so
+   * the browsable root and the storage root are one directory. A team deployment keeps them
+   * apart and joins them with a symlink (`pointMountAtView`); a test that copied that shape
+   * without the symlink would be asserting against a deployment that cannot exist.
+   */
+  const personalConfig = (root: string) => ({
+    ...CONFIG,
+    baseUrl: '',
+    actualRoot: join(root, 'kb'),
+    viewRoot: join(root, 'views'),
+    mountPoint: join(root, 'kb'),
+  })
+
+  /** Mount the plugin on a stub host and hand back the route table. */
+  async function mountPersonal(root: string) {
+    const host = fakeHost({ token: 'unused' })
+    await apply(host.ctx as never, personalConfig(root) as never)
+    return host
+  }
+
+  it('reports itself as a personal deployment, not a broken team one', () => {
+    // The single fact the whole personal path hangs on. An empty baseUrl is a supported
+    // shape; treating it as misconfiguration is what made every route answer 409.
+    expect(isTeamDeployment({ baseUrl: '' } as never)).toBe(false)
+    expect(isTeamDeployment({ baseUrl: '   ' } as never)).toBe(false)
+    expect(isTeamDeployment({ baseUrl: 'http://backend:8080' } as never)).toBe(true)
+  })
+
+  it('starts and answers its config route without contacting a backend', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-personal-'))
+    const host = await mountPersonal(root)
+    try {
+      // A fetch that fails the test if it is ever called: a personal deployment must make
+      // no backend request at all, which is the difference between "standalone" and
+      // "standalone as long as the backend happens to be up".
+      const reply = await callRoute(host.routes, 'config', {})
+      expect(reply.backendConfigured).toBe(false)
+      expect(reply.host).toBe('')
+      expect(reply.mountPoint).toBe(join(root, 'kb'))
+    } finally {
+      for (const dispose of host.disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('completes the four core flows: create, list, read, search', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-personal-flow-'))
+    const host = await mountPersonal(root)
+    const plan = personalConfig(root)
+    try {
+      // 1. CREATE a document through the route the page uses.
+      const created = await callRoute(host.routes, 'create', {
+        relPath: 'notes/hello.md',
+        content: '# 你好\n\n这是个人版写下的第一份文档。',
+      })
+      expect(created.error).toBeUndefined()
+      await expect(readFile(join(plan.mountPoint, 'notes', 'hello.md'), 'utf8'))
+        .resolves.toContain('个人版')
+
+      // 2. LIST the directory. A personal deployment must see its own write; the old
+      //    fail-closed listing returned [] here and the tree rendered empty.
+      const listed = await callRoute(host.routes, 'list', { path: 'notes' })
+      expect(listed.error).toBeUndefined()
+      const names = (listed.entries as Array<{ name: string }>).map(entry => entry.name)
+      expect(names).toContain('hello.md')
+
+      // 3. READ the document back through the preview route.
+      const read = await callRoute(host.routes, 'read', { path: 'notes/hello.md' })
+      expect(read.error).toBeUndefined()
+      expect(String(read.content)).toContain('个人版')
+
+      // 4. SEARCH the tree. With no index service the search falls back to the local
+      //    walk, which is what makes search a core feature rather than a team one.
+      const searched = await callRoute(host.routes, 'search', { term: '个人版' })
+      expect(searched.error).toBeUndefined()
+      const hits = searched.hits as Array<{ relPath?: string }>
+      expect(hits.length).toBeGreaterThan(0)
+      expect(JSON.stringify(hits)).toContain('hello.md')
+    } finally {
+      for (const dispose of host.disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a write whose path leaves the knowledge root', async () => {
+    // The boundary that replaces the permission system. "No grants" is not "no limits".
+    const root = await mkdtemp(join(tmpdir(), 'kb-personal-escape-'))
+    const host = await mountPersonal(root)
+    try {
+      for (const relPath of ['../outside.md', '/etc/passwd', 'a/../../b.md']) {
+        const reply = await callRoute(host.routes, 'create', { relPath, content: 'x' })
+        expect(reply.error).toBeDefined()
+      }
+      // And the refusal names the reason rather than reporting a generic failure.
+      expect(checkLocalPath('../outside.md')?.code).toBe('escapes-knowledge-root')
+      expect(checkLocalPath('/etc/passwd')?.code).toBe('absolute-path')
+      expect(checkLocalPath('')?.code).toBe('empty-path')
+      expect(checkLocalPath('notes/ok.md')).toBeUndefined()
+    } finally {
+      for (const dispose of host.disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('answers every personal path refusal with its own 400 code', async () => {
+    // The codes are part of the page contract. A path escape used to arrive as the
+    // generic 409 "not configured", which sent the reader looking for a missing backend
+    // instead of a malformed path; each shape now names itself and answers 400.
+    const root = await mkdtemp(join(tmpdir(), 'kb-personal-codes-'))
+    const host = await mountPersonal(root)
+    try {
+      const cases = [
+        ['../outside.md', 'escapes-knowledge-root'],
+        ['/etc/passwd', 'absolute-path'],
+        ['notes/bad\u0000name.md', 'nul-byte'],
+        ['', 'empty-path'],
+      ] as const
+      for (const [relPath, code] of cases) {
+        const created = await callRouteWithStatus(host.routes, 'create', { relPath, content: 'x' })
+        expect(created.status).toBe(400)
+        expect(created.body.code).toBe(code)
+        const read = await callRouteWithStatus(host.routes, 'read', { path: relPath })
+        expect(read.status).toBe(400)
+        expect(read.body.code).toBe(code)
+      }
+      // The upload route owns the same boundary; a dropped file is not a special case.
+      const upload = await callRouteWithStatus(host.routes, 'upload', {
+        relPath: '../outside.pdf',
+        encoding: 'base64',
+        content: 'aGk=',
+      })
+      expect(upload.status).toBe(400)
+      expect(upload.body.code).toBe('escapes-knowledge-root')
+    } finally {
+      for (const dispose of host.disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('answers permission questions from the local boundary, never from a backend', async () => {
+    // These four functions are the permission seam. Personally they must all succeed
+    // without a request: the tree is the operator's own.
+    const root = await mkdtemp(join(tmpdir(), 'kb-personal-perm-'))
+    const host = await mountPersonal(root)
+    const config = personalConfig(root)
+    try {
+      await expect(canReadPath(host.ctx as never, config as never, 'notes/a.md')).resolves.toBe(true)
+      await expect(canWritePath(host.ctx as never, config as never, 'notes/a.md')).resolves.toBe(true)
+      // Reading outside the root is refused even though there is no authority to ask.
+      await expect(canReadPath(host.ctx as never, config as never, '../x')).resolves.toBe(false)
+      // Grant management does not exist, so it answers false rather than pretending.
+      await expect(canManageGrants(host.ctx as never, config as never)).resolves.toBe(false)
+      // The caller is the local operator, with no roles to report.
+      const caller = await fetchCaller(host.ctx as never, config as never)
+      expect(caller.userId).toBe(LOCAL_USER_ID)
+      expect(caller.roleCodes).toEqual([])
+    } finally {
+      for (const dispose of host.disposers) dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('uses its own configured MinerU address, never the shared one', async () => {
+    // A personal deployment configures the parser itself; there is no administrator to
+    // inherit an address from. `resolveMineruUrl` keeps the same three-step precedence so
+    // both deployments share one rule, but the shared step can only ever be empty here.
+    expect(resolveMineruUrl({ mineruBaseUrl: 'http://mine:8000' } as never, undefined))
+      .toEqual({ url: 'http://mine:8000', source: 'own' })
+    expect(resolveMineruUrl({ mineruBaseUrl: '', mineruPort: 8000 } as never, undefined))
+      .toEqual({ url: 'http://127.0.0.1:8000', source: 'derived' })
+    // No shared value is ever consulted: the personal path never calls the OCR plugin.
+    await expect(readSharedMineruUrl({
+      credentials: { resolve: async () => ({ value: 't' }) },
+    } as never, { baseUrl: '', credentialRef: 'X', timeoutMs: 100 } as never)).resolves.toBeUndefined()
+  })
+})
+
+
+describe('knowledge-base HTTP route permission map', () => {
+  it('maps file, audit, grant, review and workflow routes to backend keys', () => {
+    expect(permissionForKbRoute('list')).toBe('kb:file:read')
+    expect(permissionForKbRoute('read')).toBe('kb:file:read')
+    expect(permissionForKbRoute('search')).toBe('kb:file:read')
+    expect(permissionForKbRoute('create')).toBe('kb:file:write')
+    expect(permissionForKbRoute('edit')).toBe('kb:file:write')
+    expect(permissionForKbRoute('trash')).toBe('kb:file:delete')
+    expect(permissionForKbRoute('index')).toBe('kb:file:extract')
+    expect(permissionForKbRoute('audit.list')).toBe('kb:audit:read')
+    expect(permissionForKbRoute('grants')).toBe('kb:grant:manage')
+    expect(permissionForKbRoute('pending.approve')).toBe('kb:review:decide')
+    expect(permissionForKbRoute('settings.get')).toBe('kb:config:manage')
+    expect(permissionForKbRoute('config.set')).toBe('kb:config:manage')
+    expect(permissionForKbRoute('workflow.public')).toBe('workflow:read')
+    expect(permissionForKbRoute('workflow.review')).toBe('workflow:review:decide')
+    expect(permissionForKbRoute('workflow.resubmit')).toBe('workflow:publish')
+    expect(permissionForKbRoute('workflow.unpublish')).toBe('workflow:manage')
+    expect(permissionForKbRoute('status')).toBeUndefined()
+  })
+})
+
+
+describe('view path to authoritative path resolution', () => {
+  it('uses hardlink identity for global, personal and department view buckets', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-view-map-'))
+    try {
+      const actual = join(root, 'actual')
+      const views = join(root, 'views')
+      const uid = 'u-1'
+      await mkdir(join(actual, 'dual-mode-verify'), { recursive: true })
+      await mkdir(join(actual, 'personal', uid), { recursive: true })
+      await mkdir(join(actual, 'department', 'root', 'dept'), { recursive: true })
+      await writeFile(join(actual, 'dual-mode-verify/verify-team.pdf'), 'pdf')
+      await writeFile(join(actual, 'personal', uid, 'a.md'), 'personal')
+      await writeFile(join(actual, 'department/root/dept/b.md'), 'department')
+      await mkdir(join(views, uid, 'global/dual-mode-verify'), { recursive: true })
+      await mkdir(join(views, uid, 'personal'), { recursive: true })
+      await mkdir(join(views, uid, 'department/root/dept'), { recursive: true })
+      await link(join(actual, 'dual-mode-verify/verify-team.pdf'), join(views, uid, 'global/dual-mode-verify/verify-team.pdf'))
+      await link(join(actual, 'personal', uid, 'a.md'), join(views, uid, 'personal/a.md'))
+      await link(join(actual, 'department/root/dept/b.md'), join(views, uid, 'department/root/dept/b.md'))
+      const config = { ...CONFIG, baseUrl: 'https://dataops.example', actualRoot: actual, viewRoot: views, mountPoint: join(views, uid) }
+      const caller = { userId: uid, label: '测试', departmentCode: 'dept', departmentPathCodes: ['root', 'dept'] }
+      await expect(actualRelPathForView({} as never, config, 'global/dual-mode-verify/verify-team.pdf', caller))
+        .resolves.toBe('dual-mode-verify/verify-team.pdf')
+      await expect(actualRelPathForView({} as never, config, 'personal/a.md', caller))
+        .resolves.toBe(`personal/${uid}/a.md`)
+      await expect(actualRelPathForView({} as never, config, 'department/root/dept/b.md', caller))
+        .resolves.toBe('department/root/dept/b.md')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

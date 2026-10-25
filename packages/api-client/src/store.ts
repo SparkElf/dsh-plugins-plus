@@ -322,7 +322,9 @@ export class ApiClientStore {
   async addHistory(response: ApiResponse): Promise<void> {
     await this.enqueue(async () => {
       const data = await this.load()
-      data.history = [response, ...data.history.filter(item => item.id !== response.id)].slice(0, 100)
+      // Recent 20 is the product's promise (the UI labels it "recent"); keeping more would
+      // grow the state document without a surface that can reach the older rows.
+      data.history = [response, ...data.history.filter(item => item.id !== response.id)].slice(0, 20)
       await this.persist()
     })
   }

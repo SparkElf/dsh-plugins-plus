@@ -37,6 +37,8 @@ describe('ApiClientStore', () => {
     const store = storeAt(directory)
     await expect(store.saveCollection({ id: '', workspaceId: 'missing', parentId: null, name: 'Invalid', description: '', tags: [], requestIds: [] })).rejects.toThrow(/workspace not found/)
     for (let index = 0; index < 105; index++) await store.addHistory({ id: String(index), requestId: 'request', status: 200, statusText: 'OK', durationMs: 1, sizeBytes: 0, headers: [], body: '', bodyTruncated: false, receivedAt: index })
-    expect((await store.state()).history).toHaveLength(100)
+    // The panel's history tab promises the recent 20, so the store keeps exactly that many.
+    expect((await store.state()).history).toHaveLength(20)
+    expect((await store.state()).history[0]?.id).toBe('104')
   })
 })

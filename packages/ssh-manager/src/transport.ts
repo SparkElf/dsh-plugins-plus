@@ -5,6 +5,7 @@ import { SshManagerStore } from './store.ts'
 
 const OUTPUT_LIMIT = 1 << 20
 export interface SshConnectionTest { hostId: string; latencyMs: number; fingerprint: string }
+export interface SshDraftTest { latencyMs: number; fingerprint: string; pinned: boolean }
 export interface SshConnection { client: Client; host: SshHost; fingerprint: string; latencyMs: number; close(): void }
 
 export function fingerprintFromHash(hash: string): string {
@@ -75,6 +76,66 @@ export async function testSshHost(store: SshManagerStore, hostId: string): Promi
   const connection = await openSshConnection(store, hostId)
   connection.close()
   return { hostId, latencyMs: connection.latencyMs, fingerprint: connection.fingerprint }
+}
+
+/**
+ * Observe a host key without authenticating.
+ *
+ * The wizard has no pinned fingerprint yet, and refusing to connect until the user
+ * pastes one by hand defeats the point of a connection wizard. A key-exchange probe
+ * answers the one question the user cannot answer from memory — which key does this
+ * address present — and the caller decides whether to pin it (trust on first use).
+ * Authentication never starts: the probe closes as soon as the key is seen.
+ * @param host - address to probe; only hostname/port are used.
+ * @returns the observed OpenSSH SHA256 fingerprint.
+ */
+export async function probeSshHostKey(host: SshHost): Promise<string> {
+  const client = new Client()
+  const config: ConnectConfig = {
+    host: host.hostname,
+    port: host.port,
+    username: host.username === '' ? 'probe' : host.username,
+    readyTimeout: 8_000,
+    hostHash: 'sha256',
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (error?: Error, fingerprint?: string): void => {
+      if (settled) return
+      settled = true
+      try { client.end() } catch { /* the handshake may already be gone */ }
+      if (error !== undefined) reject(error)
+      else resolve(fingerprint as string)
+    }
+    config.hostVerifier = (hash: string) => {
+      const fingerprint = fingerprintFromHash(hash)
+      // Leaving the verifier true lets the handshake finish; ending the client in the
+      // same tick keeps the probe from ever offering credentials.
+      queueMicrotask(() => { finish(undefined, fingerprint) })
+      return true
+    }
+    client.once('error', (error: Error) => { finish(error) })
+    try { client.connect(config) } catch (error) { finish(error instanceof Error ? error : new Error(String(error))) }
+  })
+}
+
+/**
+ * Test a host that has not been saved yet.
+ *
+ * A stored host without a pinned fingerprint is tested against the key its address
+ * presents, and the result reports `pinned: false` so the wizard can show that this
+ * test also pinned the key. With a pinned fingerprint the connection must match it;
+ * a mismatch reports the observed value.
+ * @param host - draft host identity and advanced options.
+ * @param credential - draft credential; never returned to the browser.
+ * @returns latency, the fingerprint used, and whether it came from the stored host.
+ */
+export async function testSshDraft(host: SshHost, credential: SshCredentialInput | undefined): Promise<SshDraftTest> {
+  const stored = host.knownHostFingerprint !== null && host.knownHostFingerprint.trim() !== ''
+  const fingerprint = stored ? host.knownHostFingerprint as string : await probeSshHostKey(host)
+  const connection = await connectOne({ ...host, knownHostFingerprint: fingerprint }, credential)
+  connection.close()
+  return { latencyMs: connection.latencyMs, fingerprint: connection.fingerprint, pinned: stored }
 }
 
 function appendBounded(current: string, chunk: Buffer): { value: string; truncated: boolean } {

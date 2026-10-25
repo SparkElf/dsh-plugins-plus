@@ -340,36 +340,31 @@
   padding: 16px 24px 20px;
 }
 
-/* The page header: one title over one supporting line, separated from the body by
-   a hairline. Metrics are the product's own browser header
-   (`ui-directory-picker-browse/DirectoryBrowser.module.css` `.header`):
-   `padding: 16px 14px 8px 24px` and an 8px gap between the title and the line
-   under it. The title takes the design system's `--dsw-font-base-strong-16`
-   (500 16px/24px), the token form of that header's literal 16px/24px at weight
-   510, so the page follows the theme like every other surface does. */
+/* The page header: title and the tree fact on ONE line, actions pinned to the right.
+   Metrics stay the product's own browser header (`ui-directory-picker-browse/
+   DirectoryBrowser.module.css` `.header`): `padding: 16px 14px 8px 24px` and the
+   design system's `--dsw-font-base-strong-16` for the title. `flex-wrap` is the narrow
+   width escape hatch: the fact ellipsizes first, and the action row may drop to its own
+   line instead of squeezing the title. */
 .header {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   flex: none;
   padding: 16px 14px 8px 24px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
 }
 
-.headerTop {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-/* The page's primary control, drawn on the header's own line. `flex: none` keeps it
-   at its natural width while the title ellipsizes into whatever is left. */
+/* The page's primary control. `margin-left: auto` is what keeps it on the right edge
+   whatever the fact's width is; `flex: none` keeps it at its natural width. */
 .headerActions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: none;
+  margin-left: auto;
 }
 
 .headerTitle {
@@ -378,6 +373,7 @@
   min-height: 28px;
   margin: 0;
   min-width: 0;
+  flex: none;
   font: var(--dsw-font-base-strong-16);
   color: var(--dsw-alias-label-primary);
   overflow: hidden;
@@ -385,18 +381,34 @@
   white-space: nowrap;
 }
 
+/* The fact follows the title on the same line. It is the only item allowed to shrink:
+   a long mount path is truncated rather than pushing the title or the actions. */
 .headerFact {
   display: flex;
   align-items: center;
   gap: 6px;
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xxs-12);
+  white-space: nowrap;
 }
 
 .headerPath {
   font: var(--dsw-font-xxs-12) var(--ds-font-family-code);
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The pointer-missing hint is a sentence, not a header fact: it takes its own full
+   line under the title row instead of competing for the same line. */
+.headerHint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
 }
 
 /* One surface's content column. `align-items: flex-start` is what keeps a
@@ -448,13 +460,23 @@
 
 /* An empty row is ONE sentence across the whole table width, centred.
  *
- * It has to override the rule above: the empty state is a single `colSpan` cell,
- * which is also the row's last cell, so `td:last-child` matched it and printed the
- * sentence under the 操作 column -- the defect the user reported. Two classes plus a
- * descendant gives this a higher specificity than `td:last-child` (and than the
- * per-module `.emptyRow td`), so the outcome does not depend on stylesheet order.
- * `white-space: normal` releases the `nowrap` the action column sets. */
-.tableSurface tr.emptyRow > td {
+ * The empty state is a single `colSpan` cell, and it is also its row's last cell, so
+ * `td:last-child` above matched it and printed the sentence under the 操作 column --
+ * the defect the user reported.
+ *
+ * This selector is deliberately NOT `.tableSurface .emptyRow > td`: `.emptyRow` is
+ * defined in `KnowledgePermissions.module.css` (where the tables' shared row styles
+ * live), while `.tableSurface` is defined here. CSS modules hash each name per file,
+ * so those two classes can never appear under the same prefix, and a compound
+ * selector across them matches nothing -- it silently does nothing, which is worse
+ * than no rule at all. Targeting the structural fact instead (a single full-width
+ * cell) needs no coupling to another module's class name.
+ *
+ * `td[colspan]` is exactly that fact: a cell spanning every column can only be the
+ * empty state or a grouped row, and either way it must read as one centred sentence.
+ * Specificity (0,2,1) also beats `td:last-child` (0,1,1) and the per-module
+ * `.emptyRow td` (0,1,1), so the result does not depend on stylesheet order. */
+.tableSurface td[colspan] {
   text-align: center;
   white-space: normal;
   padding: 24px 16px;
@@ -851,4 +873,23 @@
 
 .referenceNoteDismiss:hover {
   color: var(--dsw-alias-label-primary);
+}
+
+/* A group heading inside a menu.
+
+   Sorting and filtering share one menu, and these labels are what keeps the two halves
+   from reading as one flat list of six unrelated commands. */
+.menuGroupLabel {
+  display: block;
+  padding: 6px 10px 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-strong-11);
+}
+
+/* The rule between the two groups. */
+.menuSeparator {
+  display: block;
+  height: 0;
+  margin: 4px 6px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
 }

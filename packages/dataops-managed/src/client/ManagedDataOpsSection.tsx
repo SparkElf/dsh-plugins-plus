@@ -17,6 +17,7 @@ import {
   fetchToolTimeout,
   saveToolTimeout,
 } from './tool-timeout-client.ts'
+import { ReviewSettingsCard } from './ReviewSettingsCard.tsx'
 import styles from './ManagedDataOpsSection.module.css'
 
 /** Values injected by the DSH Settings slot. */
@@ -76,6 +77,7 @@ export function ManagedDataOpsSection(props: ManagedDataOpsSectionProps) {
       <BrandingRow t={t} enabled={branding.enabled} />
       <LimitsCard t={t} />
       <TimeoutCard t={t} />
+      <ReviewSettingsCard t={t} />
       <DefaultsCard t={t} />
     </section>
   )

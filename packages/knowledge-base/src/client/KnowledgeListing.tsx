@@ -31,6 +31,7 @@ import {
   IconPinOutlineRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './KnowledgeListing.module.css'
+import { filterLevel, normaliseNeedle } from './listingFilter.ts'
 import { KnowledgeLoading } from './KnowledgeLoading.tsx'
 import {
   KnowledgeContextMenu,
@@ -676,27 +677,16 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
    * still found. Kept as a name match rather than a content one because this is the
    * in-place narrowing: reading file bodies is what the rail's own search is for.
    */
-  const needle = (props.filter ?? '').trim().toLowerCase()
-  const visible = useMemo(() => {
-    if (needle === '') return entries
-    const keep = (rows: Entry[], inPath: boolean): Entry[] => {
-      const kept: Entry[] = []
-      for (const entry of rows) {
-        const selfMatch = entry.name.toLowerCase().includes(needle)
-        // A directory is retained when it matches, and when anything under the
-        // level it owns matches, so the path to a hit stays reachable.
-        if (entry.isDir) {
-          const kids = children[entry.relPath]
-          const kidMatch = kids === undefined ? false : keep(kids, selfMatch).length > 0
-          if (selfMatch || kidMatch || inPath) kept.push(entry)
-          continue
-        }
-        if (selfMatch || inPath) kept.push(entry)
-      }
-      return kept
-    }
-    return keep(entries, false)
-  }, [entries, children, needle])
+  const needle = normaliseNeedle(props.filter ?? '')
+  // The walk lives in `listingFilter.ts` so its rules can be tested without mounting this
+  // component; what stays here is only the memo wiring.
+  const visible = useMemo(
+    // The rule set lives in the explorer package (`listing-filter.ts`) so the tree and this
+    // listing cannot drift apart; what differs between the two is only how a row's children
+    // are found, which is the callback below.
+    () => filterLevel(entries, (entry: Entry) => (entry.isDir ? children[entry.relPath] : undefined), needle),
+    [entries, children, needle],
+  )
 
   // The product's shared centered panel state, not a bare grey sentence.
   if (state === 'loading') {

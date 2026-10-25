@@ -32,3 +32,25 @@ describe('executeApiRequest', () => {
     expect(JSON.stringify(state)).not.toContain('private-token')
   })
 })
+
+describe('executeApiRequest cancellation', () => {
+  it('reports a cancelled request as a decision, not a transport failure', async () => {
+    const server = createServer((_request, response) => {
+      // Hold the response open long enough that the caller can cancel first.
+      setTimeout(() => { response.setHeader('content-type', 'application/json'); response.end('{"late":true}') }, 400)
+    })
+    servers.push(server)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address(); if (address === null || typeof address === 'string') throw new Error('server did not bind')
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-api-cancel-'))
+    const store = new ApiClientStore({ dataFile: join(directory, 'api.json'), vault: new WorkbenchVault({ directory }) })
+    const workspace = await store.saveWorkspace({ id: '', name: 'Test', description: '', collectionIds: [], environmentIds: [] })
+    const collection = await store.saveCollection({ id: '', workspaceId: workspace.id, parentId: null, name: 'Requests', description: '', tags: [], requestIds: [] })
+    const request = await store.saveRequest({ id: '', collectionId: collection.id, name: 'Slow', description: '', method: 'GET', url: 'http://127.0.0.1:' + address.port.toString() + '/slow', query: [], headers: [], auth: { kind: 'none', credentialId: null, options: {} }, body: { kind: 'none', content: '' }, environmentId: null })
+    const controller = new AbortController()
+    const pending = executeApiRequest(store, request.id, controller.signal)
+    setTimeout(() => { controller.abort() }, 50)
+    await expect(pending).rejects.toThrow(/cancelled/u)
+    expect((await store.state()).history).toHaveLength(0)
+  })
+})

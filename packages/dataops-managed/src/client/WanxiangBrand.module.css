@@ -21,10 +21,21 @@
   color: inherit;
 }
 
-.sidebarName > svg:first-child {
+.sidebarName > :first-child {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 102px;
+}
+
+.wordmark {
+  display: block;
+  overflow: hidden;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
 }
 
 .harness {

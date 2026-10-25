@@ -20,6 +20,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { DEFAULT_PAGE_SIZE, needsPager, paginate } from './paging.ts'
 import { KB_API } from '../api.ts'
 import styles from './KnowledgePanel.module.css'
 import tableStyles from './KnowledgePermissions.module.css'
@@ -159,7 +160,14 @@ export function KnowledgeTrash(props: KnowledgeTrashProps) {
     }
   }
 
-  const rows = state.kind === 'ready' ? state.entries : []
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
+
+  const allRows = state.kind === 'ready' ? state.entries : []
+  // Paging lives here rather than in the route: the trash list is small and fully loaded,
+  // so slicing on the client keeps a page switch instant and keeps `total` honest.
+  const paged = paginate(allRows, page, pageSize)
+  const rows = paged.rows
 
   return (
     <div className={`${styles.surface} ${styles.tableSurface}`}>
@@ -210,6 +218,19 @@ export function KnowledgeTrash(props: KnowledgeTrashProps) {
           ))}
         </tbody>
       </table>
+      {needsPager(allRows.length, pageSize) && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', padding: '8px 0' }}>
+          <button type="button" disabled={paged.page <= 1} onClick={() => setPage(paged.page - 2)}>
+            {c('auditPagePrev')}
+          </button>
+          <span>
+            {c('auditPageOf').replace('{page}', String(paged.page)).replace('{pages}', String(paged.pageCount))}
+          </span>
+          <button type="button" disabled={paged.page >= paged.pageCount} onClick={() => setPage(paged.page)}>
+            {c('auditPageNext')}
+          </button>
+        </div>
+      )}
 
       {state.kind === 'loading' && <p className={styles.muted}>{c('loading')}</p>}
     </div>

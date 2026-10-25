@@ -20,18 +20,24 @@ describe('Wanxiang managed branding', () => {
     expect(mark.props.children).toHaveLength(4)
   })
 
-  it('uses six approved wordmark paths and seven official HARNESS paths', () => {
+  it('renders the platform wordmark as text and keeps seven official HARNESS paths', () => {
     const wordmark = WanxiangWordmark({ height: 16 })
-    const wordmarkGroup = wordmark.props.children
     const badge = HarnessBadge({})
     const badgePaths = badge.props.children[1]
     const sidebar = WanxiangSidebarName()
-    expect(wordmark.props.viewBox).toBe('1.64 115.64 5927.36 933.38')
-    expect(wordmarkGroup.props.children).toHaveLength(6)
+    expect(wordmark.type).toBe('span')
+    expect(wordmark.props.children).toBe('万相AI中台')
+    expect(wordmark.props.style.fontSize).toBe(16)
     expect(badge.props.viewBox).toBe('129 5 53 15.5')
     expect(badgePaths).toHaveLength(7)
     expect(badgePaths[0].props.d).toContain('M132.848 8.93205')
     expect(sidebar.props.children).toHaveLength(2)
+  })
+
+  it('names the accessible wordmark 万相AI中台', () => {
+    const wordmark = WanxiangWordmark({ height: 16, accessible: true })
+    expect(wordmark.props.role).toBe('img')
+    expect(wordmark.props['aria-label']).toBe('万相AI中台')
   })
 
   it('defaults on and notifies every preference transition', () => {

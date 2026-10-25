@@ -266,6 +266,11 @@ export function KnowledgeShareDialog(props: KnowledgeShareDialogProps) {
     <Modal
       open
       title={copy.title}
+      // The file name sits under the title in the dialog's own supporting line: a reader
+      // who opened Share from a row needs to see WHICH document they are about to share,
+      // and the generic phrasing alone does not say. It also occupies the place the
+      // removed explanatory paragraph used to, so the dialog still has one line of context.
+      description={relPath === null ? undefined : relPath.slice(relPath.lastIndexOf('/') + 1)}
       closeLabel={copy.cancel}
       onClose={onClose}
       footer={(
@@ -278,7 +283,10 @@ export function KnowledgeShareDialog(props: KnowledgeShareDialogProps) {
       )}
     >
       <div className={styles.body}>
-        <p className={styles.intro}>{copy.intro}</p>
+        {/* No introductory paragraph here. It explained how permissions are recorded,
+            which the reader asked us to remove: the dialog opens directly on the choice
+            it exists to make. `intro` is still used for the directory hint below, where
+            it says what the dialog is actually about. */}
 
         <div className={styles.field}>
           <span className={styles.fieldLabel}>{copy.subjectType}</span>

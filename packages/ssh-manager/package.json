@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-ssh-manager",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "SSH host, cluster, terminal, transfer, and tunnel workbench for the official DSH right Sidebar.",
   "type": "module",
   "main": "./lib/index.js",
@@ -98,7 +98,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.2",
-    "@sparkelf/dsh-workbench-vault": "workspace:*",
+    "@sparkelf/dsh-workbench-vault": "^0.1.2",
     "ssh2": "1.17.0",
     "react-icons": "^5.5.0",
     "ws": "^8.18.0",

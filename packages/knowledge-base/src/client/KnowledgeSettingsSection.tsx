@@ -126,7 +126,13 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
    * the live config and sent back with the settings.
    */
   const [mineru, setMineru] = useState<
-    { stored: string; derived: string; canEdit: boolean } | undefined
+    {
+      stored: string
+      derived: string
+      canEdit: boolean
+      source?: 'own' | 'shared' | 'derived'
+      invalidFallback?: boolean
+    } | undefined
   >(undefined)
   const [mineruDraft, setMineruDraft] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
@@ -159,15 +165,26 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
         const reply = await postJson<{
           settings?: { mineruBaseUrl?: string }
           canEdit?: boolean
-          // The address in effect, derived by the Host when nothing is stored. Absent
-          // when the deployment has no usable port, in which case there is nothing to
-          // show and the field stays empty.
+          // The address in effect, resolved by the Host when nothing is stored. Absent
+          // when the deployment has neither a shared address nor a usable port, in which
+          // case there is nothing to show and the field stays empty.
           mineruUrl?: string
+          // Where `mineruUrl` came from. `shared` means the 「文档识别」 plugin's
+          // administrator set it for the whole deployment; `derived` means this deployment
+          // computed it from its own port. The caption differs, because a reader must not
+          // mistake a shared value for one they own.
+          mineruSource?: 'own' | 'shared' | 'derived'
+          // The stored value was refused as invalid, so what the field shows is a
+          // fallback. Reported separately from `mineruUrl` because the address itself
+          // cannot say where it came from.
+          mineruInvalid?: boolean
         }>(KB_API.settingsGet)
         setMineru({
           stored: typeof reply.settings?.mineruBaseUrl === 'string' ? reply.settings.mineruBaseUrl : '',
           derived: typeof reply.mineruUrl === 'string' ? reply.mineruUrl : '',
           canEdit: reply.canEdit === true,
+          source: reply.mineruSource,
+          invalidFallback: reply.mineruInvalid === true,
         })
         reviewRequiredRef.current = (reply.settings as { reviewRequired?: boolean } | undefined)?.reviewRequired === true
         setMineruDraft(undefined)
@@ -508,14 +525,14 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
             : (
               <>
                 <div className={styles.field}>
-                  <label className={styles.fieldLabel} htmlFor="kb-mineru-base-url">
-                    {t('settingsMineruHeading')}
-                  </label>
+                  {/* One visible heading is enough: the field's accessible name is the
+                      same text, but the duplicated caption label is gone. */}
                   <input
                     id="kb-mineru-base-url"
                     className={styles.input}
                     type="url"
                     inputMode="url"
+                    aria-label={t('settingsMineruHeading')}
                     // Untouched, this is the effective address: the stored one when there
                     // is one, otherwise what the deployment derives.
                     value={mineruDraft ?? (mineru.stored !== '' ? mineru.stored : mineru.derived)}
@@ -528,13 +545,9 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
                     onChange={(event) => { setMineruDraft(event.target.value) }}
                   />
                 </div>
-                {/* Which address is in effect, and why. The derived case names the
-                    source rather than the value the field already shows. */}
-                <p className={styles.detail}>
-                  {mineru.stored !== '' || (mineruDraft !== undefined && mineruDraft !== '')
-                    ? t('settingsMineruExplicit')
-                    : t('settingsMineruDerived')}
-                </p>
+                {mineru.invalidFallback === true && (
+                  <p className={styles.detail}>{t('settingsMineruSharedInvalid')}</p>
+                )}
                 {!mineru.canEdit && <p className={styles.detail}>{t('settingsReadOnly')}</p>}
               </>
             )}

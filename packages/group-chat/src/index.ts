@@ -45,6 +45,7 @@ import {
   type ServerTarget,
 } from './identity.ts'
 import { mentionedMemberIds, shouldTriggerAgent, speakerPrefix, textOfContent, withSpeakerPrefix, type AgentTriggerPolicy } from './routing.ts'
+import { cleanupRoomSessions, type SessionPersistenceView, type WorkspaceArchiveView } from './session-maintenance.ts'
 import { openRoomStream } from './stream.ts'
 
 export const name = 'group-chat'
@@ -277,13 +278,98 @@ interface RoomModelSelection {
 const modelKeyOf = (room: RoomModelSelection): string =>
   [room.modelProvider ?? '', room.model ?? '', room.reasoningEffort ?? ''].join('|')
 
+/** Whether two selections address the same route and effort. */
+const sameModelSelection = (
+  left: { provider: string; model: string; reasoningEffort?: string },
+  right: { provider: string; model: string; reasoningEffort?: string },
+): boolean => left.provider === right.provider
+  && left.model === right.model
+  && (left.reasoningEffort ?? '') === (right.reasoningEffort ?? '')
+
 /**
- * Resolves the DSH session backing one room.
+ * Apply a room's model without changing the user's deployment default.
  *
- * A room's session must exist before an event can be appended to it, so a room the
- * member has never opened is created on first sync. Ordinary sessions are never
- * touched because only `roomSessionId` is ever looked up or created.
+ * `sessionController.selectModel` saves the selection as `agent-default-model` in the
+ * background. That is right for a user choosing in the composer, but a room applying
+ * its stored model (especially on startup) would otherwise overwrite the user's last
+ * explicit choice. Capture the default first and restore it after the background save
+ * has had a chance to land.
  */
+const selectRoomModel = async (
+  ctx: GroupChatContext,
+  request: { sessionId: string; provider: string; model: string; reasoningEffort?: string },
+): Promise<void> => {
+  const defaultModel = ctx.agentDefaultModel
+  const before = defaultModel?.currentSelection()
+  const changesDefault = before !== undefined
+    && !sameModelSelection(before, { provider: request.provider, model: request.model, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }) })
+  await ctx.sessionController.selectModel(request)
+  if (!changesDefault || before === undefined || defaultModel === undefined) return
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  try {
+    await defaultModel.saveSelection(before)
+  } catch {
+    // Losing the restore must not fail a room open; the next explicit user selection
+    // rewrites the default anyway.
+  }
+}
+
+/** Whether a controller failure is the precise "this session is not stored" answer. */
+const isSessionNotFound = (error: unknown): boolean =>
+  typeof error === 'object'
+  && error !== null
+  && (error as { code?: unknown }).code === 'session/not-found'
+
+/**
+ * Read an optional host service without making it a required injection.
+ *
+ * The direct property is the usual path on a fully composed host. `ctx.get` is the fallback
+ * for a host that exposes a lazily mounted service as a registry entry only; tests and
+ * minimal hosts may provide neither, which must read as "service unavailable" rather than
+ * as a crash while opening a room.
+ */
+const hostService = <T>(ctx: GroupChatContext, key: string): T | undefined => {
+  try {
+    const direct = (ctx as unknown as Record<string, unknown>)[key] as T | undefined
+    if (direct !== undefined) return direct
+  } catch {
+    // A context that proxies an unknown service may throw on property access; the
+    // registry lookup below is the supported fallback.
+  }
+  const get = (ctx as unknown as { get?: (name: string) => unknown }).get
+  if (typeof get !== 'function') return undefined
+  try {
+    return get.call(ctx, key) as T
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The model route a Session's own log records, or `''` when it has never selected one.
+ *
+ * A resolved room Session keeps the selection it was created with; a restarted host must
+ * not silently leave it on a room whose configured model has since changed. Reading the
+ * last `model/selection` event avoids a write on every open.
+ */
+const sessionModelKey = (session: Session): string => {
+  const events = session.snapshotEvents()
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index] as {
+      readonly type?: unknown
+      readonly data?: { readonly provider?: unknown; readonly model?: unknown; readonly reasoningEffort?: unknown }
+    }
+    if (event?.type !== 'model/selection') continue
+    if (typeof event.data?.provider !== 'string' || typeof event.data?.model !== 'string') continue
+    return [
+      event.data.provider,
+      event.data.model,
+      typeof event.data.reasoningEffort === 'string' ? event.data.reasoningEffort : '',
+    ].join('|')
+  }
+  return ''
+}
+
 /**
  * The execution scope one room's session is created with.
  *
@@ -291,7 +377,7 @@ const modelKeyOf = (room: RoomModelSelection): string =>
  * reads the same in a call: a provider without a model names no route, and dropping either half
  * silently sends the room back to the deployment default.
  */
-interface RoomSessionScope {
+export interface RoomSessionScope {
   /**
    * The room's own name, used as the workspace title when this room is the one that
    * registers its directory. Create-or-reuse keeps an existing title, so this never
@@ -312,7 +398,29 @@ interface RoomSessionScope {
   readonly reasoningEffort?: string
 }
 
-class RoomSessions {
+/**
+ * Resolves the DSH session backing one room.
+ *
+ * A room has exactly one Session, addressed by {@link roomSessionId}. Opening it must
+ * therefore be a resolve-or-create, never a create alone:
+ *
+ * - `sessionController.create({ sessionId })` reuses the named Session only while it is
+ *   **blank**. A room that has ever run a turn — every room does, because of the warm-up
+ *   turn — is no longer blank, so the controller mints a fresh `session-<uuid>` in the
+ *   same cwd instead of returning the room's Session.
+ * - Checking only `ctx.sessions.get()` misses a persisted Session after a host restart,
+ *   because the registry is process-local. The first open would then mint a replacement;
+ *   the plugin's lookup by the deterministic id still returns nothing, the open fails, and
+ *   the three-second discovery poll repeats the mint forever. That is how one room grew to
+ *   16,004 Session directories.
+ *
+ * Resolving first also fixes the archived case: it loads the real Session and lets the
+ * room unarchive it before running a turn, instead of creating an unrelated replacement.
+ */
+export class RoomSessions {
+  /** One in-flight open per room, so two discovery passes cannot race the same identity. */
+  private readonly pending = new Map<string, Promise<Session>>()
+
   constructor(private readonly ctx: GroupChatContext) {}
 
   existing(roomId: string): Session | undefined {
@@ -320,15 +428,25 @@ class RoomSessions {
   }
 
   /**
-   * Open a room's session, creating it through the controller on first use.
+   * Open a room's persisted Session, or create it on the one occasion it is absent.
    *
-   * Creation goes through the controller rather than the session registry because only
-   * the controller persists the session and binds its agent. A registry-only session is
-   * an in-memory handle that cannot be resumed, so nothing would ever run in the room.
+   * @param roomId - the room the session belongs to.
+   * @param room - the room's configured scope and model.
+   * @returns the canonical room Session, with an agent bound to it.
    */
   async ensure(roomId: string, room: RoomSessionScope): Promise<Session> {
     const existing = this.existing(roomId)
     if (existing !== undefined) return existing
+    const pending = this.pending.get(roomId)
+    if (pending !== undefined) return pending
+    const opening = this.open(roomId, room).finally(() => {
+      if (this.pending.get(roomId) === opening) this.pending.delete(roomId)
+    })
+    this.pending.set(roomId, opening)
+    return opening
+  }
+
+  private async open(roomId: string, room: RoomSessionScope): Promise<Session> {
     const sessionId = roomSessionId(roomId)
     const directory = resolveRoomDirectory(roomId, room.cwd)
     // The directory is made before anything is created: it is the boundary the room's agent
@@ -336,6 +454,13 @@ class RoomSessions {
     // `recursive` keeps this idempotent across restarts, which matters because the room
     // directory lives on the durable volume.
     await mkdir(directory, { recursive: true })
+
+    const resumed = await this.resolvePersisted(sessionId, directory)
+    if (resumed !== undefined) {
+      await this.installRoomModel(resumed, room, false)
+      return resumed
+    }
+
     // Created with `cwd` and deliberately *not* with a `workspaceId`.
     //
     // A room is one conversation, so a workspace entry per room would fill the workspace list
@@ -348,29 +473,114 @@ class RoomSessions {
     // This must not be confused with "a session nothing can open": `uiWorkspace.openSession`
     // retains the Session by id and never consults workspace membership, so the room opens the
     // same way it did when it owned a workspace.
-    await this.ctx.sessionController.create({
+    const created = await this.ctx.sessionController.create({
       sessionId,
       cwd: directory,
       ...room.agentPreset === undefined ? {} : { agentPreset: room.agentPreset },
     })
-    // A preset does not choose a model. A session created without a selection runs the
-    // deployment default, and a room on a default whose credential is rejected opens fine,
-    // starts its turn, and then ends on an authentication failure — which reads as this
-    // plugin being broken. Installing the room's own selection is what puts it on a route
-    // that works, so it happens before the first turn rather than after a failure.
-    if (room.modelProvider !== undefined && room.model !== undefined) {
-      await this.ctx.sessionController.selectModel({
-        sessionId,
+    if (created.sessionId !== sessionId) {
+      // The controller chose a replacement. Never return it: a minted conversation is not
+      // the room, and adopting it would make the room's history disappear behind a new id.
+      // Archive it (the reversible hide marker) so a failed open cannot leave a visible row,
+      // then fail this open; the next poll resolves the canonical Session if it exists.
+      await this.archiveReplacement(created.sessionId)
+      throw new Error(
+        `group-chat asked for room session ${sessionId} but the controller opened ${created.sessionId}`,
+      )
+    }
+    const session = this.existing(roomId)
+    if (session === undefined) {
+      throw new Error(`group-chat could not open a session for room ${roomId}`)
+    }
+    await this.installRoomModel(session, room, true)
+    return session
+  }
+
+  /** Load a persisted room Session, or `undefined` only when the controller denies it exists. */
+  private async resolvePersisted(sessionId: string, directory: string): Promise<Session | undefined> {
+    let resolved: Awaited<ReturnType<GroupChatContext['sessionController']['resolveAgent']>>
+    try {
+      resolved = await this.ctx.sessionController.resolveAgent(sessionId as never)
+    } catch (error) {
+      if (isSessionNotFound(error)) return undefined
+      throw error
+    }
+    if ('agent' in resolved) {
+      const session = resolved.agent.session
+      if (session.id !== sessionId) {
+        throw new Error(`group-chat resolved room session ${sessionId} as ${session.id}`)
+      }
+      // A room's directory is fixed when its Session is created. Using the persisted
+      // Session keeps the room's history readable if an administrator edits the room's cwd
+      // afterwards; the alternative — replacing the Session — would silently lose history.
+      if (session.header.cwd !== undefined && session.header.cwd !== directory) {
+        this.ctx.logger?.warn?.(
+          '[group-chat] room session directory differs from the room configuration; keeping the existing history',
+          sessionId,
+          session.header.cwd,
+          directory,
+        )
+      }
+      // A room that is still joined must be runnable. Archiving is how a Session was hidden
+      // from grouping surfaces; the room's own sidebar entry is a clear request to use it.
+      await this.unarchiveRoomSession(sessionId)
+      return session
+    }
+    if (isSessionNotFound(resolved.error)) return undefined
+    throw new Error(
+      `group-chat could not resolve room session ${sessionId}: ${
+        resolved.error instanceof Error ? resolved.error.message : String(resolved.error)
+      }`,
+    )
+  }
+
+  /** Install the room's model when the Session's log does not already carry it. */
+  private async installRoomModel(session: Session, room: RoomSessionScope, strict: boolean): Promise<void> {
+    if (room.modelProvider === undefined || room.model === undefined) return
+    const target: RoomModelSelection = {
+      modelProvider: room.modelProvider,
+      model: room.model,
+      ...room.reasoningEffort === undefined ? {} : { reasoningEffort: room.reasoningEffort },
+    }
+    if (sessionModelKey(session) === modelKeyOf(target)) return
+    try {
+      await selectRoomModel(this.ctx, {
+        sessionId: session.id,
         provider: room.modelProvider,
         model: room.model,
         ...room.reasoningEffort === undefined ? {} : { reasoningEffort: room.reasoningEffort },
       })
+    } catch (error) {
+      // A newly created Session must not open on the wrong route — that is the failure this
+      // installation exists to prevent. A persisted one already has history and a reachable
+      // model; a stale room setting should be logged, not make its history unopenable.
+      if (strict) throw error
+      this.ctx.logger?.warn?.('[group-chat] keeping the room session on its existing model', session.id, error)
     }
-    const created = this.existing(roomId)
-    if (created === undefined) {
-      throw new Error(`group-chat could not open a session for room ${roomId}`)
+  }
+
+  /** The workspace registry's archive surface, looked up lazily because it is optional. */
+  private get archiveRegistry(): WorkspaceArchiveView | undefined {
+    return hostService<WorkspaceArchiveView>(this.ctx, 'workspaceRegistry')
+  }
+
+  /** Hide a replacement the controller minted instead of honoring the room id. */
+  private async archiveReplacement(sessionId: string): Promise<void> {
+    try {
+      await this.archiveRegistry?.archiveSession(sessionId, { stopActivity: true })
+    } catch {
+      // Best effort: failing to hide the replacement must not mask the failed open.
     }
-    return created
+  }
+
+  /** Lift an archive marker from the room's canonical Session before its first turn. */
+  private async unarchiveRoomSession(sessionId: string): Promise<void> {
+    try {
+      await this.archiveRegistry?.unarchiveSession?.(sessionId)
+    } catch {
+      // A registry that refuses the unarchive (for example, an unknown id on a minimal host)
+      // must not prevent the room from opening; the canonical Session is still usable.
+    }
   }
 }
 
@@ -818,7 +1028,7 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
     if (room.modelProvider === null || room.modelProvider === undefined) return
     if (room.model === null || room.model === undefined) return
     try {
-      await ctx.sessionController.selectModel({
+      await selectRoomModel(ctx, {
         sessionId: session.id,
         provider: room.modelProvider,
         model: room.model,
@@ -1230,7 +1440,7 @@ export interface PresetOption {
  * requests to the DSH host, so the routes are same-origin and need no separate
  * transport or credential.
  */
-const handleRoomRequest = async (
+export const handleRoomRequest = async (
   route: string,
   httpMethod: string,
   payload: Record<string, unknown> | undefined,
@@ -1257,6 +1467,72 @@ const handleRoomRequest = async (
 ): Promise<unknown> => {
   const [resource, roomId, ...rest] = route.split('/').filter((part) => part.length > 0)
   const action = rest.join('/')
+
+  /**
+   * Batch maintenance for the throwaway Sessions an older build minted under a room.
+   *
+   * Report is the default; archiving needs `dryRun: false`, and deleting additionally needs
+   * `purge: true` plus `confirm` equal to the room id. The canonical room Session is never a
+   * candidate, and neither is another room's Session or a subagent child.
+   */
+  const cleanupMatch = /^rooms\/([^/]+)\/sessions\/cleanup$/u.exec(route)
+  if (cleanupMatch !== null && cleanupMatch[1] !== undefined) {
+    if (httpMethod !== 'POST') throw new RouteRefusal('session cleanup accepts POST', 405)
+    const targetRoomId = decodeURIComponent(cleanupMatch[1])
+    let room: RoomSummary | undefined
+    try {
+      room = (await backend.listRooms()).find((candidate) => candidate.id === targetRoomId)
+    } catch {
+      // Cleanup is local maintenance: a room server that is down must not prevent a
+      // workspace from cleaning up directories it already owns. Without the room record the
+      // caller must name the project directory explicitly.
+    }
+    const requestedDirectory = payload?.['directory']
+    if (requestedDirectory !== undefined
+      && (typeof requestedDirectory !== 'string' || !isAbsolute(requestedDirectory))) {
+      throw new RouteRefusal('directory must be an absolute path', 400)
+    }
+    const configuredDirectory = (requestedDirectory as string | undefined)
+      ?? (room === undefined ? undefined : resolveRoomDirectory(targetRoomId, room.cwd))
+    if (configuredDirectory === undefined) {
+      throw new RouteRefusal(
+        'room is no longer listed; pass the room directory explicitly to clean its session records',
+        404,
+      )
+    }
+    // The controller records the session's `cwd` after resolving it through `fs.realpath`.
+    // Matching the raw configured spelling would miss every record when the room directory is
+    // reached through a symlink or a bind-mount alias.
+    const directory = await realpath(configuredDirectory).catch(() => configuredDirectory)
+    // A room pointed at the workspace root would make every ordinary session in that
+    // directory a cleanup candidate. A dedicated room directory is the only safe scope.
+    if (resolve(directory) === resolve(resolveWorkspaceRoot())) {
+      throw new RouteRefusal('refusing to clean sessions whose cwd is the workspace root', 400)
+    }
+    const persistence = hostService<SessionPersistenceView>(ctx, 'sessionPersistence')
+    if (persistence === undefined) {
+      throw new RouteRefusal('session persistence is unavailable on this host', 501)
+    }
+    const archive = hostService<WorkspaceArchiveView>(ctx, 'workspaceRegistry')
+    const dryRun = payload?.['dryRun'] !== false
+    const purge = payload?.['purge'] === true
+    if (purge && payload?.['confirm'] !== targetRoomId) {
+      throw new RouteRefusal('purging session directories requires confirm set to the room id', 400)
+    }
+    return cleanupRoomSessions({
+      roomId: targetRoomId,
+      directory,
+      primarySessionId: roomSessionId(targetRoomId),
+      persistence,
+      ...archive === undefined ? {} : { archive },
+      // A shared explicit cwd can hold several rooms' canonical Sessions. This process knows
+      // the ones it has opened; every `group-room-*` id is excluded inside the module, so a
+      // room this process has not opened is protected by the same rule.
+      protectedSessionIds: [...runtimes.keys()].map((openRoomId) => roomSessionId(openRoomId)),
+      dryRun,
+      purge,
+    })
+  }
 
   // Message search is not scoped to one room, so it cannot go through the per-room dispatch
   // below: `rooms/messages/search` would parse as a room named `messages`. It is answered first

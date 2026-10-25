@@ -87,7 +87,7 @@
 }
 
 .chipOn {
-  background: #ECF1FC;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, var(--dsw-alias-bg-layer-1));
   color: var(--dsw-alias-state-business-primary);
   font-weight: 500;
 }
@@ -104,7 +104,8 @@
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
-  align-items: start;
+  align-items: stretch;
+  grid-auto-rows: 1fr;
   gap: 12px;
   margin: 0;
   padding: 0;
@@ -113,10 +114,11 @@
 
 .card {
   min-width: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  align-self: start;
+  align-self: stretch;
   padding: 12px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
@@ -125,9 +127,10 @@
 
 .cardTop {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-height: 28px;
 }
 
 .cardIcon {
@@ -157,6 +160,7 @@
 }
 
 .cardDesc {
+  min-height: 36px;
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-secondary);
@@ -169,7 +173,9 @@
 .cardMarks {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
   gap: 6px;
+  min-height: 20px;
 }
 
 /* Flat, borderless, and the same fill as the skill center's own labels. #ECF1FC is the
@@ -178,7 +184,7 @@
   padding: 2px 7px;
   border: 0;
   border-radius: 4px;
-  background: #ECF1FC;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, var(--dsw-alias-bg-layer-1));
   color: var(--dsw-alias-state-business-primary);
   font-size: 11px;
   line-height: 16px;
@@ -265,4 +271,260 @@
   font-size: 13px;
   line-height: 20px;
   color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── Review overlay ───────────────────────────────────────────────────── */
+
+.headRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.headRow .title {
+  flex: none;
+}
+
+.demoTag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-state-warn-secondary);
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.tabActive {
+  color: var(--dsw-alias-state-business-primary);
+  border-bottom-color: var(--dsw-alias-state-business-primary);
+  font-weight: 500;
+}
+
+.tabCount {
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.tagTop {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.sharedTag {
+  padding: 2px 7px;
+  border-radius: 4px;
+  /* Solid dark green with white text: AA in both themes, unlike the pale secondary pair. */
+  background: #0E6B3A;
+  color: #FFFFFF;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+}
+
+.pendingTag {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #7A4A00;
+  color: #FFFFFF;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+}
+
+.rejectedTag {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #A8231B;
+  color: #FFFFFF;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+}
+
+.reviewButton {
+  margin-left: auto;
+}
+
+.reviewNote {
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 3px solid var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.auditDialog {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.audit {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auditFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.risk {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.riskHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.riskEmpty,
+.riskFailed {
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.riskFailed {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.riskSummary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.riskScore {
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.severity {
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 16px;
+  text-transform: uppercase;
+}
+
+.severity[data-severity='high'],
+.severity[data-severity='critical'] {
+  background: var(--dsw-alias-state-error-secondary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.severity[data-severity='medium'] {
+  background: var(--dsw-alias-state-warn-secondary);
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.findings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.findingText {
+  flex-basis: 100%;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.findingHint {
+  flex-basis: 100%;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.noteField {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.noteField textarea {
+  min-height: 64px;
+  padding: 7px 9px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  resize: vertical;
+}
+
+.reviewError {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11px;
 }

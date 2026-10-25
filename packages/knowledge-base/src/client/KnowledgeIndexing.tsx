@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Button, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, type KnowledgeStatusView, readKnowledgeJson } from '../api.ts'
+import { DEFAULT_PAGE_SIZE, needsPager, paginate } from './paging.ts'
 import styles from './KnowledgePanel.module.css'
 import tableStyles from './KnowledgePermissions.module.css'
 
@@ -129,7 +130,14 @@ export function KnowledgeIndexing(props: KnowledgeIndexingProps) {
     } finally { setBusy(false) }
   }
 
-  const directories = state.kind === 'ready' ? state.directories : []
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
+
+  const allDirectories = state.kind === 'ready' ? state.directories : []
+  // Client-side slicing, matching the trash table: the route returns every directory at
+  // once, so a page switch costs nothing and `total` never disagrees with the rows shown.
+  const paged = paginate(allDirectories, page, pageSize)
+  const directories = paged.rows
 
   // Published to the header: the page's own band repeated the surface name the
   // header already shows, so only its explanation and its action remain here.
@@ -219,6 +227,19 @@ export function KnowledgeIndexing(props: KnowledgeIndexingProps) {
           ))}
         </tbody>
       </table>
+      {needsPager(allDirectories.length, pageSize) && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', padding: '8px 0' }}>
+          <button type="button" disabled={paged.page <= 1} onClick={() => setPage(paged.page - 2)}>
+            {c('auditPagePrev')}
+          </button>
+          <span>
+            {c('auditPageOf').replace('{page}', String(paged.page)).replace('{pages}', String(paged.pageCount))}
+          </span>
+          <button type="button" disabled={paged.page >= paged.pageCount} onClick={() => setPage(paged.page)}>
+            {c('auditPageNext')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

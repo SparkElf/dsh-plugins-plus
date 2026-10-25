@@ -17,7 +17,7 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
@@ -62,7 +62,6 @@ function extname(path: string): string {
   return dot <= 0 ? '' : base.slice(dot).toLowerCase()
 }
 import { KnowledgePermissions } from './KnowledgePermissions.tsx'
-import { KnowledgeIndexing } from './KnowledgeIndexing.tsx'
 import { KnowledgeLoading } from './KnowledgeLoading.tsx'
 import { closeSidebar, isHostMissing, openInSidebar, readColumnExpanded } from './openInSidebar.ts'
 import { publishActor, setMountPointResolver } from './saveAudit.ts'
@@ -73,15 +72,29 @@ import { KnowledgeAudit } from './KnowledgeAudit.tsx'
 import { KnowledgeSettings } from './KnowledgeSettings.tsx'
 import { KnowledgeSearch, useKnowledgeSearch } from './KnowledgeSearch.tsx'
 import { KB_DRAG_MIME, KnowledgeListing } from './KnowledgeListing.tsx'
-import { KnowledgeProgressPanel, type UploadTaskView } from './KnowledgeProgressPanel.tsx'
-import { failureReason } from './progressRules.ts'
+import { KnowledgeProgressPopover } from './KnowledgeProgressPopover.tsx'
+import {
+  failureReason,
+  type FailedExtractionView,
+  type OptimisticExtraction,
+  type UploadTaskView,
+} from './progressRules.ts'
+import {
+  forgetExtractionFailure,
+  readExtractionFailures,
+  rememberExtractionFailure,
+} from './extractionHistory.ts'
 import { resolveUploadDir } from './dropTargetPath.ts'
+import { uploadJsonWithProgress } from './uploadTransport.ts'
+import { KnowledgeShareDialog } from './KnowledgeShareDialog.tsx'
+import { shareCopyFor } from './knowledgeMenuCopy.ts'
 import { KnowledgeIconButton, KnowledgeSectionHeader } from './KnowledgeSectionHeader.tsx'
 import { useFavorites } from './useFavorites.ts'
 import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
 import { usePinnedPaths } from './usePinnedPaths.ts'
 import { useTreeState } from './useTreeState.ts'
 import { useViewMode } from './useViewMode.ts'
+import { DEFAULT_TREE_SORT, TREE_SORT_KEYS, useTreeSort } from './useTreeSort.ts'
 import { KnowledgeFileTree } from './KnowledgeFileTree.tsx'
 import { KnowledgeReferencePicker } from './KnowledgeReferencePicker.tsx'
 import { KnowledgeSelectionBar } from './KnowledgeSelectionBar.tsx'
@@ -168,7 +181,6 @@ function relativeToRoot(mountPoint: string, absolute: string): string {
  */
 function sectionTitle(t: (key: string) => string, selection: Selection): string {
   if (selection.kind === 'permissions') return t('menu.permissions')
-  if (selection.kind === 'indexing') return t('menu.indexing')
   if (selection.kind === 'home') return t('menu.home')
   if (selection.kind === 'trash') return t('menu.trash')
   if (selection.kind === 'audit') return t('menu.audit')
@@ -185,7 +197,6 @@ type Selection =
   | { kind: 'search' }
   | { kind: 'home' }
   | { kind: 'permissions' }
-  | { kind: 'indexing' }
   | { kind: 'trash' }
   | { kind: 'audit' }
   | { kind: 'settings' }
@@ -288,6 +299,38 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   /** Why the host could not show a document, when it could not. */
   const [openFailure, setOpenFailure] = useState<string | undefined>(undefined)
 
+  /** A real Session created for host-owned previews opened from this panel. */
+  const explorerSessionRef = useRef<string | undefined>(undefined)
+
+  /**
+   * A real session id for a session-scoped resource address.
+   *
+   * The fs tree may key its routes with `@kb-explorer`, but a resource address is
+   * persisted by the sidebar and resolved as a real Session after a restart. Never
+   * let that path see the placeholder: use the active conversation, or create one
+   * explorer Session and reuse it, or let the caller degrade without opening.
+   */
+  const ensureExplorerSession = useCallback(async (): Promise<string | undefined> => {
+    const current = props.sessionSource?.getSnapshot().key
+    if (typeof current === 'string' && current !== '') return current
+    if (explorerSessionRef.current !== undefined) return explorerSessionRef.current
+    const context = props.ctx as { get?: (name: string) => unknown } | undefined
+    const sessions = context?.get?.('sessions') as
+      | { create?: (input: Record<string, never>) => Promise<string> }
+      | undefined
+    if (typeof sessions?.create !== 'function') return undefined
+    try {
+      const created = await sessions.create({})
+      if (typeof created === 'string' && created !== '') {
+        explorerSessionRef.current = created
+        return created
+      }
+    } catch {
+      // A profile without session creation still gets the graceful path below.
+    }
+    return undefined
+  }, [props.ctx, props.sessionSource])
+
   /**
    * Open a document the way the rest of the product does: in the host's own file
    * preview window, not in this page.
@@ -299,23 +342,22 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * When the host service is absent the page cannot conjure a viewer, so the click
    * reports it rather than appearing to do nothing.
    */
-  const openDocument = (path: string): void => {
-    // The address is built from the session's workspace root so the host can shorten
-    // it to a session-relative one and dedupe against a tab the chat already opened.
-    // This page has no conversation of its own, so `sessionId` is undefined on a fresh
-    // visit -- exactly when a reader clicks a document. The host route only needs a stable
-    // non-empty key (it does not verify the conversation exists), so an absent one gets the
-    // same placeholder the explorer branch uses. Passing the bare value made this answer
-    // `no-context` and the reader silently never opened.
-    const outcome = openInSidebar(
+  const openDocument = async (path: string): Promise<void> => {
+    // Remember where the reader came from before the document replaces the selection.
+    setLastNonFile(current => (selection.kind === 'file' ? current : selection))
+    setSelection({ kind: 'file', path })
+    // A markdown preview has an absolute-address claimant and needs no session. A
+    // host-owned type (.pdf/.docx/.xlsx) gets a session-scoped address, so resolve a
+    // REAL session first; the placeholder is valid only for fs routes, not for a
+    // resource the sidebar persists across restarts.
+    const current = props.sessionSource?.getSnapshot().key
+    const outcome = await openInSidebar(
       props.ctx,
-      sessionId ?? KB_EXPLORER_SESSION,
+      typeof current === 'string' && current !== '' ? current : undefined,
       '/workspace',
       joinPath(config.mountPoint, path),
+      ensureExplorerSession,
     )
-      // Remember where the reader came from before the document replaces the selection.
-      setLastNonFile(current => (selection.kind === 'file' ? current : selection))
-    setSelection({ kind: 'file', path })
     // Record the failures that mean "the host column is not on this profile" so the
     // page can say so. `unclaimed` is not recorded: a file kind nothing claims is a
     // normal outcome the host renders as a download pane.
@@ -408,15 +450,30 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
         const content = binary
           ? base64Of(await item.file.arrayBuffer())
           : await item.file.text()
-        const response = await fetch(kbApiPath(KB_API.upload), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(binary ? { relPath: target, content, encoding: 'base64' } : { relPath: target, content }),
-          cache: 'no-store',
-        })
+        // XHR rather than `fetch`: this is the only browser API that reports bytes sent,
+        // and the reader asked for a real percentage rather than a spinner. The request
+        // itself is unchanged -- same route, same body, same content type.
+        const attempt = await uploadJsonWithProgress(
+          kbApiPath(KB_API.upload),
+          binary ? { relPath: target, content, encoding: 'base64' } : { relPath: target, content },
+          (percent) => {
+            setUploadTasks(current => current.map((task, at) => (
+              at === index ? { ...task, percent } : task
+            )))
+          },
+        )
+        const response = {
+          ok: attempt.status >= 200 && attempt.status < 300,
+          status: attempt.status,
+        }
+        if (attempt.transportError !== undefined) {
+          // The request never reached the server. The reason names the transport rather
+          // than a status code, because "HTTP 0" tells a reader nothing.
+          throw new Error(attempt.transportError)
+        }
         if (response.ok) {
           setUploadTasks(current => current.map((task, at) => (
-            at === index ? { ...task, state: 'done' } : task
+            at === index ? { ...task, state: 'done', percent: undefined } : task
           )))
         } else {
           // The route answers a refusal with `{error, code}`: a taken name, a size
@@ -426,17 +483,17 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
           // A gateway answering 502 sends HTML, so `json()` rejects on it. That
           // rejection must not escape: it would leave the row saying "failed" with no
           // reason at all, which is the silence this whole path exists to remove.
-          const body = (await response.json().catch(() => undefined)) as { error?: string; code?: string; limitBytes?: number } | undefined
+          const body = attempt.body as { error?: string; code?: string; limitBytes?: number } | undefined
           const reason = failureReason(body, response.status)
           setUploadTasks(current => current.map((task, at) => (
-            at === index ? { ...task, state: 'failed', reason } : task
+            at === index ? { ...task, state: 'failed', reason, percent: undefined } : task
           )))
         }
       } catch (error: unknown) {
         // A file that could not be read is a failure like any other, and the reason
         // matters most here: nothing on the server ever saw it.
         setUploadTasks(current => current.map((task, at) => (
-          at === index ? { ...task, state: 'failed', reason: error instanceof Error ? error.message : 'could not read the file' } : task
+          at === index ? { ...task, state: 'failed', reason: error instanceof Error ? error.message : 'could not read the file', percent: undefined } : task
         )))
       }
     }
@@ -521,6 +578,8 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * Null while nothing is being referenced. Set only when there is no conversation
    * otherwise: with one open, `@` stays a one-click insert as it is in the sidebar.
    */
+  /** The path whose Share dialog is open, or null. One dialog for the whole page. */
+  const [shareTarget, setShareTarget] = useState<string | null>(null)
   const [referencing, setReferencing] = useState<
     { path: string; isDir: boolean; targets?: readonly { path: string; isDir: boolean }[] } | undefined
   >(undefined)
@@ -530,6 +589,37 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const [uploadBusy, setUploadBusy] = useState(false)
   /** The batch's per-file rows, shown in the progress strip at the panel's foot. */
   const [uploadTasks, setUploadTasks] = useState<UploadTaskView[]>([])
+  /**
+   * Bumped when something outside the polling loop changes what extraction is doing.
+   *
+   * The progress panel polls only while it already knows about pending work, so a manually
+   * queued extraction -- the case where it knows about none -- would never appear. This is
+   * the same signal shape the tree and the table already use: one counter, one re-read.
+   */
+  const [progressRefresh, setProgressRefresh] = useState(0)
+  /**
+   * Documents the reader asked to extract that the Host has not reported yet.
+   *
+   * A guess, held separately from the Host's tasks: the panel draws it as queued and drops
+   * it as soon as `extract.status` mentions the path, so a guess can never outlive the
+   * truth. It expires on its own (`OPTIMISTIC_TTL_MS`) because a request can fail in ways
+   * the browser never reports -- a dropped connection, a proxy that swallows the body --
+   * and a row stuck on "queued" forever is worse than no row.
+   */
+  const [optimisticExtractions, setOptimisticExtractions] = useState<OptimisticExtraction[]>([])
+
+  /**
+   * Extraction requests this page session saw refused before the Host created a task.
+   *
+   * The menu's own errors cannot be left in the sidebar: a persistent line under the tree
+   * competes with the content for the rest of the session. The progress panel is where a
+   * reader looks for "what happened to my extraction", so these rows live there -- and
+   * they come from {@link readExtractionFailures} rather than component state so a
+   * navigation away and back does not erase the record.
+   */
+  const [extractionFailures, setExtractionFailures] = useState<FailedExtractionView[]>(
+    () => readExtractionFailures(),
+  )
 
   // Publish the knowledge root and the caller identity to the plugin-scope save-audit
   // registration. The registration exists before any page mounts (an edit in the
@@ -575,7 +665,16 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * alongside the other hooks; a hook after them would change the hook count
    * between renders and abort the subtree.
    */
-  const canManageGrants = state.kind === 'ready' && state.status.canManageGrants === true
+  const permissionKeys = state.kind === 'ready' ? state.status.permissions : undefined
+  const hasPermission = (key: string): boolean =>
+    permissionKeys === undefined ? true : permissionKeys.includes(key)
+  const canSeeHome = permissionKeys === undefined || hasPermission('kb:file:read')
+  const canSeeTrash = permissionKeys === undefined || hasPermission('kb:file:delete')
+  const canSeeAudit = permissionKeys === undefined || hasPermission('kb:audit:read')
+  const canSeeSettings = permissionKeys === undefined || hasPermission('kb:config:manage')
+  const canManageGrants = state.kind === 'ready'
+    && state.status.canManageGrants === true
+    && (permissionKeys === undefined || hasPermission('kb:grant:manage'))
 
   /**
    * The caller's own organization chain, for labelling the department folders.
@@ -635,7 +734,12 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const favorites = useFavorites(state.kind === 'ready' && state.config.mountPoint !== '')
 
   /** The caller's list/grid preference, read from their own view directory. */
+  // The layout preference is no longer switchable (the reader does not change views), so
+  // the rail keeps one mode. The hook is retained rather than inlined because the stored
+  // value still has to be READ: a reader who once chose the explorer keeps it.
   const viewMode = useViewMode(state.kind === 'ready' && state.config.mountPoint !== '')
+  /** The tree's row order, remembered in this browser (see `useTreeSort`). */
+  const sort = useTreeSort(state.kind === 'ready' ? state.config.mountPoint : '')
 
   /**
    * The row context menu for the surfaces THIS component owns.
@@ -645,6 +749,92 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    */
   /** The cut/copied entry, shared by both surfaces so a copy on one pastes on the other. */
   const [clipboard, setClipboard] = useState<TreeClipboard | null>(null)
+
+  /**
+   * Remember that the reader asked to extract one document.
+   * @param relPath - the document, tree-relative.
+   */
+  const noteExtractionRequested = useCallback((relPath: string): void => {
+    setOptimisticExtractions(current => [
+      // Replacing an existing entry for the same path rather than appending: two clicks on
+      // one document are one task, not two rows.
+      ...current.filter(entry => entry.relPath !== relPath),
+      { relPath, requestedAt: Date.now() },
+    ])
+    // The badge and the panel both read this, so the count moves the instant the reader
+    // clicks -- which is the whole point of the optimistic entry.
+    setProgressRefresh(n => n + 1)
+  }, [])
+
+  /**
+   * Report that an extraction request was refused, and withdraw the queued row.
+   *
+   * The failure goes to the progress panel, not to the page's batch-error line: an
+   * extraction can fail long after the tree settled, and a sentence pinned under the
+   * sidebar keeps claiming attention for the rest of the session. Recording it in the
+   * session store is what lets the reader open 「进度」 and see the file, the readable
+   * reason, and the raw reason side by side.
+   * @param relPath - the document, in the authoritative path the request used.
+   * @param reason - what the Host (or the transport) said.
+   */
+  const noteExtractionFailed = useCallback((relPath: string, reason: string): void => {
+    setOptimisticExtractions(current => current.filter(entry => entry.relPath !== relPath))
+    rememberExtractionFailure({ relPath, reason })
+    setExtractionFailures(readExtractionFailures())
+    setProgressRefresh(n => n + 1)
+  }, [])
+
+  /**
+   * Paste the clipboard into one directory.
+   *
+   * The toolbar's batch bar and the native context menu both call this, so there is one
+   * implementation of what "paste" means: a cut moves, a copy duplicates, and a cut clears
+   * the clipboard once everything landed.
+   * @param into - the tree-relative directory to paste into.
+   */
+  const pasteInto = useCallback(async (into: string): Promise<void> => {
+    const clip = clipboard
+    if (clip === null) return
+    // Both ends of a move name the AUTHORITATIVE tree, not the view. The view hides the
+    // owner segment of `personal` (`personal/<file>` is really `personal/<uid>/<file>`), so
+    // passing a view path to `move` addresses a path that does not exist -- the route
+    // answers 409 "source and destination are the same path", and the paste silently does
+    // nothing. Resolving both ends through `resolveUploadDir` is what puts the id back.
+    const destination = resolveUploadDir(into, callerId)
+    if (destination === undefined) {
+      setBatchError(t('dropRefusedNoCaller'))
+      return
+    }
+    setBatchBusy(true)
+    setBatchError(undefined)
+    try {
+      for (const entry of clip.entries) {
+        const source = resolveUploadDir(entry.relPath, callerId)
+        if (source === undefined) {
+          setBatchError(t('dropRefusedNoCaller'))
+          return
+        }
+        const response = await fetch(kbApiPath(clip.cut ? KB_API.move : KB_API.copy), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ from: source, to: destination }),
+          cache: 'no-store',
+        })
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { error?: string }
+          throw new Error(body.error ?? 'HTTP ' + String(response.status))
+        }
+      }
+      if (clip.cut) setClipboard(null)
+      setSelectedPaths([])
+    } catch (failure: unknown) {
+      setBatchError(t('moveFailed').replace('{reason}', failure instanceof Error ? failure.message : String(failure)))
+    } finally {
+      setBatchBusy(false)
+      setRefreshTick(t => t + 1)
+    }
+  }, [clipboard, callerId, t])
+
 
   /**
    * The directory a paste would land in for one row.
@@ -680,7 +870,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    */
   const [dragActive, setDragActive] = useState(false)
   /** The display-setting menu, opened from the section band's control. */
-  const [viewMenuOpen, setViewMenuOpen] = useState(false)
+  const [sortMenuOpen, setSortMenuOpen] = useState(false)
 
   /**
    * The folder a batch move should target.
@@ -771,6 +961,19 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
     setSelection(current => (current.kind === 'permissions' ? { kind: 'search' } : current))
     setGrantPath(undefined)
   }, [canManageGrants])
+
+  // The rail only offers surfaces the backend permission keys allow; reset a surface
+  // that was selected before a role change so it cannot linger as a dead end.
+  useEffect(() => {
+    if (canSeeTrash && canSeeAudit && canSeeSettings && canSeeHome) return
+    setSelection(current => {
+      if (current.kind === 'trash' && !canSeeTrash) return { kind: 'search' }
+      if (current.kind === 'audit' && !canSeeAudit) return { kind: 'search' }
+      if (current.kind === 'settings' && !canSeeSettings) return { kind: 'search' }
+      if (current.kind === 'home' && !canSeeHome) return { kind: 'search' }
+      return current
+    })
+  }, [canSeeAudit, canSeeHome, canSeeSettings, canSeeTrash])
 
   /**
    * Whether the selected document is being drawn by the host's file window.
@@ -913,12 +1116,11 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * a dead end, so it is not offered either.
    */
   const SECTIONS = [
-    { kind: 'home', key: 'menu.home' },
+    ...(canSeeHome ? [{ kind: 'home', key: 'menu.home' }] as const : []),
     ...(canManageGrants ? [{ kind: 'permissions', key: 'menu.permissions' }] as const : []),
-    { kind: 'indexing', key: 'menu.indexing' },
-    { kind: 'trash', key: 'menu.trash' },
-    { kind: 'audit', key: 'menu.audit' },
-    { kind: 'settings', key: 'menu.settings' },
+    ...(canSeeTrash ? [{ kind: 'trash', key: 'menu.trash' }] as const : []),
+    ...(canSeeAudit ? [{ kind: 'audit', key: 'menu.audit' }] as const : []),
+    ...(canSeeSettings ? [{ kind: 'settings', key: 'menu.settings' }] as const : []),
   ] as const
 
   /**
@@ -1145,63 +1347,76 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   >
                     <IconSearchOutlineRegular size={16} />
                   </KnowledgeIconButton>
-                  <KnowledgeIconButton
-                    label={t('actionFilter')}
-                    pressed={treeFilter !== ''}
-                    onClick={() => {
-                      // The filter glyph opens the same in-place narrowing the
-                      // search glyph does; both are the tree's own filter, which is
-                      // why they share one term.
-                      setFilterOpen(true)
-                    }}
+                  {/* ONE menu on the FIRST slider, holding the two things that change how
+                      the tree READS: its order, then its filter.
+
+                      This REPLACES the filter button that used to sit here; it does not add
+                      a control. The previous attempt put a second sliders button beside the
+                      new-document one, which left the toolbar with two identical glyphs and
+                      is exactly what the reader rejected. The filter action itself is not
+                      lost -- it moved down into this menu as its own row, so the band still
+                      carries the same number of 28px buttons.
+
+                      The old view-mode switcher also lived here; the reader does not switch
+                      views, so it is gone. `useViewMode` is still read (see below) so a
+                      preference already stored keeps applying. */}
+                  <Menu
+                    open={sortMenuOpen}
+                    anchor={(
+                      <KnowledgeIconButton
+                        label={t('actionSortAndFilter')}
+                        pressed={sortMenuOpen}
+                        onClick={() => { setSortMenuOpen(current => !current) }}
+                      >
+                        <IconSlidersTwoOutlineRegular size={16} />
+                      </KnowledgeIconButton>
+                    )}
+                    onClose={() => { setSortMenuOpen(false) }}
+                    align="end"
                   >
-                    <IconSlidersTwoOutlineRegular size={16} />
-                  </KnowledgeIconButton>
+                    <span className={styles.menuGroupLabel}>{t('sortHeading')}</span>
+                    {TREE_SORT_KEYS.map(key => (
+                      <MenuItemButton
+                        key={key}
+                        icon={sort.key === key
+                          ? <IconCheckOutlineRegular size={16} />
+                          : <span />}
+                        onSelect={() => {
+                          sort.setKey(key)
+                          setSortMenuOpen(false)
+                        }}
+                      >
+                        {key === 'mtime' ? t('sortByMtime')
+                          : key === 'name' ? t('sortByName')
+                            : key === 'size' ? t('sortBySize')
+                              : t('sortByType')}
+                      </MenuItemButton>
+                    ))}
+                    {/* A separator, not a second control: sorting and filtering are two
+                        halves of one question, and splitting them across two icons is what
+                        produced the duplicate toolbar in the first place. */}
+                    <span className={styles.menuSeparator} aria-hidden="true" />
+                    <span className={styles.menuGroupLabel}>{t('filterHeading')}</span>
+                    <MenuItemButton
+                      icon={filterOpen || treeFilter !== ''
+                        ? <IconCheckOutlineRegular size={16} />
+                        : <span />}
+                      onSelect={() => {
+                        // The behaviour the first slider had on click, now a row in the
+                        // menu: opening the in-place narrowing the search glyph also uses.
+                        setFilterOpen(true)
+                        setSortMenuOpen(false)
+                      }}
+                    >
+                      {t('actionFilter')}
+                    </MenuItemButton>
+                  </Menu>
                   <KnowledgeIconButton
                     label={t('actionNew')}
                     onClick={() => { setSelection({ kind: 'home' }) }}
                   >
                     <IconPlusOutlineRegular size={16} />
                   </KnowledgeIconButton>
-                  {/* The display setting, as a 28px icon button opening a menu.
-                      A labelled `SegmentedControl` was the first attempt, and it was
-                      measured out of this header: the official control is 126px wide
-                      (4px pad, a 28px tab with 16px side padding each), which took the
-                      section header to 230 of its 280px and left the section name with
-                      nothing at any narrower rail. The header's own control is the
-                      28px icon button measured for it, so the two modes live in a menu
-                      behind one. The platform ships no list-view or grid glyph (all 94
-                      official icons were checked), so the anchor carries the same
-                      sliders glyph the filter uses and the MENU names the modes. */}
-                  <Menu
-                    open={viewMenuOpen}
-                    anchor={(
-                      <KnowledgeIconButton
-                        label={t('sectionKnowledge')}
-                        pressed={viewMenuOpen}
-                        onClick={() => { setViewMenuOpen(current => !current) }}
-                      >
-                        <IconSlidersTwoOutlineRegular size={16} />
-                      </KnowledgeIconButton>
-                    )}
-                    onClose={() => { setViewMenuOpen(false) }}
-                    align="end"
-                  >
-                    {(['list', 'grid', 'explorer'] as const).map(mode => (
-                      <MenuItemButton
-                        key={mode}
-                        icon={viewMode.mode === mode
-                          ? <IconCheckOutlineRegular size={16} />
-                          : <span />}
-                        onSelect={() => {
-                          viewMode.setMode(mode)
-                          setViewMenuOpen(false)
-                        }}
-                      >
-                        {mode === 'list' ? t('viewList') : mode === 'grid' ? t('viewGrid') : t('viewExplorer')}
-                      </MenuItemButton>
-                    ))}
-                  </Menu>
                 </>
               )}
             />
@@ -1315,6 +1530,30 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     // The same favourites the home table reads, so one file shows its
                     // star in both places instead of each surface keeping its own set.
                     isFavorite={favorites.has}
+                    onToggleFavorite={(relPath, next) => { favorites.setFavorite(relPath, next) }}
+                    // The tree offers Share / Cut / Copy / Paste in its native menu, but the
+                    // dialog and the clipboard belong to the page: one Share dialog, one
+                    // clipboard, shared with the table so a copy in one pastes in the other.
+                    onShare={(relPath) => { setShareTarget(relPath) }}
+                    onClipboard={(entry) => { setClipboard(entry) }}
+                    hasClipboard={clipboard !== null}
+                    onPasteInto={(directory) => { void pasteInto(directory) }}
+                    // The caller's id, so the tree can turn the view path a row carries
+                    // (`personal/<file>`) into the authoritative one the Host reads
+                    // (`personal/<uid>/<file>`). Without it every extraction of a personal
+                    // document answered 404 "no such file" for a file that was right there.
+                    callerId={callerId}
+                    // A manual extraction is the one case the progress panel cannot see
+                    // coming: it polls only while it already knows about pending work.
+                    onExtractionQueued={noteExtractionRequested}
+                    onExtractionFailed={noteExtractionFailed}
+                    // The ordering the reader chose in the header menu. The explorer owns
+                    // the comparators; this only says which one to use.
+                    sort={{ key: sort.key === 'mtime' || sort.key === 'size' ? 'name' : sort.key, dirsFirst: true }}
+                    // The same term the filter field holds, applied to the explorer's own
+                    // rows. This mode used to ignore it silently: the field opened, typing
+                    // changed nothing, and the reader had no way to tell why.
+                    nameFilter={treeFilter}
                     favoriteMarkLabel={t('favoriteMark')}
                   />
                 ) : (
@@ -1488,12 +1727,11 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
               own top-left corner. It still states what this surface is and which
               tree it governs, once for the page. */}
           <header className={styles.header}>
-            <div className={styles.headerTop}>
-              <h2 className={styles.headerTitle}>{sectionTitle(t, rendered)}</h2>
-              {pageAction !== undefined && (
-                <div className={styles.headerActions}>{pageAction}</div>
-              )}
-            </div>
+            <h2 className={styles.headerTitle}>{sectionTitle(t, rendered)}</h2>
+            {/* The fact is the second item on the title's own line, not a line under it:
+                the page names itself and says how big the tree is in one glance. It is
+                allowed to shrink and ellipsize; the title and the actions keep their
+                natural width. */}
             <p className={styles.headerFact}>
               {/* A document's own facts are its instant and its path. The count of
                   everything in the tree is a fact about the KNOWLEDGE BASE, not about
@@ -1525,10 +1763,37 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 </>
               )}
             </p>
+            {/* Always rendered: the progress bell is a panel-level entry that must
+                survive every section, so the row cannot depend on a page action.
+                Note the bell disappears while a document is open in the right-hand
+                window, because `contentColumn` itself is conditional (`!readerOnScreen`)
+                -- moving it out would mean lifting it to the `styles.body` layer, which
+                is a structural change nobody has asked for yet. */}
+            <div className={styles.headerActions}>
+              <KnowledgeProgressPopover
+                t={t}
+                uploads={uploadTasks}
+                watchExtraction={config.mountPoint !== ''}
+                refreshSignal={progressRefresh}
+                optimistic={optimisticExtractions}
+                failures={extractionFailures}
+                onRetried={(relPath) => {
+                  // The Host accepted the retry, so its own task is now the authority
+                  // for this path and the recorded refusal must stop shadowing it.
+                  forgetExtractionFailure(relPath)
+                  setExtractionFailures(readExtractionFailures())
+                  setRefreshTick(t => t + 1)
+                  // A retry is also a manual queue: same reason as the menu's entry.
+                  setProgressRefresh(n => n + 1)
+                }}
+              />
+              {pageAction}
+            </div>
             {/* Only for the state the reader can act on: the pointer resolves itself,
-                and saying so keeps them from hunting for the rebuild button. */}
+                and saying so keeps them from hunting for the rebuild button. Its own
+                full-width line, because it is a sentence rather than a header fact. */}
             {status.mountState === 'pointer-missing' && (
-              <p className={styles.headerFact}>{t('viewNotBuiltHint')}</p>
+              <p className={styles.headerHint}>{t('viewNotBuiltHint')}</p>
             )}
           </header>
           <section className={styles.content}>
@@ -1538,6 +1803,20 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 locale={props.locale}
                 mountPoint={config.mountPoint}
                 focusNew={focusNew}
+                // The same two label inputs the tree takes, so the Location column and
+                // the tree name a folder identically.
+                bucketLabels={{
+                  global: t('bucketGlobal'),
+                  department: t('bucketDepartment'),
+                  personal: t('bucketPersonal'),
+                }}
+                departmentPath={callerPath === undefined
+                  ? undefined
+                  : { codes: callerPath.codes, names: callerPath.names }}
+                // The same counter the tree and the list view already re-read on. One
+                // signal for every surface that shows the tree's contents, so an upload
+                // cannot be visible in one place and stale in another.
+                refreshTick={refreshTick}
                 // A file dropped anywhere on the table lands in the reader's own
                 // folder: `global` is the bucket everyone reads, so defaulting there
                 // would publish a private draft without asking.
@@ -1600,14 +1879,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 onAction={setPageAction}
               />
             )}
-            {rendered.kind === 'indexing' && (
-              <KnowledgeIndexing
-                t={t}
-                status={status}
-                onChanged={() => { void load(); setRefreshTick(n => n + 1) }}
-                onAction={setPageAction}
-              />
-            )}
             {rendered.kind === 'file' && (
               // A document is shown by the host's file preview window, not here. This
               // page is the browsing surface; what fills the reading column is the
@@ -1625,18 +1896,22 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
           </section>
         </div>
       )}
-        {/* The progress strip lives at the foot of the content column, in its own
-            flow: it never covers the tree, it folds to one summary line once the
-            batch settles, and it is absent entirely when nothing has been queued.
-            Polling extraction only where it can be acted on -- an unwritable mount
-            has nothing to retry. */}
-        <KnowledgeProgressPanel
-          t={t}
-          uploads={uploadTasks}
-          watchExtraction={config.mountPoint !== ''}
-          onRetried={() => { setRefreshTick(t => t + 1) }}
-        />
       </div>
+
+      {/* One Share dialog for the whole page. The tree's native menu and the table's
+          actions column both open it through state on this component: the dialog is
+          self-contained (path in, callbacks out), so mounting it once here is what keeps
+          two surfaces from drifting apart in behaviour. */}
+      <KnowledgeShareDialog
+        relPath={shareTarget}
+        isDir={false}
+        copy={shareCopyFor(props.locale)}
+        onClose={() => { setShareTarget(null) }}
+        onShared={() => {
+          setShareTarget(null)
+          setRefreshTick(t => t + 1)
+        }}
+      />
 
       {/* The `@`-mention target picker. Mounted here rather than inside the tree so
           it survives a view switch -- a reader who opens the dialog, changes their

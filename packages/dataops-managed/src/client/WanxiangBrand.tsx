@@ -1,34 +1,8 @@
 import type { CSSProperties } from 'react'
 import css from './WanxiangBrand.module.css'
 
-const WORDMARK_VIEWBOX = "1.64 115.64 5927.36 933.38"
-const WORDMARK_RATIO = 5927.36 / 933.38
-const WORDMARK_PATHS = [
-  {
-    "d": "M62 765V691H333C326 434 312 123 34 -24C53 -38 77 -62 89 -82C287 28 361 217 390 414H767C752 147 735 37 705 9C693 -2 681 -4 657 -3C631 -3 558 -3 483 4C498 -17 508 -48 509 -70C578 -74 648 -75 686 -72C724 -70 749 -62 772 -36C811 5 829 126 846 450C847 460 847 487 847 487H399C406 556 409 625 411 691H939V765Z",
-    "transform": "translate(0.00 940.00) scale(0.96000 -0.94000)"
-  },
-  {
-    "d": "M546 474H850V300H546ZM546 542V710H850V542ZM546 231H850V57H546ZM473 781V-73H546V-12H850V-70H926V781ZM214 840V626H52V554H205C170 416 99 258 29 175C41 157 60 127 68 107C122 176 175 287 214 402V-79H287V378C325 329 370 267 389 234L435 295C413 322 322 429 287 464V554H430V626H287V840Z",
-    "transform": "translate(1002.00 940.00) scale(0.96000 -0.94000)"
-  },
-  {
-    "d": "M443 821C425 782 393 723 368 688L417 664C443 697 477 747 506 793ZM88 793C114 751 141 696 150 661L207 686C198 722 171 776 143 815ZM410 260C387 208 355 164 317 126C279 145 240 164 203 180C217 204 233 231 247 260ZM110 153C159 134 214 109 264 83C200 37 123 5 41 -14C54 -28 70 -54 77 -72C169 -47 254 -8 326 50C359 30 389 11 412 -6L460 43C437 59 408 77 375 95C428 152 470 222 495 309L454 326L442 323H278L300 375L233 387C226 367 216 345 206 323H70V260H175C154 220 131 183 110 153ZM257 841V654H50V592H234C186 527 109 465 39 435C54 421 71 395 80 378C141 411 207 467 257 526V404H327V540C375 505 436 458 461 435L503 489C479 506 391 562 342 592H531V654H327V841ZM629 832C604 656 559 488 481 383C497 373 526 349 538 337C564 374 586 418 606 467C628 369 657 278 694 199C638 104 560 31 451 -22C465 -37 486 -67 493 -83C595 -28 672 41 731 129C781 44 843 -24 921 -71C933 -52 955 -26 972 -12C888 33 822 106 771 198C824 301 858 426 880 576H948V646H663C677 702 689 761 698 821ZM809 576C793 461 769 361 733 276C695 366 667 468 648 576Z",
-    "transform": "translate(2004.00 940.00) scale(0.96000 -0.94000)"
-  },
-  {
-    "d": "M484 238V-81H550V-40H858V-77H927V238H734V362H958V427H734V537H923V796H395V494C395 335 386 117 282 -37C299 -45 330 -67 344 -79C427 43 455 213 464 362H663V238ZM468 731H851V603H468ZM468 537H663V427H467L468 494ZM550 22V174H858V22ZM167 839V638H42V568H167V349C115 333 67 319 29 309L49 235L167 273V14C167 0 162 -4 150 -4C138 -5 99 -5 56 -4C65 -24 75 -55 77 -73C140 -74 179 -71 203 -59C228 -48 237 -27 237 14V296L352 334L341 403L237 370V568H350V638H237V839Z",
-    "transform": "translate(3006.00 940.00) scale(0.96000 -0.94000)"
-  },
-  {
-    "d": "M174 630C213 556 252 459 266 399L337 424C323 482 282 578 242 650ZM755 655C730 582 684 480 646 417L711 396C750 456 797 552 834 633ZM52 348V273H459V-79H537V273H949V348H537V698H893V773H105V698H459V348Z",
-    "transform": "translate(4008.00 940.00) scale(0.96000 -0.94000)"
-  },
-  {
-    "d": "M179 342V-79H255V-25H741V-77H821V342ZM255 48V270H741V48ZM126 426C165 441 224 443 800 474C825 443 846 414 861 388L925 434C873 518 756 641 658 727L599 687C647 644 699 591 745 540L231 516C320 598 410 701 490 811L415 844C336 720 219 593 183 559C149 526 124 505 101 500C110 480 122 442 126 426Z",
-    "transform": "translate(5010.00 940.00) scale(0.96000 -0.94000)"
-  }
-] as const
+/** User-visible platform name shared by the header wordmark and its accessible name. */
+const BRAND_NAME = '万相AI中台'
 const HARNESS_PATHS = [
   {
     "d": "M132.848 8.93205H134.08V16.137H132.848V8.93205ZM136.5 8.93205H137.732V16.137H136.5V8.93205ZM133.365 13.024V11.99H137.193V13.024H133.365Z",
@@ -100,34 +74,26 @@ export function WanxiangMark({ size, className, animated = false }: MarkProps & 
   )
 }
 
-/** Approved rounded-Heiti artwork, stored as paths with no runtime font dependency. */
+/**
+ * Platform wordmark rendered as text.
+ *
+ * It used to be glyph artwork for the previous platform name, which cannot express the new
+ * name without redrawing every path. Text keeps the visible header, the accessible name, and
+ * the browser title on one string, and inherits the host's CJK font stack through `font-family`.
+ */
 export function WanxiangWordmark({ height, accessible = false, className }: {
   height: number
   accessible?: boolean
   className?: string | undefined
 }) {
-  const accessibility = accessible
-    ? { role: 'img', 'aria-label': '万相数据平台' }
-    : { 'aria-hidden': true }
   return (
-    <svg
-      width={height * WORDMARK_RATIO}
-      height={height}
-      className={className}
-      viewBox={WORDMARK_VIEWBOX}
-      {...accessibility}
+    <span
+      className={classes(css.wordmark, className)}
+      style={{ fontSize: height }}
+      {...(accessible ? { role: 'img' as const, 'aria-label': BRAND_NAME } : {})}
     >
-      <g
-        fill="currentColor"
-        stroke="currentColor"
-        strokeWidth="42"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        paintOrder="stroke fill"
-      >
-        {WORDMARK_PATHS.map(path => <path key={path.transform} d={path.d} transform={path.transform} />)}
-      </g>
-    </svg>
+      {BRAND_NAME}
+    </span>
   )
 }
 

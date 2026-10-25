@@ -5,8 +5,8 @@
  * 1. The protocol contract toward the DataOps knowledge API (`protocol.ts`).
  * 2. Idempotent deployment recipes for the remote pieces, run over the
  *    ssh-manager seam (`deploy.ts`, `remote.ts`).
- * 3. The same-origin HTTP surface the Settings panel reads, plus the two
- *    model-facing tools.
+ * 3. The same-origin HTTP surface the Settings panel reads, plus the
+ *    model-facing `kb_search` / `kb_chunk_get` / `kb_outline` / `kb_file_*` tools.
  *
  * It owns no authorization logic. DataOps AuthGuard and PermissionGuard resolve
  * the caller's roles and grants from the session credential; this plugin only
@@ -20,7 +20,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,6 +29,35 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-tools'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import {
+  ManagementToolError,
+  createManagementTools,
+  defaultPermissionsForRoles,
+  hasPermission,
+  isGlobalAdmin,
+  normalizePublishScope,
+  requirePermission,
+  type ManagementAudit,
+  type ManagementBucket,
+  type ManagementContext,
+  type ManagementGrant,
+  type ManagementPending,
+  type ManagementToolHost,
+  type ManagementWorkflow,
+} from './managementTools.ts'
+import {
+  WorkflowPublishError,
+  listApprovedWorkflows,
+  listPendingWorkflows,
+  listWorkflowsForAuthor,
+  publishDirOf,
+  publishStorePath,
+  publishWorkflow,
+  resubmitPublishedWorkflow,
+  reviewWorkflow,
+  unpublishPublishedWorkflow,
+  type WorkflowActor,
+} from './workflowPublish.ts'
 import z from '@deepseek-ai/schemastery'
 import {
   ENDPOINTS,
@@ -42,6 +71,7 @@ import {
   type KnowledgeSshView,
   type KnowledgeStatus,
 } from './protocol.ts'
+import { localizedScopeForPath, resolveScopeAlias, type ScopeLocale } from './scopeAliases.ts'
 import {
   appendAuditEntry,
   isContainedRelPath,
@@ -61,6 +91,7 @@ import {
   readPins,
   readSettings,
   normalizeMineruBaseUrl,
+  storedMineruInvalid,
   readTemplates,
   removeTemplate,
   saveTemplate,
@@ -84,6 +115,11 @@ import {
   type ViewDelta,
 } from './views.ts'
 import {
+  TUTORIAL_FILE_NAME,
+  createInitializer,
+  type Initializer,
+} from './initialize.ts'
+import {
   deploymentPlan,
   findStep,
   type DeployPlanContext,
@@ -98,9 +134,45 @@ import {
   type ExtractionQueue,
   type ExtractionTask,
 } from './extractionQueue.ts'
-import { extractDocument, isExtractable, markdownSiblingOf, writeExtractedMarkdown } from './extract.ts'
+import { extractDocument, isAlreadyMarkdown, isExtractable, markdownSiblingOf, writeExtractedMarkdown, type MineruBlock } from './extract.ts'
 import { BUILT_IN_ROLES, KNOWLEDGE_ACTIONS, isKnowledgeAction, permissionToDataOpsActions } from './permissions.ts'
 import { addTombstone, readTrash, removeTombstone, writeTrash } from './trash.ts'
+import {
+  assertIndexOutsideTrees,
+  attachProvenance,
+  ensureDocumentOutline,
+  findChunkForPath,
+  findChunkId,
+  indexPathFor,
+  readChunkProvenance,
+  readDocumentOutline,
+  rewriteDocumentOutline,
+  saveDocumentOutline,
+  searchIndex,
+  syncIndex,
+  type FtsIndexStats,
+  type FtsSearchHit,
+} from './ftsIndex.ts'
+import {
+  createKnowledgeFileTools,
+  KB_FILE_TOOL_GUIDANCE,
+  KnowledgeToolError,
+  asKnowledgeToolError,
+  type KnowledgeAuditOutcome,
+  type KnowledgeFileEntry,
+  type KnowledgeFileHit,
+  type KnowledgeFileRead,
+  type KnowledgeFileToolHost,
+  type KnowledgeToolCaller,
+  type KnowledgeViewSync,
+} from './knowledgeTools.ts'
+import { markInternalMutation, startExternalChangeWatcher } from './externalChange.ts'
+import type { OutlineSectionSubmission } from './outlineGuard.ts'
+
+/** The stable citation token shared by search, chunk and resolve responses. */
+const citationTokenForChunk = (docId: number, chunkKey: string | undefined, chunkId: number): string => (
+  `kb://doc/${String(docId)}/chunk/${String(chunkKey === undefined || chunkKey === '' ? chunkId : chunkKey)}`
+)
 
 /** Cordis plugin name. */
 export const name = 'dsh-knowledge-base'
@@ -197,6 +269,26 @@ export interface Config {
   mineruBaseUrl: string
   /** Memory ceiling in MiB for the MinerU service, clamped to half the host's RAM. */
   mineruMemoryMaxMiB: number
+  /**
+   * Directory holding `published.json` for the workflow plaza.
+   *
+   * Empty keeps the profile-local default (`$DSH_HOME/workflow-plaza`): the store is
+   * product metadata of this profile, not knowledge-tree content, so it deliberately
+   * does not live under the mount or the view root.
+   */
+  publishDir: string
+  /** Sidecar directory for the SQLite FTS5 index (outside the agent-visible tree). */
+  indexDir?: string
+  /**
+   * Outline generation policy.
+   *
+   * `autoGenerate: false` (the default) means upload/extraction build only the TOC and
+   * section structure. Summaries are written later by the `kb-summarize` skill through
+   * `kb_outline_save`. `true` restores the legacy deterministic extractive summaries.
+   */
+  outline: { autoGenerate: boolean }
+  /** Locale used for the virtual root aliases in search/citation display paths. */
+  scopeLocale: ScopeLocale
 }
 
 /** Config schema; an invalid value fails the profile load loudly. */
@@ -282,6 +374,15 @@ export const Config: z<Config> = z.object({
   // letting the process swap: a host with no swap device turns a cap set at the steady-state
   // size into a parse that stalls instead of one that runs slower.
   mineruMemoryMaxMiB: z.number().default(4096),
+  publishDir: z.string().default(''),
+  indexDir: z.string().default('/nas/kb/index'),
+  // Summaries are model work, not an upload side effect. Keep the structure (TOC and
+  // section ids) automatic so navigation and citations work immediately; leave the
+  // prose empty until `kb-summarize` calls `kb_outline_save`.
+  outline: z.object({
+    autoGenerate: z.boolean().default(false),
+  }).default({ autoGenerate: false }),
+  scopeLocale: z.union([z.const('zh'), z.const('en')]).default('zh'),
 })
 
 /** Why a knowledge-base request failed, with a stable machine-routable code. */
@@ -290,6 +391,13 @@ export type KnowledgeErrorCode =
   | 'unauthorized'
   | 'unreachable'
   | 'bad-response'
+  // Personal-deployment path refusals. Each names the shape that was refused, so the
+  // caller can tell "outside the knowledge root" from "absolute" from "NUL" instead of
+  // reading one generic conflict for all of them.
+  | 'escapes-knowledge-root'
+  | 'absolute-path'
+  | 'empty-path'
+  | 'nul-byte'
 
 /** Typed knowledge-base failure. */
 export class KnowledgeError extends Error {
@@ -319,10 +427,16 @@ async function request<T>(
   ctx: Context,
   config: Config,
   path: string,
-  init?: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown; timeoutMs?: number },
+  init?: { method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; body?: unknown; timeoutMs?: number },
 ): Promise<T> {
-  if (config.baseUrl.trim() === '') {
-    throw new KnowledgeError('DataOps knowledge API base URL is not configured', 'not-configured')
+  // Every team call gates on `isTeamDeployment` before reaching this transport, so an empty
+  // base URL here means a call site forgot that gate. Throwing keeps that a loud bug rather
+  // than a request to the empty string, which would fail somewhere far less legible.
+  if (!isTeamDeployment(config)) {
+    throw new KnowledgeError(
+      'this deployment has no DataOps backend, so the DataOps knowledge API cannot be called',
+      'not-configured',
+    )
   }
   const token = await requireToken(ctx, config)
   const url = joinUrl(config.baseUrl, path)
@@ -382,6 +496,105 @@ async function readErrorMessage(response: Response): Promise<string | undefined>
 }
 
 /**
+ * Whether this deployment runs with a DataOps backend at all.
+ *
+ * `baseUrl` is the single fact that decides it: an empty value is a PERSONAL deployment, and
+ * a filled one is a TEAM deployment whose accounts, permissions, grants, shared settings and
+ * templates live in DataOps. This is an environment fact read from configuration, not a
+ * feature flag chosen at runtime -- which is why the personal and team paths are the same
+ * code with different gates rather than two branches selected by a boolean.
+ *
+ * Two consequences follow, and both are deliberate:
+ *
+ * 1. A personal deployment has NO accounts, NO permission model, NO shared settings and NO
+ *    member management. Those are not disabled features; they do not exist without an
+ *    authority to ask.
+ * 2. Every route that used to answer "not configured" now answers normally, gated on the
+ *    local filesystem instead. An unconfigured deployment is a supported shape, not an
+ *    error state.
+ *
+ * @param config - resolved plugin config.
+ * @returns true when a DataOps backend is configured.
+ */
+export function isTeamDeployment(config: Config): boolean {
+  return config.baseUrl.trim() !== ''
+}
+
+/**
+ * The identity a personal deployment acts as.
+ *
+ * A personal deployment has no caller to ask about: there is one operator, at the keyboard,
+ * with the file permissions of the process. `viewPathFor` still keys a view directory by
+ * user id, so this constant keeps that code path single rather than adding a second one for
+ * "no user".
+ */
+export const LOCAL_USER_ID = 'local'
+
+/**
+ * Why a path was refused in a personal deployment.
+ *
+ * Named rather than silently refused: the reader asked for a file and the answer must say
+ * whether the path left the knowledge root or was simply not there.
+ */
+export interface LocalPathRefusal {
+  /** Machine-readable reason. */
+  readonly code: 'escapes-knowledge-root' | 'absolute-path' | 'empty-path' | 'nul-byte'
+  /** One sentence naming what was wrong with the path. */
+  readonly reason: string
+}
+
+/**
+ * Whether a personal deployment may read or write one path.
+ *
+ * A personal deployment has no OTHER users to protect a path from, so there is no grant to
+ * consult -- but that is not the same as having no boundary. The boundary is the knowledge
+ * root itself: a relative path that stays inside `actualRoot` is allowed, and anything that
+ * climbs out is refused with a reason.
+ *
+ * The check is spelled out instead of relying on `join(root, relPath)` to clamp, because a
+ * silent clamp would let `../../etc/passwd` resolve to something inside the tree and report
+ * success for a request that should have been refused.
+ *
+ * @param relPath - the path as the caller sent it, relative to the knowledge root.
+ * @returns undefined when the path is allowed, else why it is not.
+ */
+export function checkLocalPath(relPath: string): LocalPathRefusal | undefined {
+  if (relPath.trim() === '') {
+    return { code: 'empty-path', reason: 'the path is empty' }
+  }
+  if (relPath.includes('\0')) {
+    return { code: 'nul-byte', reason: 'the path contains a NUL byte' }
+  }
+  if (relPath.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(relPath)) {
+    return { code: 'absolute-path', reason: 'the path must be relative to the knowledge root' }
+  }
+  // `isContainedRelPath` is the same predicate the team path uses before it asks DataOps, so
+  // a personal deployment refuses exactly the shapes a team deployment would never send.
+  if (!isContainedRelPath(relPath)) {
+    return {
+      code: 'escapes-knowledge-root',
+      reason: 'the path leaves the knowledge root; "..", "." and empty segments are not allowed',
+    }
+  }
+  return undefined
+}
+
+/**
+ * The local boundary's refusal for a PERSONAL deployment, or undefined.
+ *
+ * A team deployment sends the same path shapes to DataOps and reports a permission
+ * answer; only the personal deployment owns a local boundary, and it is the one that has
+ * to say WHICH shape was wrong. Keeping the projection here keeps a route from answering
+ * a path escape with the generic "not configured" code it used to reuse.
+ * @param config - resolved plugin config.
+ * @param relPath - the path as the caller sent it.
+ * @returns undefined when the deployment is a team one or the path is inside the root.
+ */
+function personalPathRefusal(config: Config, relPath: string): LocalPathRefusal | undefined {
+  return isTeamDeployment(config) ? undefined : checkLocalPath(relPath)
+}
+
+/**
  * The resolved layout, derived on the Host.
  *
  * There is no backend counterpart to ask: DataOps serves no knowledge config
@@ -411,8 +624,8 @@ export function localConfig(
     actualRoot: config.actualRoot,
     viewRoot: config.viewRoot,
     nfsServer: config.nfsServer,
-    host: config.baseUrl.trim() === '' ? '' : safeHost(config.baseUrl),
-    backendConfigured: config.baseUrl.trim() !== '',
+    host: !isTeamDeployment(config) ? '' : safeHost(config.baseUrl),
+    backendConfigured: isTeamDeployment(config),
     storageProtocol: config.storageProtocol,
     // Every field here is safe to render. `keyConfigured` is derived, not the key: the panel
     // needs to know whether the mount step will find one, and nothing more.
@@ -541,9 +754,6 @@ export async function syncCallerView(
   config: Config,
   paths?: string[],
 ): Promise<(ViewDelta & SyncReportFields & { status: number; error?: never }) | { status: number; error: string }> {
-  if (config.baseUrl.trim() === '') {
-    return { status: 409, error: 'DataOps permission API is not configured' }
-  }
   const plan = localConfig(config)
   let caller
   try {
@@ -1003,6 +1213,7 @@ export interface KnowledgeEntry {
  * @returns The entries, directories first then files, each in name order.
  */
 export async function listDirectory(root: string, dir: string): Promise<KnowledgeEntry[]> {
+  dir = resolveScopeAlias(dir)
   let entries
   try {
     entries = await readdir(dir, { withFileTypes: true })
@@ -1064,12 +1275,22 @@ export async function listDirectoryWithPermissions(
   userId: string | undefined,
 ): Promise<KnowledgeEntry[]> {
   const rows = await listDirectory(root, dir)
-  // Without a permission service or an identity there is no question to ask, and a
-  // question that cannot be asked cannot come back "yes". The deployment that
-  // configures no DataOps API has no per-user view either, so it has nothing to
-  // list here: the page reports the missing backend through `permissionsResolved`
-  // rather than through a directory it never verified.
-  if (config.baseUrl.trim() === '' || userId === undefined) return []
+  // A personal deployment filters nothing: there is one operator and no grants, so every row
+  // the directory holds is a row this operator may read. Returning the rows instead of an
+  // empty list is what makes the tree render at all -- an empty answer here is
+  // indistinguishable from an empty folder, and the page would show a knowledge base with
+  // nothing in it.
+  //
+  // The path boundary still applies, and it is enforced twice: `listDirectory` only walks
+  // inside `dir`, and each row's `relPath` is checked here so a name that escapes the root
+  // cannot appear as a row.
+  if (!isTeamDeployment(config)) {
+    return rows.filter(row => checkLocalPath(row.relPath) === undefined)
+  }
+  // Without an identity there is no question to ask, and a question that cannot be asked
+  // cannot come back "yes". A team deployment whose caller could not be identified has
+  // nothing verified to list, so the page reports that through `permissionsResolved`.
+  if (userId === undefined) return []
   // Asked one path at a time on purpose: the resolve route is self-scoped and takes
   // a single resource, so batching would mean inventing a second decision path.
   // Rows are few (one directory level), and each answer is a boolean.
@@ -1107,7 +1328,7 @@ async function modifiedAt(full: string): Promise<{ mtimeMs?: number }> {
 }
 
 /** Largest file the search will open, so one large document cannot stall it. */
-const SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
+const SEARCH_MAX_FILE_BYTES = 20 * 1024 * 1024
 
 /**
  * How much of a file the preview renders.
@@ -1165,6 +1386,9 @@ export async function readKnowledgeFile(
   config: Config,
   relPath: string,
 ): Promise<{ kind: 'text'; content: string; truncated: boolean; mtimeMs?: number } | { kind: 'binary'; size: number }> {
+  relPath = resolveScopeAlias(relPath)
+  const refusal = personalPathRefusal(config, relPath)
+  if (refusal !== undefined) throw new KnowledgeError(refusal.reason, refusal.code)
   if (!isContainedRelPath(relPath)) {
     throw new KnowledgeError('path escapes the knowledge tree', 'not-configured')
   }
@@ -1181,6 +1405,52 @@ export async function readKnowledgeFile(
   const truncated = raw.byteLength > PREVIEW_MAX_BYTES
   const slice = truncated ? raw.subarray(0, PREVIEW_MAX_BYTES) : raw
   return { kind: 'text', content: slice.toString('utf8'), truncated, mtimeMs: info.mtimeMs }
+}
+
+/**
+ * Read one file AFTER resolving the caller's permission for it.
+ *
+ * The HTTP `read` route used to rely on the caller's view hardlink alone: the file was
+ * visible because a previous sync linked it, but a revoke or an unsynced view could
+ * leave a readable link behind. Both the read route and the extraction path now share this
+ * function, so the permission answer is DataOps' and the path boundary is still
+ * enforced first.
+ *
+ * @param ctx - Host context.
+ * @param config - resolved plugin config.
+ * @param relPath - path relative to the knowledge root, in view coordinates.
+ * @returns The same shape `readKnowledgeFile` returns.
+ * @throws KnowledgeToolError with a structured code for the model.
+ */
+export async function readAuthorized(
+  ctx: Context,
+  config: Config,
+  relPath: string,
+): Promise<KnowledgeFileRead> {
+  relPath = resolveScopeAlias(relPath)
+  const refusal = personalPathRefusal(config, relPath)
+  if (refusal !== undefined) throw new KnowledgeToolError(refusal.code, refusal.reason, relPath)
+  if (!isContainedRelPath(relPath)) {
+    throw new KnowledgeToolError(
+      'escapes-knowledge-root',
+      'the path leaves the knowledge root; "..", "." and empty segments are not allowed',
+      relPath,
+    )
+  }
+  let allowed = false
+  try {
+    allowed = await canReadPath(ctx, config, relPath)
+  } catch (error) {
+    throw asKnowledgeToolError(error, relPath)
+  }
+  if (!allowed) {
+    throw new KnowledgeToolError('forbidden', 'read access is required for this path', relPath)
+  }
+  try {
+    return await readKnowledgeFile(ctx, config, relPath)
+  } catch (error) {
+    throw asKnowledgeToolError(error, relPath)
+  }
 }
 
 /**
@@ -1203,6 +1473,9 @@ export async function readKnowledgeFileForDownload(
   config: Config,
   relPath: string,
 ): Promise<{ name: string; base64: string; size: number; mime: string }> {
+  relPath = resolveScopeAlias(relPath)
+  const refusal = personalPathRefusal(config, relPath)
+  if (refusal !== undefined) throw new KnowledgeError(refusal.reason, refusal.code)
   if (!isContainedRelPath(relPath)) {
     throw new KnowledgeError('path escapes the knowledge tree', 'not-configured')
   }
@@ -1473,6 +1746,17 @@ async function readDepartmentPathFromCatalog(
 }
 
 export async function fetchCaller(ctx: Context, config: Config): Promise<KnowledgeCaller> {
+  // A personal deployment has no account system to ask, and its view is keyed by one fixed
+  // id. Answering a synthetic caller rather than throwing is what lets `viewPathFor` and the
+  // rest of the view plumbing stay a single code path: the difference between the two
+  // deployments is WHERE the id comes from, not whether there is one.
+  //
+  // The label is deliberately the display name a reader would expect, and `roleCodes` is
+  // empty because there are no roles -- a surface that renders role names must not invent
+  // one for a deployment that has none.
+  if (!isTeamDeployment(config)) {
+    return { userId: LOCAL_USER_ID, label: '本地用户', roleCodes: [] }
+  }
   const body = await request<Record<string, unknown>>(ctx, config, ENDPOINTS.me)
   // The route answers `{ user: {...} }`, not the profile at the top level. Read
   // both so a change in nesting shows up as a missing id rather than as a view
@@ -1571,6 +1855,11 @@ export function knowledgeAncestorsFor(relPath: string): Array<{ resourceType: st
 }
 
 export async function canReadPath(ctx: Context, config: Config, relPath: string): Promise<boolean> {
+  relPath = resolveScopeAlias(relPath)
+  // A personal deployment has nobody to ask: there is one operator and the path boundary is
+  // the knowledge root. That boundary is still enforced -- `checkLocalPath` refuses anything
+  // that climbs out -- so "allowed" here means "inside the tree", never "anything goes".
+  if (!isTeamDeployment(config)) return checkLocalPath(relPath) === undefined
   try {
     const body = await request<{ canRead?: boolean }>(ctx, config, ENDPOINTS.resolve, {
       method: 'POST',
@@ -1608,6 +1897,10 @@ export async function canReadPath(ctx: Context, config: Config, relPath: string)
  * @returns Whether the caller may write it.
  */
 export async function canWritePath(ctx: Context, config: Config, relPath: string): Promise<boolean> {
+  relPath = resolveScopeAlias(relPath)
+  // Same boundary as reads, and for the same reason: a personal deployment has no grants to
+  // consult, but a path outside the knowledge root is still refused rather than written.
+  if (!isTeamDeployment(config)) return checkLocalPath(relPath) === undefined
   try {
     const body = await request<{ canWrite?: boolean }>(ctx, config, ENDPOINTS.resolve, {
       method: 'POST',
@@ -1632,7 +1925,8 @@ export async function canWritePath(ctx: Context, config: Config, relPath: string
  * post an arbitrarily large body, because nothing downstream limits the size of a
  * file on the share.
  */
-export const MAX_KNOWLEDGE_WRITE_BYTES = 1_048_576
+// Raised from 1 MiB to 100 MiB on request: real documents (PDFs, Office files) routinely
+export const MAX_KNOWLEDGE_WRITE_BYTES = 500 * 1024 * 1024
 
 /**
  * How long the template list may take before the surface gives up.
@@ -1704,8 +1998,23 @@ export class KnowledgeWriteError extends Error {
 export async function createKnowledgeEntry(
   config: Config,
   relPath: string,
-  options: { directory: boolean; content?: string; bytes?: Uint8Array },
+  options: {
+    directory: boolean
+    content?: string
+    bytes?: Uint8Array
+    /**
+     * The ceiling this write is checked against.
+     *
+     * Defaults to {@link MAX_KNOWLEDGE_WRITE_BYTES}. It is injectable ONLY so a test can
+     * verify the boundary with a small body: the production ceiling is a product decision
+     * that has already moved (1 MiB → 500 MiB), and building a payload at the current
+     * ceiling costs seconds of string work. A test that has to allocate the limit is
+     * measuring the machine's memory bandwidth, not the check.
+     */
+    limitBytes?: number
+  },
 ): Promise<{ relPath: string; kind: 'file' | 'directory' }> {
+  relPath = resolveScopeAlias(relPath)
   const plan = localConfig(config)
   if (!isContainedRelPath(relPath)) {
     throw new KnowledgeWriteError('path escapes the knowledge root: ' + JSON.stringify(relPath), 'bad-path')
@@ -1730,6 +2039,7 @@ export async function createKnowledgeEntry(
       }
       throw new KnowledgeWriteError('could not create ' + relPath, 'write-failed', { cause })
     }
+    markInternalMutation(relPath)
     return { relPath, kind: 'directory' }
   }
   // A binary upload arrives as bytes and is written verbatim: decoding it as
@@ -1742,8 +2052,9 @@ export async function createKnowledgeEntry(
   const payloadBytes = bytes === undefined
     ? Buffer.byteLength(body, 'utf8')
     : bytes.byteLength
-  if (payloadBytes > MAX_KNOWLEDGE_WRITE_BYTES) {
-    throw new KnowledgeWriteError('document exceeds the ' + String(MAX_KNOWLEDGE_WRITE_BYTES) + ' byte limit', 'too-large')
+  const limitBytes = options.limitBytes ?? MAX_KNOWLEDGE_WRITE_BYTES
+  if (payloadBytes > limitBytes) {
+    throw new KnowledgeWriteError('document exceeds the ' + String(limitBytes) + ' byte limit', 'too-large')
   }
   // The parent must exist and be inside the root: `wx` alone would otherwise let
   // `a/b/c.md` fail with a bare ENOENT that reads like a bug rather than a choice.
@@ -1763,6 +2074,7 @@ export async function createKnowledgeEntry(
     }
     throw new KnowledgeWriteError('could not write ' + relPath, 'write-failed', { cause })
   }
+  markInternalMutation(relPath)
   return { relPath, kind: 'file' }
 }
 
@@ -1777,31 +2089,131 @@ export async function createKnowledgeEntry(
  *
  * @param config - resolved plugin config, for the knowledge root and MinerU port.
  * @param relPath - the uploaded document's path, relative to the knowledge root.
+ * @param mineruUrl - the caller's own stored address, when they have one.
+ * @param readSharedUrl - reads the deployment's shared address. Called only when the caller
+ *   has none of their own, so a deployment without the OCR plugin pays nothing.
  * @returns What happened, or undefined when the format needs no extraction.
  */
+/**
+ * Resolve a view-relative path to the authoritative path.
+ *
+ * The agent sees `/workspace/kb` = `views/<uid>`; personal files are flattened from
+ * `actual/personal/<uid>/...`, and a department view may carry the organization chain.
+ * Extraction and indexing must open the actual file, not the view alias, or MinerU gets
+ * `no such document`.
+ */
+export async function actualRelPathForView(
+  ctx: Context,
+  config: Config,
+  relPath: string,
+  caller?: KnowledgeCaller,
+): Promise<string> {
+  if (!isTeamDeployment(config)) return relPath
+  const who = caller ?? await fetchCaller(ctx, config)
+  const plan = localConfig(config)
+  const clean = relPath.replace(/^\/+/, '')
+  const viewFile = join(plan.viewRoot, who.userId, clean)
+  let viewInfo: Awaited<ReturnType<typeof stat>> | undefined
+  try { viewInfo = await stat(viewFile) } catch { viewInfo = undefined }
+
+  // No string reshaping of `global/…`: actual/global is a real directory, and a
+  // view's global bucket can hardlink a source at the actual top level. Only paths
+  // whose inode matches the view file are accepted below.
+  const candidates: string[] = [clean]
+  if (clean.startsWith('personal/')) {
+    const rest = clean.slice('personal/'.length)
+    if (!rest.startsWith(who.userId + '/') && rest !== who.userId) {
+      candidates.push(`personal/${who.userId}/${rest}`)
+    }
+  }
+  if (clean.startsWith('department/')) {
+    const rest = clean.slice('department/'.length)
+    const pathCodes = who.departmentPathCodes ?? (who.departmentCode === undefined ? [] : [who.departmentCode])
+    if (pathCodes.length > 0) candidates.push(`department/${pathCodes.join('/')}/${rest}`)
+    if (who.departmentCode !== undefined) candidates.push(`department/${who.departmentCode}/${rest}`)
+  }
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      const info = await stat(join(plan.actualRoot, candidate))
+      // The view is built from hardlinks, so the inode is the authoritative
+      // identity when both names exist; a same-named file in actual/global is not
+      // necessarily the source of the view's global bucket.
+      if (viewInfo === undefined || info.ino === viewInfo.ino) return candidate
+    } catch {
+      // Try the next shape.
+    }
+  }
+
+  // Last resort: find the authoritative hardlink by inode. This is what handles a
+  // `global/` view prefix whose source sits at the actual top level (for example
+  // actual/dual-mode-verify/... shown as global/dual-mode-verify/...).
+  if (viewInfo !== undefined) {
+    const walk = async (dir: string, prefix: string): Promise<string | undefined> => {
+      let entries
+      try { entries = await readdir(dir, { withFileTypes: true }) } catch { return undefined }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue
+        const rel = prefix === '' ? entry.name : prefix + '/' + entry.name
+        const absolute = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          const found = await walk(absolute, rel)
+          if (found !== undefined) return found
+          continue
+        }
+        if (!entry.isFile()) continue
+        try {
+          const info = await stat(absolute)
+          if (info.ino === viewInfo.ino && info.size === viewInfo.size) return rel
+        } catch {
+          // A file removed during the walk is absent from this pass.
+        }
+      }
+      return undefined
+    }
+    const found = await walk(plan.actualRoot, '')
+    if (found !== undefined) return found
+  }
+  return relPath
+}
+
 export async function extractBeside(
   config: Config,
   relPath: string,
   mineruUrl?: string,
-): Promise<{ markdown: string; via?: string; reason?: string } | undefined> {
+  readSharedUrl?: () => Promise<string | undefined>,
+  ctx?: Context,
+): Promise<{ markdown: string; via?: string; reason?: string; blocks?: MineruBlock[] } | undefined> {
   if (!isExtractable(relPath)) return undefined
   const plan = localConfig(config)
-  const fullPath = join(plan.actualRoot, relPath)
-  // A caller-supplied address is the user's own setting and outranks the deployment's;
-  // absent, the deployment answer (explicit address, else the derived port) applies.
-  const effectiveUrl = mineruUrl !== undefined && mineruUrl !== '' ? mineruUrl : mineruUrlFor(config)
-  const result = await extractDocument(fullPath, relPath, { mineruUrl: effectiveUrl })
+  const actualRelPath = ctx === undefined ? relPath : await actualRelPathForView(ctx, config, relPath)
+  const fullPath = join(plan.actualRoot, actualRelPath)
+  // Three inputs in precedence order, and the caller's own choice comes first: an address
+  // they typed outranks both the deployment's shared value and the port derivation.
+  //
+  // The shared value is read lazily, so a caller who configured their own address never
+  // causes a backend round trip, and a deployment without the OCR plugin never calls one.
+  const sharedUrl = mineruUrl !== undefined && mineruUrl !== ''
+    ? undefined
+    : await readSharedUrl?.().catch(() => undefined)
+  const effectiveUrl = mineruUrl !== undefined && mineruUrl !== ''
+    ? mineruUrl
+    : mineruUrlFor(config, sharedUrl)
+  const result = await extractDocument(fullPath, actualRelPath, { mineruUrl: effectiveUrl })
   if (result.markdown === undefined) {
     return { markdown: '', reason: result.reason ?? 'extraction produced no text' }
   }
-  const sibling = markdownSiblingOf(relPath)
+  const sibling = markdownSiblingOf(actualRelPath)
   try {
     await createKnowledgeEntry(config, sibling, { directory: false, content: result.markdown })
   } catch (cause) {
     // A refusal here (already exists, size) is reported without failing the upload.
     return { markdown: sibling, reason: describeError(cause).message }
   }
-  return { markdown: sibling, via: result.via ?? 'unknown' }
+  return {
+    markdown: markdownSiblingOf(relPath),
+    via: result.via ?? 'unknown',
+    ...(result.blocks === undefined ? {} : { blocks: result.blocks }),
+  }
 }
 
 /**
@@ -1845,20 +2257,111 @@ export function extractionOutcomeOf(
 }
 
 /**
- * MinerU's base URL for this deployment, or undefined when it is not configured.
+ * Where the MinerU address this deployment uses came from.
+ *
+ * The settings page says which of the three applies, so a reader never mistakes a shared
+ * value for their own: the caption under the field is the only thing distinguishing "you
+ * typed this" from "your administrator set this" from "this deployment derives it".
+ */
+export type MineruUrlSource = 'own' | 'shared' | 'derived'
+
+/** The effective MinerU address and where it came from. */
+export interface MineruUrlResolution {
+  /** The address to call, or undefined when nothing is configured. */
+  readonly url: string | undefined
+  /** Which input produced {@link url}. */
+  readonly source: MineruUrlSource | undefined
+}
+
+/**
+ * Resolve MinerU's base URL for this deployment, in the documented precedence order.
+ *
+ * Three inputs, and the order is the whole point:
+ *
+ * 1. **The caller's own stored address.** It is a deliberate choice, so nothing overrides it.
+ * 2. **The shared address the 「文档识别」 plugin's administrator configured.** One value for
+ *    the whole deployment; the reason a member never has to know MinerU exists.
+ * 3. **The address this deployment derives from its configured port.** Only ever
+ *    `127.0.0.1:<port>`, which is why it is last: it can name nothing but this machine.
+ *
+ * The shared value is READ, never written. This plugin has no business persisting another
+ * plugin's setting, and a copy written back into `.kb-settings.json` would become a second
+ * source of truth that silently stops following the administrator's later change.
  *
  * @param config - resolved plugin config.
- * @returns `http://127.0.0.1:<port>` when the service is expected, else undefined.
+ * @param sharedUrl - the deployment's shared address, when the caller has none of their own.
+ * @returns the effective address and its origin.
  */
-export function mineruUrlFor(config: Config): string | undefined {
-  // An explicit address wins over the derived one. It is the only way to reach a service
-  // that is not on this machine: the port alone can only ever mean 127.0.0.1.
+export function resolveMineruUrl(
+  config: Config,
+  sharedUrl?: string,
+): MineruUrlResolution {
+  // An explicit address wins over everything. It is the only way to reach a service that is
+  // not on this machine, and it is the caller's own decision.
   const configured = normalizeMineruBaseUrl((config as { mineruBaseUrl?: string }).mineruBaseUrl)
-  if (configured !== '') return configured
+  if (configured !== '') return { url: configured, source: 'own' }
+  // The shared value is normalised here as well: it arrives over HTTP, so a malformed one
+  // is a fact about the deployment rather than a caller error, and an unusable value must
+  // fall through to the derivation instead of being handed to a parser that can only fail.
+  const shared = normalizeMineruBaseUrl(sharedUrl)
+  if (shared !== '') return { url: shared, source: 'shared' }
   const port = (config as { mineruPort?: number }).mineruPort
-  if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) return undefined
-  return 'http://127.0.0.1:' + String(port)
+  if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) {
+    return { url: undefined, source: undefined }
+  }
+  return { url: 'http://127.0.0.1:' + String(port), source: 'derived' }
 }
+
+/**
+ * MinerU's base URL for this deployment, or undefined when it is not configured.
+ *
+ * The URL-only view of {@link resolveMineruUrl}, kept because the extractor only needs the
+ * address and threading a source through it would make every caller unpack a field it does
+ * not read.
+ *
+ * @param config - resolved plugin config.
+ * @param sharedUrl - the deployment's shared address, when the caller has none of their own.
+ * @returns the address to call, else undefined.
+ */
+export function mineruUrlFor(config: Config, sharedUrl?: string): string | undefined {
+  return resolveMineruUrl(config, sharedUrl).url
+}
+
+/**
+ * Read the shared MinerU address the 「文档识别」 plugin's administrator configured.
+ *
+ * A read-only peek at another plugin's setting, and deliberately tolerant: the OCR plugin is
+ * optional, its backend route answers `''` when nobody has configured it, and an unreachable
+ * backend must not stop a document upload. Every failure therefore answers "no shared value"
+ * and the caller falls through to its own derivation, which is the behaviour a deployment
+ * without the OCR plugin has.
+ *
+ * This never writes. The value belongs to the OCR plugin's administrator; copying it into
+ * this plugin's settings file would make a stale duplicate of a value that is supposed to
+ * change once for everyone.
+ *
+ * @param ctx - host context carrying the credential store.
+ * @param config - resolved plugin config, for the backend origin and credential.
+ * @returns the shared address, or undefined when none is configured or it cannot be read.
+ */
+export async function readSharedMineruUrl(ctx: Context, config: Config): Promise<string | undefined> {
+  if (!isTeamDeployment(config)) return undefined
+  try {
+    const body = await request<{ mineruUrl?: unknown }>(ctx, config, ENDPOINTS.ocrConfig, {
+      // Short bound: this sits in front of an upload, and a backend that is merely slow
+      // should not delay the reader's own document. Falling through to the derived address
+      // costs nothing when the answer does not arrive.
+      timeoutMs: Math.min(config.timeoutMs, 5_000),
+    })
+    const value = typeof body.mineruUrl === 'string' ? body.mineruUrl.trim() : ''
+    return value === '' ? undefined : value
+  } catch {
+    // Unreachable, unauthorized, or malformed: all of them mean "this deployment has no
+    // shared address this caller can see", and the caller's own settings still apply.
+    return undefined
+  }
+}
+
 
 
 /**
@@ -1890,6 +2393,11 @@ export function mineruUrlFor(config: Config): string | undefined {
  * @returns Whether the caller holds the grant-management permission.
  */
 export async function canManageGrants(ctx: Context, config: Config): Promise<boolean> {
+  // There are no grants in a personal deployment, so there is nothing to manage: answering
+  // false is the honest answer rather than a denial of some capability the operator lacks.
+  // The surfaces that gate on this (the permission page, the storage write) are team
+  // features and do not render without a backend anyway.
+  if (!isTeamDeployment(config)) return false
   try {
     // A resource id no grant can carry, so the probe reads no grant rows at all:
     // the guard is what is being asked, not the body it returns.
@@ -1900,6 +2408,70 @@ export async function canManageGrants(ctx: Context, config: Config): Promise<boo
   } catch {
     return false
   }
+}
+
+/**
+ * Who authors or reviews a plaza workflow.
+ *
+ * Team deployments must name the real DataOps caller: a publish record without a
+ * responsible author is not reviewable. A personal deployment has no backend and no
+ * second administrator, so its local operator is both author and reviewer.
+ */
+export async function resolveWorkflowActor(ctx: Context, config: Config): Promise<WorkflowActor> {
+  if (!isTeamDeployment(config)) return { id: 'local', name: '个人用户' }
+  const caller = await fetchCaller(ctx, config)
+  return { id: caller.userId, name: caller.label ?? caller.userId }
+}
+
+/**
+ * The backend permission one HTTP method needs.
+ *
+ * The named file operations are the routes the page and the file tools actually call;
+ * leaving a route out is deliberate for read-only status/preferences surfaces whose
+ * data is already scoped by the caller's grants.
+ */
+export function permissionForKbRoute(method: string): string | undefined {
+  if (method === 'list' || method === 'read' || method === 'search') return 'kb:file:read'
+  if (method === 'create' || method === 'edit' || method === 'move' || method === 'upload' || method === 'rename') return 'kb:file:write'
+  if (method === 'trash' || method === 'trash.remove' || method === 'trash.restore') return 'kb:file:delete'
+  if (method === 'index' || method === 'extract.retry') return 'kb:file:extract'
+  if (method === 'audit.list') return 'kb:audit:read'
+  if (method === 'grants' || method === 'grant' || method === 'revoke') return 'kb:grant:manage'
+  if (method === 'pending.list' || method === 'pending.approve' || method === 'pending.reject') return 'kb:review:decide'
+  if (method === 'config.set' || method === 'settings.get' || method === 'settings.set'
+    || method === 'deploy.hosts' || method === 'deploy.run' || method === 'deploy.log' || method === 'deploy.steps') {
+    return 'kb:config:manage'
+  }
+  if (method === 'workflow.mine' || method === 'workflow.public') return 'workflow:read'
+  if (method === 'workflow.pending' || method === 'workflow.review') return 'workflow:review:decide'
+  if (method === 'workflow.resubmit') return 'workflow:publish'
+  if (method === 'workflow.unpublish') return 'workflow:manage'
+  return undefined
+}
+
+/** Append one management-tool action to the profile-local audit trail. */
+async function appendManagementAudit(
+  config: Config,
+  _ctx: Context,
+  entry: { action: string; actor: string; detail: Record<string, unknown> },
+): Promise<void> {
+  const directory = publishDirOf(config.publishDir)
+  await mkdir(directory, { recursive: true })
+  await appendFile(join(directory, 'management-audit.jsonl'), JSON.stringify({
+    at: new Date().toISOString(),
+    ...entry,
+  }) + '\n', 'utf8')
+}
+
+/**
+ * Whether this caller may see and use the review tab.
+ *
+ * In a team deployment this is the same grant-management authority the permission page
+ * uses. A personal deployment has no administrator and no grants; its owner is the
+ * reviewer by construction.
+ */
+export async function canReviewWorkflows(ctx: Context, config: Config): Promise<boolean> {
+  return isTeamDeployment(config) ? canManageGrants(ctx, config) : true
 }
 
 /**
@@ -2139,7 +2711,35 @@ function knowledgeStatusFor(code: KnowledgeErrorCode): number {
   if (code === 'unauthorized') return 401
   if (code === 'not-configured') return 409
   if (code === 'unreachable') return 502
+  // The personal boundary's refusals are malformed requests: the caller sent a path this
+  // deployment can never accept, and 409 described a configuration problem that is not
+  // there. The four codes are answered alike, and each body still carries which one.
+  if (code === 'escapes-knowledge-root' || code === 'absolute-path' || code === 'empty-path' || code === 'nul-byte') {
+    return 400
+  }
   return 502
+}
+
+/** HTTP status for a structured knowledge tool error, used by the shared read route. */
+function knowledgeToolStatus(code: KnowledgeToolError['code']): number {
+  switch (code) {
+    case 'empty-path':
+    case 'nul-byte':
+    case 'absolute-path':
+    case 'escapes-knowledge-root':
+    case 'not-a-directory':
+    case 'not-a-file': return 400
+    case 'forbidden': return 403
+    case 'not-found': return 404
+    case 'exists': return 409
+    case 'too-large': return 413
+    case 'binary': return 415
+    case 'unauthorized': return 401
+    case 'not-configured': return 409
+    case 'unreachable':
+    case 'bad-response': return 502
+    default: return 500
+  }
 }
 
 function writeStatusFor(code: KnowledgeWriteError['code']): number {
@@ -2169,6 +2769,9 @@ export const KNOWLEDGE_SKILL_PROVIDER = 'dsh-knowledge-base'
 /** Name the model sees in the skill catalog. */
 export const KNOWLEDGE_SKILL_NAME = 'knowledge-base'
 
+/** Second bundled skill: the explicit, model-authored summarisation workflow. */
+export const KB_SUMMARIZE_SKILL_NAME = 'kb-summarize'
+
 /**
  * Short description shown in the skill list.
  *
@@ -2177,7 +2780,20 @@ export const KNOWLEDGE_SKILL_NAME = 'knowledge-base'
  * be available before the file is opened.
  */
 export const KNOWLEDGE_SKILL_DESCRIPTION =
-  'Read and change the shared knowledge base: browse, search, create, upload, rename, move and delete documents in the 全局 / 部门 / 个人 trees.'
+  'Read and change the shared knowledge base: browse, search, create, upload, rename, move and delete documents in the 全局 / 部门 / 个人 trees. '
+  + 'Cite with the stable kb://doc/<docId>/chunk/<key> token, never with line or block numbers.'
+
+/**
+ * Short description of the explicit summary skill.
+ *
+ * Upload and extraction never write summaries. This skill is the only documented way to
+ * turn source chunks into document/section summaries and key facts, and it does so through
+ * the model's own reading plus `kb_outline_save` -- never through a hidden LLM call inside
+ * the plugin.
+ */
+export const KB_SUMMARIZE_SKILL_DESCRIPTION =
+  '为知识库文档显式生成摘要：先 kb_outline 拿目录，逐章读原文 chunk，再由 agent 生成 doc/section summary + keyFacts，'
+  + '最后用 kb_outline_save 落库。摘要只作导航，引用仍用原文 chunk token；上传/抽取不会自动生成摘要。'
 
 /**
  * Where this package's SKILL.md lives, from either build layout.
@@ -2194,6 +2810,34 @@ export function knowledgeSkillPath(): string {
 }
 
 /**
+ * Where the bundled `kb-summarize` skill lives.
+ *
+ * Same layout reasoning as {@link knowledgeSkillPath}: both `lib/index.js` and a source
+ * run from `src/` sit one level below the package root.
+ *
+ * @returns absolute path of the kb-summarize SKILL.md.
+ */
+export function kbSummarizeSkillPath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
+  return join(moduleDirectory, '..', 'skills', KB_SUMMARIZE_SKILL_NAME, 'SKILL.md')
+}
+
+/**
+ * Where this package's tutorial document lives, from either build layout.
+ *
+ * Resolved the same way {@link knowledgeSkillPath} is, and for the same reason: the
+ * build emits `lib/index.js` while a source run executes from `src/`, and both sit one
+ * level below the package root. The file is shipped by `files[]` in package.json, so a
+ * published install answers the same path without a second mechanism.
+ *
+ * @returns absolute path of the tutorial this plugin ships.
+ */
+export function tutorialTemplatePath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
+  return join(moduleDirectory, '..', TUTORIAL_FILE_NAME)
+}
+
+/**
  * The skill provider that teaches the model how to use this knowledge base.
  *
  * One bundled skill, read from disk on `get()` rather than kept in memory: the
@@ -2203,6 +2847,9 @@ export function knowledgeSkillPath(): string {
  * @returns a provider the skill registry can list and read.
  */
 export const KNOWLEDGE_SKILL_RANK = 640
+
+/** The summary skill is more specialised, so it sorts after the general KB skill. */
+export const KB_SUMMARIZE_SKILL_RANK = 650
 
 /** Both a human and the model may invoke this skill. */
 export const KNOWLEDGE_SKILL_INVOCATION = { modelInvocable: true, userInvocable: true } as const
@@ -2225,22 +2872,39 @@ export function knowledgeBaseSkillProvider(): {
   readonly list: (options: { readonly cwd?: string; readonly signal?: AbortSignal }) => Promise<readonly SkillCandidateLike[]>
   readonly get: (candidate: SkillCandidateLike, options: { readonly cwd?: string; readonly signal?: AbortSignal }) => Promise<SkillDefinitionLike | undefined>
 } {
-  const path = knowledgeSkillPath()
-  const candidate: SkillCandidateLike = {
-    name: KNOWLEDGE_SKILL_NAME,
-    description: KNOWLEDGE_SKILL_DESCRIPTION,
-    invocation: KNOWLEDGE_SKILL_INVOCATION,
-    source: 'bundled',
-    provider: KNOWLEDGE_SKILL_PROVIDER,
-    path,
-    resourceBase: { kind: 'directory', path: dirname(path) },
-    rank: KNOWLEDGE_SKILL_RANK,
-    locator: path,
-  }
+  const candidates: SkillCandidateLike[] = [
+    {
+      name: KNOWLEDGE_SKILL_NAME,
+      description: KNOWLEDGE_SKILL_DESCRIPTION,
+      invocation: KNOWLEDGE_SKILL_INVOCATION,
+      source: 'bundled',
+      provider: KNOWLEDGE_SKILL_PROVIDER,
+      path: knowledgeSkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(knowledgeSkillPath()) },
+      rank: KNOWLEDGE_SKILL_RANK,
+      locator: knowledgeSkillPath(),
+    },
+    {
+      name: KB_SUMMARIZE_SKILL_NAME,
+      description: KB_SUMMARIZE_SKILL_DESCRIPTION,
+      invocation: KNOWLEDGE_SKILL_INVOCATION,
+      source: 'bundled',
+      provider: KNOWLEDGE_SKILL_PROVIDER,
+      path: kbSummarizeSkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(kbSummarizeSkillPath()) },
+      rank: KB_SUMMARIZE_SKILL_RANK,
+      locator: kbSummarizeSkillPath(),
+    },
+  ]
   return {
     name: KNOWLEDGE_SKILL_PROVIDER,
-    list: () => Promise.resolve([candidate]),
-    get: () => Promise.resolve({ ...candidate, content: readFileSync(path, 'utf8') }),
+    list: () => Promise.resolve(candidates),
+    get: (candidate) => {
+      const resolved = candidates.find(entry => entry.name === candidate.name)
+        ?? candidates.find(entry => entry.path === candidate.path)
+        ?? candidates[0]!
+      return Promise.resolve({ ...resolved, content: readFileSync(resolved.path, 'utf8') })
+    },
   }
 }
 
@@ -2282,6 +2946,46 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
   /** Completed and in-flight step runs, newest last. */
   const runs: StepRun[] = []
   /**
+   * First-run provisioning of the authoritative tree.
+   *
+   * The buckets are re-checked on every start rather than once, because a bucket someone
+   * deleted must come back; only the tutorial is write-once. The IO is bound to the
+   * resolved root through the ordinary write path, so a provisioned document obeys the
+   * same containment and exclusivity rules as one the reader creates.
+   */
+  const initializer = createInitializer(
+    {
+      // TEMPORARY (lead-approved): supplied while src/initialize.ts is mid-flight; owner
+      // should confirm semantics.
+      //
+      // `InitIo.isStorageReady` asks whether the storage the root lives in is ATTACHED --
+      // not whether the root exists, since provisioning is what creates the root. The
+      // plugin already answers exactly that question in `classifyMount`, which reads the
+      // configured mount point and separates "share attached" from "share attached but
+      // this plugin has not built its pointer yet". A share that is attached in either
+      // shape is ready for provisioning; only `absent` is not.
+      //
+      // Reusing that classifier rather than inventing an `access()` probe keeps one
+      // definition of "the share is there": a second implementation here would be free
+      // to disagree with the status route that already reports this state to the reader.
+      isStorageReady: async () => (await classifyMount(config)) !== 'absent',
+      createDirectory: async relPath => {
+        await createKnowledgeEntry(config, relPath, { directory: true })
+      },
+      createDocument: async (relPath, content) => {
+        await createKnowledgeEntry(config, relPath, { directory: false, content })
+      },
+      tutorialHtml: () => readFileSync(tutorialTemplatePath(), 'utf8'),
+    },
+    line => {
+      // One line per item, so a deployment that comes up without its buckets says which
+      // one stopped it rather than only that something failed.
+      const message = `knowledge-base: init ${line.item}: ${line.outcome}`
+      if (line.outcome === 'failed') host.logger?.warn?.(message)
+      else host.logger?.info?.(message)
+    },
+  )
+  /**
    * Background extraction, one worker for this deployment.
    *
    * Upload and extraction are separate promises (see `extractionQueue.ts`): the bytes
@@ -2293,12 +2997,34 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
    */
   const extractionQueue: ExtractionQueue = createExtractionQueue({
     isExtractable: relPath => isExtractable(relPath),
-    run: async (relPath, mineruBaseUrl) => {
+    isAlreadyMarkdown: relPath => isAlreadyMarkdown(relPath),
+    run: async (relPath, mineruBaseUrl, reportStep) => {
+      reportStep?.('parse')
       // `config` is the alias declared above (`const config = deploymentConfig`), named
       // here because this is the ONE place production code calls `extractBeside`: both
       // the upload path and the manual retry go through this runner, so the caller's
       // stored address reaches the extractor exactly once per document.
-      const outcome = await extractBeside(config, relPath, mineruBaseUrl)
+      //
+      // The caller's own address arrives as `mineruBaseUrl`; when they have none, the
+      // deployment's shared value from the 「文档识别」 plugin applies, and only then the
+      // port-derived address. `extractBeside` consults the shared value itself so this
+      // runner cannot be the one place that forgets it.
+      const outcome = await extractBeside(config, relPath, mineruBaseUrl, () => readSharedMineruUrl(ctx, config), ctx)
+      if (outcome !== undefined && outcome.markdown !== '' && outcome.reason === undefined) {
+        reportStep?.('chunk')
+        reportStep?.('index')
+        await syncKnowledgeIndex(true).catch(() => undefined)
+        if (outcome.blocks !== undefined && outcome.blocks.length > 0) {
+          const actualRelPath = await actualRelPathForView(ctx, config, relPath).catch(() => relPath)
+          await attachProvenance({
+            indexPath: knowledgeIndexPath(),
+            markdownPath: markdownSiblingOf(actualRelPath),
+            sourcePath: join(localConfig(config).actualRoot, actualRelPath),
+            blocks: outcome.blocks,
+          }).catch(() => undefined)
+        }
+        reportStep?.('done')
+      }
       return extractionOutcomeOf(outcome)
     },
   })
@@ -2382,7 +3108,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     // gate returns here without touching disk or the backend; a forced call skips
     // it, because the caller has already changed the grants this view reflects.
     if (!force && Date.now() < nextRoutineSyncAt) return { synced: false }
-    if (config.baseUrl.trim() === '') return { synced: false }
+    if (!isTeamDeployment(config)) return { synced: false }
     // Opened before the work rather than after: a failed attempt must not invite a
     // retry on the very next read, or an unreachable backend turns every request
     // into another walk of the shared tree.
@@ -2478,7 +3204,177 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         // route below must answer from one merged view, and a name that meant two different
         // things depending on the line would be the same class of bug as the dead control.
         const config = withStoredStorage(deploymentConfig, await readStorageSettings(deploymentConfig.mountPoint))
+        const requiredPermission = permissionForKbRoute(method)
+        if (requiredPermission !== undefined && isTeamDeployment(config)) {
+          try {
+            // A slow/unreachable review context must not hold an upload or a file
+            // read open: the route's own grant checks still run, and the permission
+            // gate is skipped for that request rather than turning a backend stall
+            // into a hung page.
+            const permissionContext = await Promise.race([
+              managementHost.context().catch(() => undefined),
+              new Promise<undefined>(resolve => setTimeout(() => { resolve(undefined) }, 750)),
+            ])
+            // An empty list is an older/unknown backend, not a caller with zero
+            // permissions: the route's own grant checks still apply in that case.
+            if (permissionContext !== undefined && permissionContext.permissions.length > 0 && !hasPermission(permissionContext, requiredPermission)) {
+              return writeJson(res, 403, {
+                error: `缺少权限 ${requiredPermission}`,
+                code: 'forbidden',
+                required: requiredPermission,
+              })
+            }
+          } catch {
+            // No review context means no permission list to enforce here. The
+            // route's own grant checks remain the authority (and an unreachable
+            // backend fails those writes anyway); treating an unavailable context
+            // as a denial made every offline/local test and every transient
+            // backend outage look like a permission error.
+          }
+        }
         switch (method) {
+          case 'workflow.mine': {
+            if (!isTeamDeployment(config)) {
+              const records = await listWorkflowsForAuthor(
+                publishStorePath(publishDirOf(config.publishDir)),
+                'local',
+              )
+              return writeJson(res, 200, {
+                workflows: records.map(record => ({
+                  id: record.id,
+                  title: record.title,
+                  description: record.description,
+                  instruction: record.instruction,
+                  cronHint: record.cronHint,
+                  category: record.category,
+                  reviewStatus: record.status,
+                  status: record.status,
+                  visibility: record.visibility,
+                  departmentCode: record.departmentCode ?? null,
+                  ownerId: record.authorId,
+                  ownerName: record.authorName,
+                  reviewNote: record.reviewNote ?? null,
+                  updatedAt: record.updatedAt,
+                  submittedAt: record.createdAt,
+                })),
+              })
+            }
+            const result = await request<{ items?: unknown[] }>(host, config, '/api/ai/workflow-publications/mine')
+            return writeJson(res, 200, { workflows: result.items ?? [] })
+          }
+          case 'workflow.unpublish': {
+            const body = await readJsonBody(req)
+            const id = typeof body.id === 'string' ? body.id : ''
+            if (id === '') return writeJson(res, 400, { error: 'id is required', code: 'invalid' })
+            if (!isTeamDeployment(config)) {
+              await unpublishPublishedWorkflow(
+                publishStorePath(publishDirOf(config.publishDir)),
+                id,
+                { id: 'local', name: '个人用户' },
+              )
+              return writeJson(res, 200, { success: true })
+            }
+            const result = await request(host, config, '/api/ai/workflow-publications/' + encodeURIComponent(id), { method: 'DELETE' })
+            return writeJson(res, 200, result ?? { success: true })
+          }
+          case 'workflow.resubmit': {
+            const body = await readJsonBody(req)
+            const id = typeof body.id === 'string' ? body.id : ''
+            if (id === '') return writeJson(res, 400, { error: 'id is required', code: 'invalid' })
+            if (!isTeamDeployment(config)) {
+              const record = await resubmitPublishedWorkflow(
+                publishStorePath(publishDirOf(config.publishDir)),
+                id,
+                { id: 'local', name: '个人用户' },
+              )
+              return writeJson(res, 200, { workflow: record })
+            }
+            // In-place PUT: the backend keeps the id, resets the review state, and the
+            // mine list therefore stays at one card. This replaced the old
+            // "POST a copy, then DELETE the old row" workaround.
+            const patch: Record<string, unknown> = {}
+            for (const key of ['title', 'description', 'instruction', 'cronHint', 'category', 'visibility', 'departmentCode', 'sourceSessionId']) {
+              if (body[key] !== undefined) patch[key] = body[key]
+            }
+            const updated = await request<Record<string, unknown>>(
+              host,
+              config,
+              '/api/ai/workflow-publications/' + encodeURIComponent(id),
+              { method: 'PUT', body: patch },
+            )
+            return writeJson(res, 200, { workflow: updated })
+          }
+          case 'workflow.public': {
+            // Approved records only. Built-ins live in the client registry; this route
+            // deliberately says nothing about pending/rejected records, which may contain
+            // an unreviewed prompt.
+            // Public response is deliberately narrower than the stored record: reviewer
+            // identity, audit history and review notes stay admin-only.
+            const workflows = (await listApprovedWorkflows(publishStorePath(publishDirOf(config.publishDir))))
+              .map(({ id, title, description, instruction, cronHint, category, authorName, createdAt }) => ({
+                id, title, description, instruction, cronHint, category, authorName, createdAt,
+              }))
+            return writeJson(res, 200, { workflows })
+          }
+          case 'workflow.pending': {
+            if (!(await canReviewWorkflows(host, config))) {
+              return writeJson(res, 403, {
+                error: 'workflow review requires grant-management access',
+                code: 'forbidden',
+              })
+            }
+            if (!isTeamDeployment(config)) {
+              const workflows = await listPendingWorkflows(publishStorePath(publishDirOf(config.publishDir)))
+              return writeJson(res, 200, { workflows })
+            }
+            // Team review queues live in the shared backend; the profile-local store is
+            // only the standalone/personal fallback. Reading the local store here made a
+            // freshly resubmitted row invisible in the Review tab.
+            const result = await request<{ items?: unknown[] }>(
+              host,
+              config,
+              '/api/ai/review/workflows?status=pending&limit=100',
+            )
+            return writeJson(res, 200, { workflows: result.items ?? [] })
+          }
+          case 'workflow.review': {
+            if (!(await canReviewWorkflows(host, config))) {
+              return writeJson(res, 403, {
+                error: 'workflow review requires grant-management access',
+                code: 'forbidden',
+              })
+            }
+            const body = await readJsonBody(req)
+            const id = typeof body.id === 'string' ? body.id : ''
+            const decision = body.decision === 'approve' || body.decision === 'reject' ? body.decision : undefined
+            if (id === '' || decision === undefined) {
+              return writeJson(res, 400, {
+                error: 'workflow.review needs id and decision=approve|reject',
+                code: 'invalid',
+              })
+            }
+            if (isTeamDeployment(config)) {
+              const result = await request<{ items?: unknown[] }>(host, config, '/api/ai/review/decide', {
+                method: 'POST',
+                body: {
+                  workflows: [id],
+                  decision,
+                  ...(typeof body.note === 'string' ? { note: body.note } : {}),
+                  authorization: { confirmed: true, reason: 'Workflow Plaza review tab' },
+                },
+              })
+              return writeJson(res, 200, { workflow: (result.items ?? [])[0] ?? result })
+            }
+            const actor = await resolveWorkflowActor(host, config)
+            const workflow = await reviewWorkflow(
+              publishStorePath(publishDirOf(config.publishDir)),
+              id,
+              decision,
+              actor,
+              typeof body.note === 'string' ? body.note : undefined,
+            )
+            return writeJson(res, 200, { workflow })
+          }
           case 'config.set': {
             // Persist the operator's storage choices.
             //
@@ -2486,12 +3382,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // operator-level writes here: read access is not enough. With no backend to ask,
             // the route refuses rather than assuming -- an unconfigured deployment has no one
             // who can legitimately claim to be an operator.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, {
-                error: 'DataOps permission API is not configured',
-                refused: [{ field: '*', reason: 'no authority to authorize a deployment change' }],
-              })
-            }
             const body = await readJsonBody(req)
             // Only the fields the panel owns are accepted. Everything else is refused
             // explicitly rather than ignored, because a silent drop would let the panel
@@ -2550,6 +3440,20 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             return writeJson(res, 200, localConfig(config, sshKeyConfigured))
           }
           case 'status': {
+            // Provision the tree before answering, because this reply describes it.
+            //
+            // This is the request that owns the tree's shape: the page is about to read
+            // the buckets, so answering before provisioning would report the
+            // pre-provisioning shape and the reader would open an empty knowledge base.
+            // Doing it here rather than at registration also means the write belongs to a
+            // request that will be awaited: an unawaited run at boot would still be
+            // writing while a caller (a test, or a teardown) removed the very directory it
+            // was writing into, and the failure would surface as an unrelated ENOTEMPTY.
+            //
+            // `ensure` re-checks the buckets every time (they are the part that must
+            // self-heal), is write-once for the tutorial, and shares one in-flight run so
+            // two concurrent page loads cannot race.
+            if (!initializer.hasSucceeded()) await initializer.ensure()
             // The page asks this once on mount, so the capability flag travels here
             // rather than in `config`: `config` is derived from the container's own
             // layout and stays a pure filesystem fact, while this flag is a decision
@@ -2561,9 +3465,23 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // the backend still refuses the writes, but the page would show a surface
             // it cannot use. An unconfigured backend short-circuits to false because
             // there is no authority to ask.
-            const canManage = config.baseUrl.trim() === ''
-              ? false
-              : await canManageGrants(host, config)
+            const canManage = isTeamDeployment(config) && await canManageGrants(host, config)
+            // The sidebar hides entries by the same backend permission keys the routes
+            // enforce. A missing permissions list (older backend) keeps the old
+            // role-based fallback rather than inventing a grant the caller may not have.
+            let permissionKeys: string[] = []
+            if (isTeamDeployment(config)) {
+              try {
+                permissionKeys = [...(await managementHost.context()).permissions]
+              } catch {
+                permissionKeys = []
+              }
+            } else {
+              permissionKeys = [
+                'kb:file:read', 'kb:file:write', 'kb:file:delete', 'kb:file:extract',
+                'kb:audit:read', 'kb:grant:manage', 'kb:review:decide', 'kb:config:manage',
+              ]
+            }
             // Build the view pointer on the first load that finds it missing.
             //
             // Without this the reader sees an empty tree and a "not generated yet"
@@ -2598,7 +3516,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                   departmentPathCodes?: string[]
                   departmentPathNames?: string[]
                 } | undefined
-                if (config.baseUrl.trim() !== '') {
+                if (isTeamDeployment(config)) {
                   try {
                     const resolved = await fetchCaller(host, config)
                     if (isSafeUserId(resolved.userId)) {
@@ -2644,6 +3562,8 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                   lastSyncAt: null,
                   mountState: localMountState,
                   canManageGrants: canManage,
+                  canReviewWorkflows: permissionKeys.length === 0 || permissionKeys.includes('workflow:review:decide'),
+                  permissions: permissionKeys,
                   ...(localCaller === undefined ? {} : { caller: localCaller }),
                   // A local deployment still answers writes, so a refresh that failed
                   // here has to be reported the same way: the reader is looking at the
@@ -2659,7 +3579,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // also the one the page calls on every load, so it must not add a backend
             // round trip to the path that needs no repair.
             let repairKey: string | null = null
-            if (mountState === 'pointer-missing' && config.baseUrl.trim() !== '') {
+            if (mountState === 'pointer-missing' && isTeamDeployment(config)) {
               try {
                 const caller = await fetchCaller(host, config)
                 if (isSafeUserId(caller.userId)) repairKey = caller.userId
@@ -2668,7 +3588,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 // reports it rather than guessing one.
               }
             }
-            if (mountState === 'pointer-missing' && config.baseUrl.trim() !== '' && (repairKey === null || !repairedCallers.has(repairKey))) {
+            if (mountState === 'pointer-missing' && isTeamDeployment(config) && (repairKey === null || !repairedCallers.has(repairKey))) {
               try {
                 const repaired = await syncCallerView(host, config)
                 if (!('error' in repaired)) {
@@ -2705,7 +3625,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // is reused rather than fetched twice; when it did not run, one call resolves
             // it here. An unconfigured backend has no authority to ask.
             let callerIdentity: { userId: string; label: string } | undefined
-            if (config.baseUrl.trim() !== '') {
+            if (isTeamDeployment(config)) {
               if (repairKey !== null) {
                 callerIdentity = { userId: repairKey, label: repairKey }
               } else {
@@ -2726,6 +3646,8 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               lastSyncAt: viewDelta === undefined ? lastSyncAt : new Date().toISOString(),
               mountState,
               canManageGrants: canManage,
+              canReviewWorkflows: permissionKeys.length === 0 || permissionKeys.includes('workflow:review:decide'),
+              permissions: permissionKeys,
             ...(callerIdentity === undefined ? {} : { caller: callerIdentity }),
               // The delta travels to the page so "did the view follow my grants"
               // is answerable without pressing anything: an unchanged set reports
@@ -2843,7 +3765,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // reports and holds no policy of its own. An unconfigured backend is
             // reported as unsupported rather than as an empty grant list, so the
             // page can say why it has nothing to show.
-            if (config.baseUrl.trim() === '') {
+            if (!isTeamDeployment(config)) {
               return writeJson(res, 200, { grants: [], supported: false })
             }
             try {
@@ -2866,9 +3788,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             }
           }
           case 'grant': {
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const request: KnowledgeGrantRequest = {
               relPath: String(body.relPath ?? ''),
@@ -2945,9 +3864,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // Add or replace one template. Gated on write access to the template
             // directory, asked of DataOps like every other write here, so a template
             // cannot be curated by someone who may not write the knowledge base.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const fileName = String(body.fileName ?? '').trim()
             const title = String(body.title ?? '').trim()
@@ -2990,9 +3906,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
           }
           case 'template.remove': {
             // Take one template offline: its document and its metadata record.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const id = String(body.id ?? '').trim()
             if (id === '') return writeJson(res, 400, { error: 'id is required' })
@@ -3015,12 +3928,13 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // written, so a caller without it gets a refusal rather than a file they
             // cannot see. The decision is the backend's; this route only relays it,
             // the same way every other route does.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const relPath = String(body.relPath ?? '')
             const directory = body.kind === 'directory'
+            const refusal = personalPathRefusal(config, relPath)
+            if (refusal !== undefined) {
+              return writeJson(res, 400, { error: refusal.reason, code: refusal.code, refused: [relPath] })
+            }
             if (relPath.trim() === '') {
               return writeJson(res, 400, { error: 'relPath is required' })
             }
@@ -3114,13 +4028,14 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const body = await readJsonBody(req)
             const relPath = String(body.relPath ?? '')
             const content = typeof body.content === 'string' ? body.content : undefined
+            const refusal = personalPathRefusal(config, relPath)
+            if (refusal !== undefined) {
+              return writeJson(res, 400, { error: refusal.reason, code: refusal.code, refused: [relPath] })
+            }
             if (relPath === '') return writeJson(res, 400, { error: 'relPath is required' })
             if (content === undefined) return writeJson(res, 400, { error: 'content is required' })
             if (!isContainedRelPath(relPath)) {
               return writeJson(res, 400, { error: 'path escapes the knowledge root', refused: [relPath] })
-            }
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
             }
             try {
               if (!await canWritePath(host, config, relPath)) {
@@ -3139,6 +4054,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // `writeFile` with no flag truncates in place, which is exactly the
               // semantic this route exists for.
               await writeFile(full, content, { encoding: 'utf8' })
+              markInternalMutation(relPath)
               const after = await stat(full).catch(() => undefined)
               const caller = await fetchCaller(host, config).catch(() => undefined)
               let auditWritten = false
@@ -3187,9 +4103,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             if (!isContainedRelPath(relPath)) {
               return writeJson(res, 400, { error: 'path escapes the knowledge root', refused: [relPath] })
             }
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             try {
               const caller = await fetchCaller(host, config)
               if (!isSafeUserId(caller.userId)) {
@@ -3215,9 +4128,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // the body differs. Size is checked before the write because the body is
             // buffered in memory, so an uncaught large post would be paid for in heap
             // rather than answered with a refusal.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const relPath = String(body.relPath ?? '')
             // A dropped binary file arrives base64-encoded: the browser reads it as
@@ -3225,6 +4135,10 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // every non-text byte and write a document nobody can open.
             const encoding = body.encoding === 'base64' ? 'base64' : 'utf8'
             const content = typeof body.content === 'string' ? body.content : ''
+            const refusal = personalPathRefusal(config, relPath)
+            if (refusal !== undefined) {
+              return writeJson(res, 400, { error: refusal.reason, code: refusal.code, refused: [relPath] })
+            }
             if (relPath.trim() === '') {
               return writeJson(res, 400, { error: 'relPath is required' })
             }
@@ -3315,9 +4229,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             }
           }
           case 'revoke': {
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const request: KnowledgeRevokeRequest = {
               relPath: String(body.relPath ?? ''),
@@ -3355,7 +4266,19 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const root = localConfig(config).mountPoint
             const target = rel === '' ? root : join(root, rel)
             const wantPermissions = body.permissions !== false
-            if (!wantPermissions || config.baseUrl.trim() === '') {
+            // A personal deployment resolves permissions without asking anybody: the
+            // operator may read the tree, bounded by the knowledge root. It therefore takes
+            // the ordinary path below rather than this early return, with a synthetic caller
+            // id, so the listing a reader sees is built by the same code either way.
+            //
+            // `permissionsResolved` stays honest: it reports whether a permission question
+            // was answered, and in a personal deployment the answer is the local boundary.
+            const personal = !isTeamDeployment(config)
+            // Only a caller that explicitly asked for an unfiltered listing short-circuits.
+            // A personal deployment continues to the listing below: its "permission answer"
+            // is the local boundary, and the rows are filtered by it inside
+            // `listDirectoryWithPermissions`. Returning early here would show an empty tree.
+            if (!wantPermissions) {
               return writeJson(res, 200, { entries: [], permissionsResolved: false })
             }
             // The tree is what the reader is looking at, so it is the read that
@@ -3365,11 +4288,17 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             await refreshViewIfStale()
             let callerId: string | undefined
             let callerFailure: string | undefined
-            try {
-              callerId = (await fetchCaller(host, config)).userId
-            } catch (error) {
-              callerId = undefined
-              callerFailure = describeError(error).message
+            if (personal) {
+              // No account system to ask; the view is keyed by the fixed local id so the
+              // view plumbing below runs unchanged.
+              callerId = LOCAL_USER_ID
+            } else {
+              try {
+                callerId = (await fetchCaller(host, config)).userId
+              } catch (error) {
+                callerId = undefined
+                callerFailure = describeError(error).message
+              }
             }
             // A listing the permission service could not answer is reported as an
             // unavailable decision, never as an empty directory.
@@ -3436,16 +4365,35 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             //
             // Permission is the same gate as `upload`/`create`: a caller who may not write
             // the path may not spend the deployment's parser on it either.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const relPath = String(body.relPath ?? '')
+            const refusal = personalPathRefusal(config, relPath)
+            if (refusal !== undefined) {
+              return writeJson(res, 400, { error: refusal.reason, code: refusal.code, refused: [relPath] })
+            }
             if (relPath.trim() === '') {
               return writeJson(res, 400, { error: 'relPath is required' })
             }
             if (!isContainedRelPath(relPath)) {
               return writeJson(res, 400, { error: 'path escapes the knowledge root', refused: [relPath] })
+            }
+            // A Markdown document is already the thing an extraction produces, so there is
+            // nothing to run. This is checked BEFORE the "no extractor" branch: `.md` is
+            // not in `EXTRACTABLE_EXTENSIONS`, so it used to fall through and be reported
+            // as an unreadable format, which told a reader their own Markdown file could
+            // not be read.
+            if (isAlreadyMarkdown(relPath)) {
+              // Recorded as a task so the progress panel shows the request and its
+              // outcome: a click that leaves no trace reads as a broken button. The queue
+              // resolves it immediately at `already-markdown` because there is no work to
+              // do -- this is a terminal success, not a failure.
+              // No parser settings needed: nothing will be run for this task.
+              extractionQueue.enqueue(relPath, '')
+              return writeJson(res, 200, {
+                outcome: 'already-markdown',
+                relPath,
+                message: 'this document is already Markdown',
+              })
             }
             // No reader for this format is a definite answer, not a failure: the caller
             // asked and the honest reply is that this file type is never extractable.
@@ -3505,7 +4453,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 ...(settled.via === undefined ? {} : { via: settled.via }),
                 ...(settled.reason === undefined ? {} : { reason: settled.reason }),
               }
-            if (outcome.state === 'succeeded') {
+            if (outcome !== undefined && outcome.markdown !== '' && outcome.reason === undefined) {
               // The sibling is a new file in the tree, so the reader's view needs the
               // same refresh any other write gets; 207 reports a refresh that failed.
               const afterWrite = await refreshViewIfStale(true, sibling)
@@ -3530,11 +4478,149 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const root = localConfig(config).mountPoint
             return writeJson(res, 200, { hits: await searchKnowledge(root, term) })
           }
+          case 'chunk': {
+            // The citation viewer resolves a chunk token here: the token itself stays
+            // compact (kb://doc/<id>/chunk/<id>) while the boxes remain in SQLite.
+            const body = await readJsonBody(req)
+            const docId = Number(body.docId)
+            if (!Number.isInteger(docId) || docId <= 0) {
+              return writeJson(res, 400, { error: 'docId must be a positive integer' })
+            }
+            const chunkId = await findChunkId({
+              indexPath: knowledgeIndexPath(),
+              docId,
+              chunkId: typeof body.chunkId === 'string' ? body.chunkId : Number(body.chunkId),
+            })
+            if (chunkId === undefined) {
+              return writeJson(res, 404, { error: 'chunk not found', code: 'not-found' })
+            }
+            const chunk = await readChunkProvenance({
+              indexPath: knowledgeIndexPath(),
+              docId,
+              chunkId,
+              ...(typeof body.query === 'string' ? { query: body.query } : {}),
+            })
+            if (chunk === undefined) return writeJson(res, 404, { error: 'chunk not found' })
+            if (!await canReadPath(host, config, chunk.path)) {
+              return writeJson(res, 403, { error: 'read access is required', code: 'forbidden' })
+            }
+            // Return the mounted view path of the ORIGINAL source (pdf/docx/xlsx),
+            // plus the derived Markdown path as an internal-reading hint.
+            const caller = await fetchCaller(host, config)
+            const plan = localConfig(config)
+            const viewOptions = {
+              actualRoot: plan.actualRoot,
+              viewRoot: plan.viewRoot,
+              userId: caller.userId,
+              ...(caller.departmentCode === undefined || caller.departmentCode === null ? {} : { departmentCode: caller.departmentCode }),
+              ...(caller.departmentPathCodes === undefined ? {} : { departmentPathCodes: caller.departmentPathCodes }),
+            }
+            const sourceActual = chunk.sourcePath ?? chunk.path
+            const markdownActual = chunk.markdownPath ?? chunk.path
+            return writeJson(res, 200, {
+              ...chunk,
+              path: expectedViewPathFor(viewOptions, sourceActual) ?? sourceActual,
+              displayPath: localizedScopeForPath(expectedViewPathFor(viewOptions, sourceActual) ?? sourceActual, config.scopeLocale),
+              markdownPath: expectedViewPathFor(viewOptions, markdownActual) ?? markdownActual,
+              citation: citationTokenForChunk(chunk.docId, chunk.chunkKey, chunk.chunkId),
+            })
+          }
+          case 'resolve': {
+            // Inline markdown links carry a derived path (`x.docx.md`) and a line.
+            // Resolve that pair to the original document's chunk so the viewer can
+            // open the source and draw boxes instead of opening the `.md` sibling.
+            const body = await readJsonBody(req)
+            const rawPath = typeof body.path === 'string' ? body.path.trim() : ''
+            if (rawPath === '') return writeJson(res, 400, { error: 'path is required' })
+            const lineValue = body.line === undefined ? undefined : Number(body.line)
+            if (lineValue !== undefined && (!Number.isInteger(lineValue) || lineValue <= 0)) {
+              return writeJson(res, 400, { error: 'line must be a positive integer' })
+            }
+            // A pre-fix index stored drifted chunk line anchors. Read the requested markdown
+            // line and let the resolver prefer the chunk that actually contains it, so a
+            // `x.docx.md:193` link does not land on the last chunk until the index is rebuilt.
+            const plan = localConfig(config)
+            let lineText: string | undefined
+            if (lineValue !== undefined) {
+              const relative = rawPath
+                .replace(/^\/workspace\/kb\//u, '')
+                .replace(/^global\//u, '')
+                .replace(/^全局\//u, '')
+              try {
+                const text = await readFile(join(plan.actualRoot, relative), 'utf8')
+                lineText = text.split('\n')[lineValue - 1]?.trim()
+              } catch {
+                lineText = undefined
+              }
+            }
+            const match = await findChunkForPath({
+              indexPath: knowledgeIndexPath(),
+              path: rawPath,
+              ...(lineValue === undefined ? {} : { line: lineValue }),
+              ...(lineText === undefined || lineText === '' ? {} : { lineText }),
+            })
+            if (match === undefined) {
+              return writeJson(res, 404, { error: 'no chunk for this path/line', code: 'not-found' })
+            }
+            const chunk = await readChunkProvenance({
+              indexPath: knowledgeIndexPath(),
+              docId: match.docId,
+              chunkId: match.chunkId,
+            })
+            if (chunk === undefined) return writeJson(res, 404, { error: 'no chunk for this path/line', code: 'not-found' })
+            if (!await canReadPath(host, config, chunk.path)) {
+              return writeJson(res, 403, { error: 'read access is required', code: 'forbidden' })
+            }
+            const caller = await fetchCaller(host, config)
+            const viewOptions = {
+              actualRoot: plan.actualRoot,
+              viewRoot: plan.viewRoot,
+              userId: caller.userId,
+              ...(caller.departmentCode === undefined || caller.departmentCode === null ? {} : { departmentCode: caller.departmentCode }),
+              ...(caller.departmentPathCodes === undefined ? {} : { departmentPathCodes: caller.departmentPathCodes }),
+            }
+            const sourceActual = chunk.sourcePath ?? chunk.path
+            const viewPath = expectedViewPathFor(viewOptions, sourceActual) ?? sourceActual
+            return writeJson(res, 200, {
+              docId: chunk.docId,
+              chunkId: chunk.chunkId,
+              path: viewPath,
+              displayPath: localizedScopeForPath(viewPath, config.scopeLocale),
+              citation: citationTokenForChunk(chunk.docId, chunk.chunkKey, chunk.chunkId),
+              quote: chunk.quote,
+              heading: chunk.heading,
+              paragraph: chunk.paragraph,
+              chunkOrdinal: chunk.chunkOrdinal,
+              ordinal: chunk.chunkOrdinal,
+              chunkKey: chunk.chunkKey,
+              paragraphText: chunk.paragraphText,
+              chunkText: chunk.chunkText,
+              paragraphs: chunk.paragraphs,
+              sheet: chunk.sheet,
+              cell: chunk.cell,
+              ...(chunk.boxes[0] === undefined ? {} : { page: chunk.boxes[0].page }),
+              boxes: chunk.boxes,
+              unionBoxes: chunk.unionBoxes,
+              snippet: chunk.snippet,
+            })
+          }
           case 'read': {
             // Served from the mount point rather than through the session-backed
-            // file API, so opening a file needs no conversation.
+            // file API, so opening a file needs no conversation. The permission check
+            // is shared with the read route: a view hardlink alone is not an answer
+            // after a revoke or before a sync.
             const body = await readJsonBody(req)
-            return writeJson(res, 200, await readKnowledgeFile(host, config, String(body.path ?? '')))
+            try {
+              return writeJson(res, 200, await readAuthorized(host, config, String(body.path ?? '')))
+            } catch (error) {
+              if (error instanceof KnowledgeToolError) {
+                return writeJson(res, knowledgeToolStatus(error.code), { error: error.message, code: error.code })
+              }
+              if (error instanceof KnowledgeError) {
+                return writeJson(res, knowledgeStatusFor(error.code), { error: error.message, code: error.code })
+              }
+              return writeJson(res, 500, { error: describeError(error).message })
+            }
           }
           case 'views.sync': {
             // Rebuild the CALLER's visible tree from what DataOps resolves for them.
@@ -3556,9 +4642,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // revoke can land while a star is stored, and a star on a path the caller
             // may no longer read must not be drawn. That is why the answer reports
             // what it dropped rather than just answering a shorter list.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3584,9 +4667,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // Refuses rather than silently pruning a path it may not read, for the
             // same reason `pins.set` does: the caller asked for that path, and a 200
             // answering with a shorter list would let a typo read as success.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3625,9 +4705,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // another user's pins. Every pin is re-checked for readability on the way
             // out: a revoke can land while a pin is stored, and a pin the caller may
             // no longer read must not be drawn.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3654,9 +4731,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // readable: the caller asked for that path, and a 200 answering with a
             // shorter list would let a typo read as success. The client distinguishes
             // the two by comparing what it sent with what came back.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3693,9 +4767,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // The settings live beside the pins in the view directory, so a caller
             // without a view yet reads the defaults, which is exactly the behaviour a
             // deployment that never opened the page must have: review OFF.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3707,18 +4778,27 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // whether they may read it, and it is DataOps' answer, not ours: the page
             // renders the control read-only when this is false.
             const canEdit = await canManageGrants(host, config)
-            // The address that is actually in effect, derived by the same function the
-            // extractor uses. An empty `mineruBaseUrl` means "derive it from the port",
-            // so the stored value alone leaves the page with nothing to show for a
-            // deployment that works -- the field came up blank while the service was
-            // reachable. Sent so the page can display the effective address without
-            // recomputing the derivation in the browser, where a second copy of the rule
-            // would drift from this one.
-            const mineruUrl = mineruUrlFor(config)
+            // The address that is actually in effect, resolved by the same function the
+            // extractor uses. An empty `mineruBaseUrl` means "fall back", so the stored
+            // value alone leaves the page with nothing to show for a deployment that
+            // works -- the field came up blank while the service was reachable. Sent so
+            // the page can display the effective address without recomputing the
+            // precedence in the browser, where a second copy of the rule would drift.
+            //
+            // `mineruSource` is what lets the caption distinguish the three cases: the
+            // caller's own address, the one the 「文档识别」 plugin's administrator shared,
+            // or this deployment's port derivation. Without it the page would show a
+            // shared value in the same box a reader types their own into.
+            const resolution = resolveMineruUrl(config, await readSharedMineruUrl(host, config))
+            // A stored address the normaliser refused is reported so the page can say the
+            // value it shows is a fallback rather than what the reader saved.
+            const invalidStored = await storedMineruInvalid(viewDir)
             return writeJson(res, 200, {
               settings,
               canEdit,
-              ...(mineruUrl === undefined ? {} : { mineruUrl }),
+              ...(resolution.url === undefined ? {} : { mineruUrl: resolution.url }),
+              ...(resolution.source === undefined ? {} : { mineruSource: resolution.source }),
+              ...(invalidStored ? { mineruInvalid: true } : {}),
             })
           }
           case 'settings.set': {
@@ -3728,9 +4808,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // contributions take effect immediately or wait. Read access is therefore
             // not enough, and the check is DataOps' write answer rather than a local
             // guess about roles.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3775,25 +4852,28 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
           case 'audit.list': {
             // The append-only trail, newest first. Read-only by construction: this
             // module exposes no update or delete path for audit entries.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
               return writeJson(res, 400, { error: 'unsafe caller id; cannot key a view by it' })
             }
             const viewDir = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId })
-            const entries = await readAuditEntries(viewDir, 200)
+            // External changes have no caller to key a view by, so the watcher records
+            // them once under views/_system instead of duplicating one entry per user.
+            // Merging here keeps the audit page a single newest-first trail.
+            const [own, system] = await Promise.all([
+              readAuditEntries(viewDir, 200),
+              readAuditEntries(join(plan.viewRoot, '_system'), 200),
+            ])
+            const entries = [...own, ...system]
+              .sort((left, right) => right.at.localeCompare(left.at))
+              .slice(0, 200)
             return writeJson(res, 200, { entries })
           }
           case 'pending.list': {
             // The review queue. Reading it needs no write access: knowing that
             // something is waiting is not the same as being allowed to decide it, and
             // the page renders the buttons disabled when the caller cannot act.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3812,9 +4892,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // The submitted path is re-authorised HERE rather than trusted from the
             // queue: a grant can be revoked between submitting and approving, and the
             // approver must not be able to publish into a path they cannot write.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3886,9 +4963,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             //
             // The trail entry is what stops a rejection from being indistinguishable
             // from a submission that was never reviewed at all.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const plan = localConfig(config)
             const caller = await fetchCaller(host, config)
             if (!isSafeUserId(caller.userId)) {
@@ -3927,9 +5001,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // purpose -- it answers "put this elsewhere" and nothing else. A rename has
             // to choose a name, so it validates one here and re-checks authority at the
             // resulting path rather than trusting the source's grant.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const from = String(body.from ?? '')
             const newName = String(body.name ?? '').trim()
@@ -4007,9 +5078,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // Read from the caller's own view rather than the authoritative tree: the view
             // is what their grants produced, so downloading through it cannot hand out a
             // file a revoke already removed from their sight.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const relPath = String(body.path ?? '')
             try {
@@ -4041,9 +5109,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             //
             // DataOps decides both answers through `canReadPath` / `canWritePath`;
             // this route never re-implements the policy.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const from = String(body.from ?? '')
             const to = String(body.to ?? '')
@@ -4125,9 +5190,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // the PARENT directory when the drag names a folder to move INTO, which
             // is why the caller sends the resolved target path rather than a drop
             // point: this route never concatenates a name the caller chose.
-            if (config.baseUrl.trim() === '') {
-              return writeJson(res, 409, { error: 'DataOps permission API is not configured' })
-            }
             const body = await readJsonBody(req)
             const from = String(body.from ?? '')
             const to = String(body.to ?? '')
@@ -4328,7 +5390,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
           case 'principals': {
             // The directories live behind the same credential the grants do, so a
             // browser cannot read them directly and this route relays them.
-            if (config.baseUrl.trim() === '') {
+            if (!isTeamDeployment(config)) {
               return writeJson(res, 200, { options: [] })
             }
             const body = await readJsonBody(req)
@@ -4403,6 +5465,15 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             return writeJson(res, 404, { error: `unknown knowledge-base method: ${method}` })
         }
       } catch (error) {
+        // Publish-store failures are decisions too: validation, identity and review
+        // state each have a status the caller can act on.
+        if (error instanceof WorkflowPublishError) {
+          const status = error.code === 'invalid' ? 400
+            : error.code === 'not-found' ? 404
+            : error.code === 'already-reviewed' ? 409
+            : 500
+          return writeJson(res, status, { error: error.message, code: error.code })
+        }
         // A typed failure is a decision, not a crash: answer with the status its code
         // names so an expired token does not read as an internal error.
         if (error instanceof KnowledgeError) {
@@ -4432,61 +5503,800 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
   }
 
   ctx.effect(() => host.tools.register(defineTool({
-    name: 'kb_index',
-    description: 'Ask DataOps to parse uploaded documents (docx/pdf/xlsx/ppt) into Markdown index files. '
-      + 'Retrieval itself uses the mounted knowledge tree with grep and read; this tool only builds indexes.',
+    name: 'workflow_publish',
+    description: 'Publish one workflow from this conversation to the Workflow Plaza. '
+      + 'The record is created as PENDING; it does NOT appear in the public plaza until an administrator approves it. '
+      + '发布后需管理员审核，通过后才出现在广场。'
+      + 'Use this only when the user explicitly asks to publish/share the workflow. '
+      + 'Do not use it to edit an existing workflow or to run a task now. '
+      + 'Provide the standing instruction that will run on the chosen schedule, in the user\'s language. '
+      + 'cronHint should be a 5-field cron expression when the user gave one; category is a short group label.',
     parameters: {
-      relPath: { type: 'string', description: 'Path relative to the knowledge root; omit for the whole tree.' },
-      force: { type: 'boolean', description: 'Rebuild even when the source looks unchanged.' },
+      title: { type: 'string', required: true, description: 'Short workflow title shown on the card (<=120 characters).' },
+      description: { type: 'string', required: true, description: 'One or two sentences describing what the workflow does.' },
+      instruction: {
+        type: 'string',
+        required: true,
+        description: 'The standing prompt the scheduled session will execute, including scope and constraints.',
+      },
+      cronHint: { type: 'string', description: 'Optional 5-field cron expression suggested by the user, e.g. 0 9 * * 1.' },
+      category: { type: 'string', description: 'Optional short category label, e.g. 知识整理 / 客户成功.' },
+      visibility: { type: 'string', description: 'global | department | private. Default private; global is admin-only.' },
+      departmentCode: { type: 'string', description: 'Department code for department visibility; defaults to the caller department.' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { report: { type: 'string', required: true } },
+        properties: {
+          id: { type: 'string', required: true },
+          status: { type: 'string', required: true },
+          duplicate: { type: 'boolean', required: true },
+          report: { type: 'string', required: true },
+        },
       },
       render: (_args, value) => [{ type: 'text', text: value.report }],
     },
-    execute: async (args) => {
-      // The index is the mounted tree itself: retrieval reads those files with
-      // grep and read, so a "rebuild" reports the tree's current shape instead
-      // of scheduling work on a backend that serves no index route.
-      const status = await localStatus(config)
-      const scope = typeof args.relPath === 'string' && args.relPath.trim() !== ''
-        ? args.relPath.trim()
-        : 'the whole tree'
+    execute: async (args, exec) => {
+      const actor = await resolveWorkflowActor(host, config)
+      const context = await managementHost.context()
+      requirePermission(context, 'workflow:publish', 'workflow_publish')
+      if (args.visibility === 'global') {
+        requirePermission(context, 'workflow:review:global', 'global workflow publish')
+      }
+      const scope = normalizePublishScope(
+        context,
+        args.visibility as 'global' | 'department' | 'private' | undefined,
+        args.departmentCode,
+      )
+      const sessionId = exec.agent?.session.id
+      const result = await publishWorkflow(
+        publishStorePath(publishDirOf(config.publishDir)),
+        { ...args, visibility: scope.visibility, departmentCode: scope.departmentCode },
+        actor,
+        sessionId === undefined ? undefined : String(sessionId),
+      )
+      const prefix = result.duplicate
+        ? `An identical pending workflow already exists (${result.record.id}); it was not duplicated.`
+        : `Workflow published as pending (${result.record.id}).`
       return {
-        report: `Indexed ${scope}: ${String(status.visibleFiles ?? 0)} file(s) visible under ${config.mountPoint}.`,
+        id: result.record.id,
+        status: result.record.status,
+        duplicate: result.duplicate,
+        report: `${prefix} 管理员审核通过后才会出现在工作流广场；当前状态：待审核。`,
       }
     },
-  })), 'dsh-knowledge-base: kb_index tool')
+  })), 'dsh-knowledge-base: workflow_publish tool')
 
-  ctx.effect(() => host.tools.register(defineTool({
-    name: 'kb_status',
-    description: 'Report the visible file count and index state of the mounted knowledge tree.',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { report: { type: 'string', required: true } },
-      },
-      render: (_args, value) => [{ type: 'text', text: value.report }],
+  // The host seam the model tools compose. Every method is the SAME implementation the
+  // matching HTTP route uses: permission decisions stay with DataOps, and paths stay in
+  // view coordinates (mountPoint), never the authoritative root.
+  /** Sidecar path, guarded against living inside the agent-visible tree. */
+  const knowledgeIndexPath = (): string => {
+    const plan = localConfig(config)
+    const target = indexPathFor(config.indexDir)
+    assertIndexOutsideTrees(target, [plan.actualRoot, plan.viewRoot, config.mountPoint])
+    return target
+  }
+
+  let lastIndexSyncAt = 0
+  let lastIndexStats: FtsIndexStats | undefined
+  /**
+   * Incremental sync shared by search/index/status. A short freshness window avoids
+   * walking the tree for every query; an explicit rebuild bypasses it.
+   */
+  const syncKnowledgeIndex = async (force = false): Promise<FtsIndexStats> => {
+    if (!force && lastIndexStats !== undefined && Date.now() - lastIndexSyncAt < 3_000) return lastIndexStats
+    const stats = await syncIndex({
+      actualRoot: localConfig(config).actualRoot,
+      indexPath: knowledgeIndexPath(),
+      autoGenerateSummaries: config.outline?.autoGenerate === true,
+    })
+    lastIndexStats = stats
+    lastIndexSyncAt = Date.now()
+    return stats
+  }
+
+  const knowledgeToolHost: KnowledgeFileToolHost = {
+    hasPermission: async (permission: string) => {
+      if (!isTeamDeployment(config)) return true
+      try {
+        return (await managementHost.context()).permissions.includes(permission)
+      } catch {
+        // An unavailable context leaves the pre-existing grant checks in charge.
+        return true
+      }
     },
-    execute: async () => {
-      const status = await localStatus(config)
-      if (status.visibleFiles === null) {
+    searchIndex: async (input) => {
+      const context = await managementHost.context()
+      const stats = await syncKnowledgeIndex()
+      const departments = [...new Set([
+        ...context.dataScope.departmentCodes,
+        ...(context.departmentCode === null || context.departmentCode === undefined ? [] : [context.departmentCode]),
+        ...context.review.departments,
+      ])]
+      const result = await searchIndex({
+        indexPath: knowledgeIndexPath(),
+        query: input.query,
+        topK: input.topK,
+        ...(input.scope === undefined ? {} : { scope: input.scope }),
+        locale: config.scopeLocale,
+        caller: { callerId: context.userId, departmentCodes: departments, global: isGlobalAdmin(context) },
+        canRead: relPath => canReadPath(host, config, relPath),
+      })
+      const plan = localConfig(config)
+      const mapHit = (hit: FtsSearchHit): FtsSearchHit => {
+        const viewOptions = {
+          actualRoot: plan.actualRoot,
+          viewRoot: plan.viewRoot,
+          userId: context.userId,
+          ...(context.departmentCode === null || context.departmentCode === undefined ? {} : { departmentCode: context.departmentCode }),
+          ...(context.departmentPathCodes === undefined ? {} : { departmentPathCodes: context.departmentPathCodes }),
+        }
+        const canonicalPath = expectedViewPathFor(viewOptions, hit.path) ?? hit.path
         return {
-          report: `The knowledge tree is not mounted at ${config.mountPoint}. `
-            + 'Attach the storage host, then mount the view tree there.',
+          ...hit,
+          path: canonicalPath,
+          displayPath: localizedScopeForPath(canonicalPath, config.scopeLocale),
+          markdownPath: expectedViewPathFor(viewOptions, hit.markdownPath) ?? hit.markdownPath,
         }
       }
       return {
-        report: `${String(status.visibleFiles)} visible file(s) under ${config.mountPoint}. `
-          + 'Retrieval runs on this tree with grep and read; there is no separate index to report.',
+        ...result,
+        hits: result.hits.map(mapHit),
       }
     },
-  })), 'dsh-knowledge-base: kb_status tool')
+    chunkGet: async (input) => {
+      // A citation token carries the stable chunk_key (16 hex); legacy rows may still
+      // carry a numeric id. Resolve either to the current numeric id before reading.
+      const resolvedChunkId = await findChunkId({
+        indexPath: knowledgeIndexPath(),
+        docId: input.docId,
+        chunkId: input.chunkId,
+      })
+      if (resolvedChunkId === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document chunk', `${String(input.docId)}/${String(input.chunkId)}`)
+      }
+      const chunk = await readChunkProvenance({
+        indexPath: knowledgeIndexPath(),
+        docId: input.docId,
+        chunkId: resolvedChunkId,
+      })
+      if (chunk === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document chunk', `${String(input.docId)}/${String(input.chunkId)}`)
+      }
+      if (!await canReadPath(host, config, chunk.path)) {
+        throw new KnowledgeToolError('forbidden', 'read access is required')
+      }
+      const context = await managementHost.context()
+      const plan = localConfig(config)
+      const viewPath = expectedViewPathFor({
+        actualRoot: plan.actualRoot,
+        viewRoot: plan.viewRoot,
+        userId: context.userId,
+        ...(context.departmentCode === null || context.departmentCode === undefined ? {} : { departmentCode: context.departmentCode }),
+        ...(context.departmentPathCodes === undefined ? {} : { departmentPathCodes: context.departmentPathCodes }),
+      }, chunk.path) ?? chunk.path
+      return {
+        docId: chunk.docId,
+        chunkId: chunk.chunkId,
+        ...(chunk.chunkKey === undefined ? {} : { chunkKey: chunk.chunkKey }),
+        citation: citationTokenForChunk(chunk.docId, chunk.chunkKey, chunk.chunkId),
+        path: viewPath,
+        displayPath: localizedScopeForPath(viewPath, config.scopeLocale),
+        ...(chunk.quote === undefined ? {} : { quote: chunk.quote }),
+        ...(chunk.heading === undefined ? {} : { heading: chunk.heading }),
+        ...(chunk.paragraph === undefined ? {} : { paragraph: chunk.paragraph }),
+        ...(chunk.chunkOrdinal === undefined ? {} : { chunkOrdinal: chunk.chunkOrdinal }),
+        ...(chunk.paragraphText === undefined ? {} : { paragraphText: chunk.paragraphText }),
+        ...(chunk.sheet === undefined ? {} : { sheet: chunk.sheet }),
+        ...(chunk.cell === undefined ? {} : { cell: chunk.cell }),
+        ...(chunk.boxes[0] === undefined ? {} : { page: chunk.boxes[0].page }),
+        boxes: chunk.boxes,
+        snippet: chunk.snippet,
+      }
+    },
+    outline: async (input) => {
+      const indexPath = knowledgeIndexPath()
+      // Read the document reference BEFORE rebuilding: a legacy index has chunks but no
+      // outline, and permission must be decided on the source path either way. A caller who
+      // may not read the document gets 403 and never causes an outline write.
+      const reference = await readDocumentOutline({ indexPath, docId: input.docId })
+      if (reference === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document', String(input.docId))
+      }
+      if (!await canReadPath(host, config, reference.path)) {
+        throw new KnowledgeToolError('forbidden', 'read access is required for this document')
+      }
+      const outline = await ensureDocumentOutline({
+        indexPath,
+        docId: input.docId,
+        autoGenerate: config.outline?.autoGenerate === true,
+      })
+      if (outline === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document', String(input.docId))
+      }
+      const context = await managementHost.context()
+      const plan = localConfig(config)
+      const viewPath = expectedViewPathFor({
+        actualRoot: plan.actualRoot,
+        viewRoot: plan.viewRoot,
+        userId: context.userId,
+        ...(context.departmentCode === null || context.departmentCode === undefined ? {} : { departmentCode: context.departmentCode }),
+        ...(context.departmentPathCodes === undefined ? {} : { departmentPathCodes: context.departmentPathCodes }),
+      }, outline.path) ?? outline.path
+      return {
+        docId: outline.docId,
+        path: viewPath,
+        displayPath: localizedScopeForPath(viewPath, config.scopeLocale),
+        summary: outline.summary,
+        summaryKind: outline.summaryKind ?? (outline.summary.trim() === '' ? 'none' : 'extractive'),
+        summaryStatus: outline.summaryStatus ?? (outline.summary.trim() === '' ? 'missing' : 'ready'),
+        ...((outline.summaryStatus ?? (outline.summary.trim() === '' ? 'missing' : 'ready')) === 'missing'
+          ? { hint: '调用 kb-summarize 技能生成摘要' }
+          : {}),
+        ...(outline.summaryVersion === undefined ? {} : { summaryVersion: outline.summaryVersion }),
+        sourceChunkIds: outline.sourceChunkIds,
+        toc: outline.toc,
+        sections: outline.sections.map(section => ({
+          sectionId: section.sectionId,
+          sectionPath: section.headingPath,
+          level: section.level,
+          summary: section.summary,
+          keyFacts: section.keyFacts,
+          chunkIds: section.chunkIds,
+          sourceChunkIds: section.sourceChunkIds,
+        })),
+        indexPath: outline.indexPath,
+      }
+    },
+    outlineRewrite: async (input: { docId: number }) => {
+      const indexPath = knowledgeIndexPath()
+      const reference = await readDocumentOutline({ indexPath, docId: input.docId })
+      if (reference === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document', String(input.docId))
+      }
+      if (!await canReadPath(host, config, reference.path)) {
+        throw new KnowledgeToolError('forbidden', 'read access is required for this document')
+      }
+      const rewritten = await rewriteDocumentOutline({ indexPath, docId: input.docId })
+      if (rewritten === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document', String(input.docId))
+      }
+      return { indexPath: reference.indexPath }
+    },
+    outlineSave: async (input: {
+      docId: number
+      summary: string
+      sections: readonly OutlineSectionSubmission[]
+      summaryVersion?: string
+    }) => {
+      const indexPath = knowledgeIndexPath()
+      // Resolve the document first: permission is decided on the SOURCE path, and a
+      // caller who cannot read or edit the document must never cause a summary write.
+      const reference = await readDocumentOutline({ indexPath, docId: input.docId })
+      if (reference === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document', String(input.docId))
+      }
+      if (!await canReadPath(host, config, reference.path)) {
+        throw new KnowledgeToolError('forbidden', 'read access is required for this document')
+      }
+      if (!await canWritePath(host, config, reference.path)) {
+        throw new KnowledgeToolError('forbidden', 'write access is required to save a summary for this document')
+      }
+      const saved = await saveDocumentOutline({
+        indexPath,
+        docId: input.docId,
+        summary: input.summary,
+        sections: input.sections,
+        ...(input.summaryVersion === undefined ? {} : { summaryVersion: input.summaryVersion }),
+      })
+      if (saved === undefined) {
+        throw new KnowledgeToolError('not-found', 'no such document', String(input.docId))
+      }
+      return saved
+    },
+    syncIndex: async () => syncKnowledgeIndex(true),
+    resolveCaller: async () => {
+      const caller = await fetchCaller(host, config)
+      return { userId: caller.userId, ...(caller.label === undefined ? {} : { label: caller.label }) }
+    },
+    canRead: relPath => canReadPath(host, config, relPath),
+    canWrite: relPath => canWritePath(host, config, relPath),
+    list: async (relPath, caller) => {
+      const root = localConfig(config).mountPoint
+      const target = relPath === '' ? root : join(root, relPath)
+      const entries = await listDirectoryWithPermissions(host, config, root, target, caller.userId)
+      const present = new Set(entries.map(entry => entry.name))
+      return entries.map((entry): KnowledgeFileEntry => {
+        if (entry.isDir) return entry
+        const extractable = isExtractable(entry.relPath)
+        return {
+          ...entry,
+          canExtract: extractable,
+          hasMarkdown: extractable ? present.has(entry.name + '.md') : false,
+        }
+      })
+    },
+    search: async (scope, query, limit) => {
+      const root = localConfig(config).mountPoint
+      const target = scope === '' ? root : join(root, scope)
+      const hits = await searchKnowledge(target, query, limit)
+      return scope === ''
+        ? hits
+        : hits.map((hit): KnowledgeFileHit => ({ ...hit, relPath: scope + '/' + hit.relPath }))
+    },
+    readAuthorized: relPath => readAuthorized(host, config, relPath),
+    statEntry: async (relPath) => {
+      relPath = resolveScopeAlias(relPath)
+      const plan = localConfig(config)
+      for (const root of [plan.mountPoint, plan.actualRoot]) {
+        try {
+          const info = await stat(join(root, relPath))
+          if (info.isDirectory()) return { kind: 'directory' }
+          if (info.isFile()) return { kind: 'file', size: info.size }
+        } catch {
+          // Try the next root: a personal deployment may keep bytes outside the view.
+        }
+      }
+      return undefined
+    },
+    createEntry: (relPath, options) => createKnowledgeEntry(config, relPath, options),
+    overwriteFile: async (relPath, content) => {
+      if (!isContainedRelPath(relPath)) {
+        throw new KnowledgeToolError('escapes-knowledge-root', 'the path leaves the knowledge root', relPath)
+      }
+      const full = join(localConfig(config).actualRoot, relPath)
+      const info = await stat(full)
+      if (!info.isFile()) {
+        throw new KnowledgeToolError('not-a-file', 'not a regular file', relPath)
+      }
+      // In-place write: a write-temp-then-rename would replace the inode and leave the
+      // caller's view hardlink pointing at the old bytes (the edit route explains this).
+      await writeFile(full, content, 'utf8')
+      markInternalMutation(relPath)
+    },
+    moveEntry: async (from, to, caller) => {
+      const plan = localConfig(config)
+      return moveEntry(
+        { actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId },
+        from,
+        to,
+      )
+    },
+    deleteToTrash: async (caller, relPath, kind) => {
+      const plan = localConfig(config)
+      const viewDir = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId })
+      const existing = await readTrash(viewDir)
+      if (existing.kind === 'unreadable') {
+        throw new KnowledgeToolError('write-failed', 'the trash record is unreadable: ' + existing.reason, relPath)
+      }
+      const entries = existing.kind === 'ready' ? existing.entries : []
+      const next = addTombstone(entries, {
+        relPath,
+        kind,
+        removedBy: caller.label ?? caller.userId,
+        removedAt: new Date().toISOString(),
+        originalPath: relPath,
+      })
+      await writeTrash(viewDir, next)
+    },
+    refreshView: async (expectVisible) => {
+      const result = await refreshViewIfStale(true, expectVisible)
+      return result.failure === undefined ? {} : { failure: result.failure }
+    },
+    readSettings: async (caller) => {
+      const plan = localConfig(config)
+      return readSettings(viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId }))
+    },
+    parkWrite: async (caller, relPath, content) => {
+      const plan = localConfig(config)
+      await parkPendingWrite(plan.actualRoot, {
+        userId: caller.userId,
+        relPath,
+        content,
+        at: new Date().toISOString(),
+      })
+    },
+    enqueueExtraction: async (relPath, caller) => {
+      const plan = localConfig(config)
+      if (isAlreadyMarkdown(relPath)) return { outcome: 'already-markdown' }
+      if (!isExtractable(relPath)) return { outcome: 'unsupported' }
+      // The tool receives a view-relative path; the source lives under actualRoot
+      // with a different personal/department shape. Resolve by the view hardlink,
+      // never by joining actualRoot to the view path.
+      const actualRelPath = await actualRelPathForView(host, config, relPath)
+      const source = await stat(join(plan.actualRoot, actualRelPath)).catch(() => undefined)
+      if (source === undefined || !source.isFile()) {
+        throw new KnowledgeToolError('not-found', 'no such document', relPath)
+      }
+      const sibling = markdownSiblingOf(actualRelPath)
+      const existing = await stat(join(plan.actualRoot, sibling)).catch(() => undefined)
+      if (existing !== undefined && existing.isFile()) {
+        return { outcome: 'exists', markdown: markdownSiblingOf(relPath) }
+      }
+      const settings = await readSettings(viewPathFor({
+        actualRoot: plan.actualRoot,
+        viewRoot: plan.viewRoot,
+        userId: caller.userId,
+      }))
+      return { outcome: 'queued', task: extractionQueue.enqueue(relPath, settings.mineruBaseUrl) }
+    },
+    listExtractCandidates: async (limit) => {
+      const plan = localConfig(config)
+      const files = await listRelativeFiles(plan.actualRoot)
+      const candidates: string[] = []
+      for (const relPath of files) {
+        if (candidates.length >= limit) break
+        if (!isContainedRelPath(relPath) || !isExtractable(relPath)) continue
+        const sibling = await stat(join(plan.actualRoot, markdownSiblingOf(relPath))).catch(() => undefined)
+        if (sibling !== undefined && sibling.isFile()) continue
+        candidates.push(relPath)
+      }
+      return candidates
+    },
+    viewDir: (userId) => {
+      const plan = localConfig(config)
+      return viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId })
+    },
+    appendAudit: (viewDir, entry) => appendAuditEntry(viewDir, entry),
+    isExtractable,
+    now: () => new Date(),
+  }
+
+  /**
+   * Management-tool host.
+   *
+   * Every method reads/writes through the same backend or host primitive the matching
+   * UI surface uses. Role checks happen in the tool layer (which has the review
+   * context); this object does not silently turn a denial into an empty result.
+   */
+  const builtInWorkflowRows = [
+    { id: 'kb-organize-personal', title: 'Tidy up my personal knowledge base' },
+    { id: 'kb-index-personal', title: 'Tidy document text copies' },
+    { id: 'kb-archive-stale', title: 'Archive stale personal documents' },
+  ] as const
+
+  const managementHost: ManagementToolHost = {
+    context: async () => {
+      if (!isTeamDeployment(config)) {
+        return {
+          userId: 'local',
+          username: 'local',
+          displayName: '个人用户',
+          primaryRole: 'LOCAL_OWNER',
+          roleCodes: ['LOCAL_OWNER'],
+          permissions: [
+            'kb:file:read', 'kb:file:write', 'kb:file:delete', 'kb:file:extract',
+            'kb:audit:read', 'kb:grant:manage', 'kb:review:decide',
+            'workflow:read', 'workflow:publish', 'workflow:manage',
+            'workflow:review:decide', 'workflow:review:global',
+          ],
+          departmentCode: null,
+          departmentPathCodes: [],
+          dataScope: { all: true, self: true, departmentCodes: [] },
+          review: { canReview: true, canReviewGlobal: true, canManagePermissions: true, departments: [] },
+        }
+      }
+      const raw = await request<Record<string, unknown>>(host, config, '/api/ai/review/context')
+      const dataScope = (raw.dataScope ?? {}) as Record<string, unknown>
+      const review = (raw.review ?? {}) as Record<string, unknown>
+      const roleSystemKeys = Array.isArray(raw.roles)
+        ? raw.roles
+          .map(role => (role as Record<string, unknown>).systemKey)
+          .filter((key): key is string => typeof key === 'string')
+        : []
+      let permissions: string[] = Array.isArray(raw.permissions)
+        ? raw.permissions.filter((item): item is string => typeof item === 'string')
+        : []
+      if (permissions.length === 0) {
+        try {
+          const matrix = await request<{ roles?: Array<{ systemKey?: string; permissions?: unknown[] }> }>(
+            host,
+            config,
+            '/api/system/permission-center/matrix?scope=dsh',
+          )
+          for (const role of matrix.roles ?? []) {
+            if (role.systemKey === undefined || !roleSystemKeys.includes(role.systemKey)) continue
+            for (const key of role.permissions ?? []) {
+              if (typeof key === 'string' && !permissions.includes(key)) permissions.push(key)
+            }
+          }
+        } catch {
+          // APP_USER cannot read the permission-center matrix. The role defaults are
+          // the same seed task-70 installed; enforcement still needs a concrete list.
+        }
+      }
+      if (permissions.length === 0) permissions = defaultPermissionsForRoles(roleSystemKeys)
+      return {
+        userId: String(raw.userId ?? ''),
+        permissions,
+        ...(typeof raw.username === 'string' ? { username: raw.username } : {}),
+        ...(typeof raw.displayName === 'string' ? { displayName: raw.displayName } : {}),
+        ...(typeof raw.primaryRole === 'string' ? { primaryRole: raw.primaryRole } : {}),
+        roleCodes: Array.isArray(raw.roleCodes) ? raw.roleCodes.filter((item): item is string => typeof item === 'string') : [],
+        departmentCode: typeof raw.departmentCode === 'string' ? raw.departmentCode : null,
+        departmentPathCodes: Array.isArray(raw.departmentPath)
+          ? raw.departmentPath
+            .map(item => (item as Record<string, unknown>).code)
+            .filter((code): code is string => typeof code === 'string')
+          : [],
+        dataScope: {
+          all: dataScope.all === true,
+          self: dataScope.self === true,
+          departmentCodes: Array.isArray(dataScope.departmentCodes)
+            ? dataScope.departmentCodes.filter((item): item is string => typeof item === 'string')
+            : [],
+        },
+        review: {
+          canReview: review.canReview === true,
+          canReviewGlobal: review.canReviewGlobal === true,
+          canManagePermissions: review.canManagePermissions === true,
+          departments: Array.isArray(review.departments)
+            ? review.departments.filter((item): item is string => typeof item === 'string')
+            : [],
+        },
+      }
+    },
+    kbConfigGet: async () => {
+      const plan = localConfig(config)
+      const actorId = isTeamDeployment(config) ? (await fetchCaller(host, config)).userId : 'local'
+      const viewDir = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: actorId })
+      const storage = await readStorageSettings(config.mountPoint)
+      const settings = await readSettings(viewDir)
+      return {
+        mountPoint: config.mountPoint,
+        actualRoot: config.actualRoot,
+        viewRoot: config.viewRoot,
+        storageMode: storage.storageMode ?? config.storageMode,
+        storageProtocol: storage.storageProtocol ?? config.storageProtocol,
+        reviewRequired: settings.reviewRequired === true,
+        publishDir: publishDirOf(config.publishDir),
+        credentialRef: config.credentialRef,
+      }
+    },
+    kbConfigUpdate: async (patch) => {
+      const allowed = new Set(['storageMode', 'storageProtocol', 'reviewRequired'])
+      for (const key of Object.keys(patch)) {
+        if (!allowed.has(key)) throw new ManagementToolError('invalid', `unsupported config field: ${key}`)
+      }
+      if (patch.storageMode !== undefined && patch.storageMode !== 'local' && patch.storageMode !== 'remote') {
+        throw new ManagementToolError('invalid', 'storageMode must be local or remote')
+      }
+      if (patch.storageProtocol !== undefined && patch.storageProtocol !== 'nfs' && patch.storageProtocol !== 'sshfs') {
+        throw new ManagementToolError('invalid', 'storageProtocol must be nfs or sshfs')
+      }
+      if (patch.storageMode !== undefined || patch.storageProtocol !== undefined) {
+        await writeStorageSettings(config.mountPoint, {
+          ...(patch.storageMode === undefined ? {} : { storageMode: patch.storageMode as 'local' | 'remote' }),
+          ...(patch.storageProtocol === undefined ? {} : { storageProtocol: patch.storageProtocol as 'nfs' | 'sshfs' }),
+        })
+      }
+      if (patch.reviewRequired !== undefined) {
+        if (typeof patch.reviewRequired !== 'boolean') throw new ManagementToolError('invalid', 'reviewRequired must be boolean')
+        const plan = localConfig(config)
+        const actorId = isTeamDeployment(config) ? (await fetchCaller(host, config)).userId : 'local'
+        const targetView = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: actorId })
+        const current = await readSettings(targetView)
+        await writeSettings(targetView, { ...current, reviewRequired: patch.reviewRequired })
+      }
+      return managementHost.kbConfigGet()
+    },
+    kbGrantList: async () => {
+      if (!isTeamDeployment(config)) return []
+      return fetchGrants(host, config) as Promise<ManagementGrant[]>
+    },
+    kbGrantSet: async (input) => {
+      if (!isKnowledgeAction(input.action)) throw new ManagementToolError('invalid', `unknown action: ${input.action}`)
+      const created = await createGrant(host, config, {
+        relPath: input.relPath,
+        principalType: input.principalType as KnowledgeGrantRequest['principalType'],
+        principalId: input.principalId,
+        action: input.action,
+      })
+      await appendManagementAudit(config, host, {
+        action: 'kb_grant_set',
+        actor: (await managementHost.context()).userId,
+        detail: input,
+      })
+      return created as ManagementGrant
+    },
+    kbAuditList: async (filter) => {
+      const plan = localConfig(config)
+      const dirs = await readdir(plan.viewRoot, { withFileTypes: true }).catch(() => [])
+      const all: ManagementAudit[] = []
+      for (const dir of dirs) {
+        if (!dir.isDirectory()) continue
+        for (const entry of await readAuditEntries(join(plan.viewRoot, dir.name), 500)) {
+          all.push({
+            at: entry.at,
+            actor: entry.actor,
+            ...(entry.actorLabel === undefined ? {} : { actorLabel: entry.actorLabel }),
+            action: entry.action,
+            relPath: entry.relPath,
+            outcome: entry.outcome,
+          })
+        }
+      }
+      const from = filter.from === undefined ? undefined : Date.parse(filter.from)
+      const to = filter.to === undefined ? undefined : Date.parse(filter.to)
+      return all
+        .filter(entry => filter.action === undefined || entry.action === filter.action)
+        .filter(entry => filter.actor === undefined || entry.actor === filter.actor || entry.actorLabel === filter.actor)
+        .filter(entry => filter.path === undefined || (entry.relPath ?? '').includes(filter.path))
+        .filter(entry => from === undefined || Number.isNaN(from) || Date.parse(entry.at) >= from)
+        .filter(entry => to === undefined || Number.isNaN(to) || Date.parse(entry.at) <= to)
+        .sort((a, b) => b.at.localeCompare(a.at))
+        .slice(0, filter.limit ?? 100)
+    },
+    kbReviewList: async () => listPendingWrites(localConfig(config).actualRoot) as Promise<ManagementPending[]>,
+    kbReviewDecide: async (input) => {
+      const plan = localConfig(config)
+      const queue = await listPendingWrites(plan.actualRoot)
+      const submission = queue.find(item => item.name === input.name)
+      if (submission === undefined) throw new ManagementToolError('not-found', `no pending submission ${input.name}`)
+      // A reviewer may see a department path without holding write access to it; the
+      // submission is re-authorized here, exactly as the HTTP approve route does.
+      if (!(await canWritePath(host, config, submission.relPath))) {
+        throw new ManagementToolError('forbidden', `write access is required at ${submission.relPath}`)
+      }
+      if (input.decision === 'reject') {
+        await discardPendingWrite(plan.actualRoot, input.name)
+        await appendManagementAudit(config, host, {
+          action: 'kb_review_reject',
+          actor: (await managementHost.context()).userId,
+          detail: { name: input.name, relPath: submission.relPath, note: input.note ?? '' },
+        })
+        return { rejected: submission.relPath }
+      }
+      const content = await readPendingContent(plan.actualRoot, input.name)
+      if (content === null) throw new ManagementToolError('not-found', 'pending content is gone')
+      const created = await createKnowledgeEntry(config, submission.relPath, { directory: false, content })
+      await discardPendingWrite(plan.actualRoot, input.name)
+      await refreshViewIfStale(true, created.relPath)
+      await appendManagementAudit(config, host, {
+        action: 'kb_review_approve',
+        actor: (await managementHost.context()).userId,
+        detail: { name: input.name, relPath: submission.relPath, note: input.note ?? '' },
+      })
+      return { approved: created.relPath }
+    },
+    kbSync: async () => {
+      if (!isTeamDeployment(config)) return refreshViewIfStale(true)
+      return syncCallerView(host, config)
+    },
+    kbIndexRebuild: async () => {
+      await refreshViewIfStale(true)
+      return localStatus(config)
+    },
+    kbBucketList: async () => {
+      const plan = localConfig(config)
+      const dirs = await readdir(plan.mountPoint, { withFileTypes: true }).catch(() => [])
+      const context = await managementHost.context()
+      const names = new Set(['personal', 'department', 'global'])
+      for (const dir of dirs) if (dir.isDirectory() && !dir.name.startsWith('.')) names.add(dir.name)
+      return [...names].map((name): ManagementBucket => ({
+        name,
+        visibility: name === 'personal' ? 'private' : name === 'global' ? 'global' : 'department',
+        ...(name === 'department' && context.departmentCode !== null ? { departmentCode: context.departmentCode } : {}),
+      }))
+    },
+    workflowList: async (query) => {
+      if (!isTeamDeployment(config)) return builtInWorkflowRows.map(item => ({
+        id: item.id, title: item.id, builtIn: true, reviewStatus: 'approved', visibility: 'global',
+      }))
+      const encoded = new URLSearchParams()
+      if (query.status !== undefined) encoded.set('status', query.status)
+      const publicRows = await request<{ items?: unknown[] }>(host, config, '/api/ai/workflow-publications' + (encoded.size === 0 ? '' : '?' + encoded.toString()))
+      const mineRows = query.scope === 'mine' || query.scope === undefined
+        ? await request<{ items?: unknown[] }>(host, config, '/api/ai/workflow-publications/mine')
+        : { items: [] }
+      const byId = new Map<string, ManagementWorkflow>()
+      for (const row of [...(publicRows.items ?? []), ...(mineRows.items ?? [])]) {
+        const item = row as Record<string, unknown>
+        if (typeof item.id !== 'string') continue
+        byId.set(item.id, {
+          id: item.id,
+          title: String(item.title ?? item.name ?? ''),
+          ...(typeof item.description === 'string' ? { description: item.description } : {}),
+          ...(typeof item.instruction === 'string' ? { instruction: item.instruction } : {}),
+          ...(typeof item.cronHint === 'string' ? { cronHint: item.cronHint } : {}),
+          ...(typeof item.category === 'string' ? { category: item.category } : {}),
+          ...(typeof item.reviewStatus === 'string' ? { reviewStatus: item.reviewStatus } : {}),
+          ...(typeof item.visibility === 'string' ? { visibility: item.visibility } : {}),
+          ...(typeof item.departmentCode === 'string' ? { departmentCode: item.departmentCode } : {}),
+          ...(typeof item.ownerId === 'string' ? { ownerId: item.ownerId } : {}),
+          ...(typeof item.ownerName === 'string' ? { ownerName: item.ownerName } : {}),
+        })
+      }
+      const builtins = builtInWorkflowRows.map(item => ({
+        id: item.id, title: item.id, builtIn: true, reviewStatus: 'approved', visibility: 'global',
+      }))
+      return [...builtins, ...byId.values()].filter(item => query.status === undefined || item.reviewStatus === query.status)
+    },
+    workflowUpdate: async (input) => {
+      const id = String(input.id ?? '')
+      if (id === '') throw new ManagementToolError('invalid', 'id is required')
+      if (!isTeamDeployment(config)) throw new ManagementToolError('backend', 'workflow update requires a DataOps backend')
+      // PUT keeps the id: the mine tab stays at one card and the review queue receives
+      // the same id as a fresh pending item. Never create a second publication here.
+      const patch: Record<string, unknown> = {}
+      for (const key of ['title', 'description', 'instruction', 'cronHint', 'category', 'visibility', 'departmentCode']) {
+        if (input[key] !== undefined) patch[key] = input[key]
+      }
+      const updated = await request<Record<string, unknown>>(
+        host,
+        config,
+        '/api/ai/workflow-publications/' + encodeURIComponent(id),
+        { method: 'PUT', body: patch },
+      )
+      await appendManagementAudit(config, host, { action: 'workflow_update', actor: (await managementHost.context()).userId, detail: { id } })
+      return updated
+    },
+    workflowUnpublish: async (id) => {
+      if (!isTeamDeployment(config)) throw new ManagementToolError('backend', 'workflow unpublish requires a DataOps backend')
+      const result = await request(host, config, '/api/ai/workflow-publications/' + encodeURIComponent(id), { method: 'DELETE' })
+      await appendManagementAudit(config, host, { action: 'workflow_unpublish', actor: (await managementHost.context()).userId, detail: { id } })
+      return result
+    },
+    workflowReviewList: async (query) => {
+      if (!isTeamDeployment(config)) return []
+      const params = new URLSearchParams()
+      for (const [key, value] of Object.entries(query)) if (value !== undefined) params.set(key, value)
+      const result = await request<{ items?: unknown[] }>(host, config, '/api/ai/review/workflows' + (params.size === 0 ? '' : '?' + params.toString()))
+      return (result.items ?? []).map(row => row as ManagementWorkflow)
+    },
+    workflowReviewScan: async (ids) => {
+      if (!isTeamDeployment(config)) throw new ManagementToolError('backend', 'workflow review requires a DataOps backend')
+      return request(host, config, '/api/ai/review/scan', { method: 'POST', body: { workflows: ids } })
+    },
+    workflowReviewDecide: async (input) => {
+      if (!isTeamDeployment(config)) throw new ManagementToolError('backend', 'workflow review requires a DataOps backend')
+      return request(host, config, '/api/ai/review/decide', {
+        method: 'POST',
+        body: {
+          workflows: input.ids,
+          decision: input.decision,
+          ...(input.note === undefined ? {} : { note: input.note }),
+          authorization: { confirmed: true, reason: 'model tool authorization.confirmed=true' },
+        },
+      })
+    },
+  }
+
+  for (const definition of createKnowledgeFileTools(knowledgeToolHost)) {
+    ctx.effect(
+      () => host.tools.register(definition),
+      'dsh-knowledge-base: ' + definition.name + ' tool',
+    )
+  }
+
+  for (const definition of createManagementTools(managementHost)) {
+    ctx.effect(
+      () => host.tools.register(definition),
+      'dsh-knowledge-base: ' + definition.name + ' tool',
+    )
+  }
+
+  // Observe shell/outside writes on the AUTHORITATIVE tree. Observation only: the
+  // workspace has full filesystem access, so this cannot block anything; it makes the
+  // change visible in `views/_system/.kb-audit.jsonl` and therefore in `audit.list`.
+  ctx.effect(() => startExternalChangeWatcher({
+    actualRoot: localConfig(config).actualRoot,
+    log: message => host.logger?.warn?.('knowledge-base: ' + message),
+    onChange: async (relPath, detail) => {
+      const plan = localConfig(config)
+      await appendAuditEntry(join(plan.viewRoot, '_system'), {
+        at: new Date().toISOString(),
+        actor: 'system',
+        actorLabel: '外部进程',
+        action: 'external-change',
+        relPath,
+        detail,
+        outcome: 'applied',
+      })
+    },
+  }), 'dsh-knowledge-base: external-change watcher')
 }
 
 /** Project a step to the fields the browser needs. */

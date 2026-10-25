@@ -72,11 +72,26 @@
   white-space: nowrap;
 }
 
-/* The leading glyph keeps the explorer's 14px box. */
+/* The leading glyph keeps the explorer's 14px box.
+   The size is stated in pixels AND kept out of the flex flow (`flex: none`), so a long
+   filename cannot squeeze it: `min-width: 0` on the name means the NAME gives way, which
+   is the intended trade. Without an explicit box here the glyph is a shrinkable flex item
+   whose child SVG ends up narrower on an overlong row -- measured, the icon came out
+   smaller on the rows with the longest names. */
 .entryGlyph {
-  flex: none;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+}
+
+/* The glyph inside the box cannot decide its own size either. */
+.entryGlyph > svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
 }
 
 /* The last-modified column, pinned to the row's far right. It carries the auto
@@ -110,7 +125,7 @@
    `--dsw-static-amber-500` is the set's only warm stop, which is what makes a star
    read as a star rather than as one more grey glyph. */
 .entryFavorite {
-  flex: none;
+  flex: 0 0 auto;
   margin-left: auto;
   padding-left: 8px;
   color: var(--dsw-static-amber-500);

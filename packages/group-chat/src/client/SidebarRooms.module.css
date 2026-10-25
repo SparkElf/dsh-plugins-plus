@@ -864,3 +864,34 @@
   color: inherit;
   font-weight: 600;
 }
+
+/* The collapsed rail's stand-in for the room list: one icon, no rows.
+
+   The rail is as narrow as the shell's icon column, so the control is a square button
+   centred in it rather than a row with a label. It is the region's only affordance when
+   collapsed, which is why it exists at all -- rendering nothing made a whole feature
+   invisible. */
+.railButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 4px auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.railButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.railButton:focus-visible {
+  outline: 1px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}

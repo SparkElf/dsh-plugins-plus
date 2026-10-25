@@ -22,6 +22,7 @@ const CONFIG = Config({
   actualRoot: '/tmp/unused',
   viewRoot: '/tmp/unused-views',
   mountPoint: '/tmp/unused-mnt',
+  indexDir: '/tmp/kb-test-index-unused',
 } as never) as unknown as Record<string, unknown>
 
 /** Directories created by this suite, removed after each test. */
@@ -271,10 +272,46 @@ describe('the manual retry route', () => {
     const { ctx, routes, disposers } = fakeHost({ fetchImpl: permissionFetch() })
     try {
       apply(ctx as never, config as never)
-      await writeFile(join(config.actualRoot as string, 'notes.md'), '# hi')
-      const reply = await callRoute(routes, 'extract.retry', { relPath: 'notes.md' })
+      // `.zip` is the shape this branch is about. It used to be tested with `.md`, which
+      // is exactly the conflation that produced the reported defect: a reader's own
+      // Markdown was reported as an unreadable format.
+      await writeFile(join(config.actualRoot as string, 'bundle.zip'), 'PK')
+      const reply = await callRoute(routes, 'extract.retry', { relPath: 'bundle.zip' })
       expect(reply.body.outcome).toBe('unsupported')
       expect(String(reply.body.message)).toContain('no extractor')
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('tells a Markdown document it needs no extraction instead of calling it unreadable', async () => {
+    // 用户报的原始缺陷：两个 `.md` 文件在进度弹窗里都显示「该文件类型无解析器」。
+    const { config } = await fixtureRoot()
+    const { ctx, routes, disposers } = fakeHost({ fetchImpl: permissionFetch() })
+    try {
+      apply(ctx as never, config as never)
+      await writeFile(join(config.actualRoot as string, 'notes.md'), '# hi')
+      const reply = await callRoute(routes, 'extract.retry', { relPath: 'notes.md' })
+      // A success-shaped answer, not a failure: nothing needed doing.
+      expect(reply.body.outcome).toBe('already-markdown')
+      expect(String(reply.body.message)).toContain('already Markdown')
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
+  it('records the Markdown request in the queue so the panel can show it', async () => {
+    // 点了要有反馈：如果这次请求不留任何记录，弹窗里就没东西可显示，读者会以为按钮坏了。
+    const { config } = await fixtureRoot()
+    const { ctx, routes, disposers } = fakeHost({ fetchImpl: permissionFetch() })
+    try {
+      apply(ctx as never, config as never)
+      await writeFile(join(config.actualRoot as string, 'notes.md'), '# hi')
+      await callRoute(routes, 'extract.retry', { relPath: 'notes.md' })
+      const status = await callRoute(routes, 'extract.status', {})
+      const tasks = (status.body as { tasks?: Array<{ relPath: string; state: string }> }).tasks ?? []
+      const task = tasks.find(entry => entry.relPath === 'notes.md')
+      expect(task?.state).toBe('already-markdown')
     } finally {
       for (const dispose of disposers) dispose()
     }

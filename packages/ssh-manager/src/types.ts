@@ -18,6 +18,8 @@ export interface SshHost {
   jumpHostId: string | null
   knownHostFingerprint: string | null
   keepAliveSeconds: number
+  /** Directory the terminal starts in; empty means the remote login default. */
+  defaultDirectory?: string
 }
 export interface SshCredentialInput { password?: string; privateKey?: string; passphrase?: string }
 export interface SshManagerState { clusters: SshCluster[]; hosts: SshHost[] }

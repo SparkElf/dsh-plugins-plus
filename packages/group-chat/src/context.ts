@@ -4,6 +4,38 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 
 /**
+ * The persisted-session view the room cleanup endpoint reads.
+ *
+ * Deliberately structural and optional: a host may compose this plugin without the
+ * JSONL backend, and the cleanup endpoint then reports that it is unavailable rather
+ * than preventing the room runtime from starting. `root` is the backend's session
+ * root; only the JSONL backend exposes a physical directory to remove.
+ */
+export interface SessionPersistenceView {
+  readonly root?: string
+  list(options?: { readonly signal?: AbortSignal }): Promise<readonly {
+    readonly header: {
+      readonly id: string
+      readonly cwd?: string
+      readonly origin?: string
+      readonly parentSession?: string
+    }
+  }[]>
+}
+
+/**
+ * The workspace registry's archive surface.
+ *
+ * Archiving is DSH's documented, reversible way to take a Session off grouping
+ * surfaces, and it is the same marker the shell's own "archive session" action writes.
+ * `unarchiveSession` is optional because a minimal host may mount only the read side.
+ */
+export interface WorkspaceArchiveView {
+  archiveSession(sessionId: string, options?: { readonly stopActivity?: boolean }): Promise<void>
+  unarchiveSession?(sessionId: string): Promise<void>
+}
+
+/**
  * Host services this plugin needs.
  *
  * `agents` and `sessions` carry the room subscription, `webServer` exposes the
@@ -29,6 +61,18 @@ export interface GroupChatHostServices {
   }
   readonly credentials: {
     resolve(ref: CredentialRef): Promise<{ value: string; source: string } | undefined>
+  }
+  /**
+   * The deployment default-model entry.
+   *
+   * `sessionController.selectModel` persists every selection as the user's default.
+   * A room applying its own model must not rewrite that preference, so this face is
+   * used to restore the value the user actually chose. Optional because a host can
+   * compose the controller without the default-model service.
+   */
+  readonly agentDefaultModel?: {
+    currentSelection(): { provider: string; model: string; reasoningEffort?: string }
+    saveSelection(next: { provider: string; model: string; reasoningEffort?: string }): Promise<void>
   }
   /**
    * The Host API's own session controller.
@@ -92,6 +136,22 @@ export interface GroupChatHostServices {
       handler(req: unknown, res: unknown): void | Promise<void>
     }): () => void
   }
+  /**
+   * Durable session storage, used only by the room-session cleanup endpoint.
+   *
+   * Optional because the room runtime itself never needs to enumerate storage: it
+   * opens one deterministic session by id. The cleanup endpoint resolves this lazily
+   * when called, so a host without it still serves rooms normally.
+   */
+  readonly sessionPersistence?: SessionPersistenceView
+  /**
+   * The workspace registry's archive set.
+   *
+   * Optional for the same reason: opening a room only needs the session controller.
+   * When present, room cleanup can apply the official archive marker instead of
+   * inventing a second visibility mechanism.
+   */
+  readonly workspaceRegistry?: WorkspaceArchiveView
   readonly logger?: {
     error(...args: unknown[]): void
     warn?(...args: unknown[]): void

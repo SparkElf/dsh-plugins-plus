@@ -7,20 +7,25 @@ import {
   VscArrowUp,
   VscChevronDown,
   VscChevronRight,
+  VscClearAll,
   VscClose,
   VscCloudDownload,
   VscCloudUpload,
   VscComment,
+  VscCopy,
   VscDebugDisconnect,
+  VscDownload,
   VscEdit,
   VscFile,
   VscFiles,
   VscFolder,
   VscFolderOpened,
+  VscHistory,
   VscInfo,
   VscKey,
   VscKebabVertical,
   VscLayoutSidebarLeft,
+  VscPlay,
   VscPlug,
   VscPulse,
   VscRefresh,
@@ -29,6 +34,7 @@ import {
   VscServerEnvironment,
   VscTerminal,
   VscTrash,
+  VscWarning,
 } from 'react-icons/vsc'
 import type {
   SshCluster,
@@ -43,10 +49,15 @@ import type {
   SshTerminalSession,
 } from '../types.ts'
 import { loadSshState, sshApi } from './api.ts'
-import { formatBytes, joinedPath, parentPath, pathBreadcrumbs } from './model.ts'
+import {
+  canTestHost, formatBytes, fingerprintOf, joinedPath, parentPath, pathBreadcrumbs, recentHosts,
+  type HostTestResult, type HostUsage,
+} from './model.ts'
 import { Select, type SelectOption } from './Select.tsx'
 import { useT, type TranslationKey } from './i18n.tsx'
-import { TerminalPane } from './TerminalPane.tsx'
+import { TerminalPane, type TerminalPaneHandle } from './TerminalPane.tsx'
+import { ConnectionWizard } from './ConnectionWizard.tsx'
+import { StatusTag, type StatusTagProps, type StatusTone } from './StatusTag.tsx'
 import css from './SshManager.module.css'
 
 interface ConversationInput { state: { getSnapshot(): { draft: string } }; setDraft(text: string): void }
@@ -55,6 +66,7 @@ type WorkspaceView = 'hosts' | 'terminal' | 'files' | 'tunnels'
 type InventoryContextMenu =
   | { kind: 'host'; id: string; x: number; y: number }
   | { kind: 'cluster'; id: string; x: number; y: number }
+interface SavedCommand { id: string; label: string; command: string }
 
 const EMPTY: SshManagerState = { clusters: [], hosts: [] }
 const ENVIRONMENTS: SshEnvironment[] = ['development', 'testing', 'staging', 'production', 'other']
@@ -91,9 +103,45 @@ const FORWARD_STATE_LABELS: Record<SshPortForward['state'], TranslationKey> = {
   disconnected: 'tunnels.state.disconnected',
   failed: 'tunnels.state.failed',
 }
+const USAGE_KEY = 'ssh-manager.usage.v1'
+const COMMANDS_KEY = 'ssh-manager.commands.v1'
+
+function readStored<T>(key: string, fallback: T): T {
+  if (typeof localStorage === 'undefined') return fallback
+  try {
+    const raw = localStorage.getItem(key)
+    return raw === null ? fallback : JSON.parse(raw) as T
+  } catch { return fallback }
+}
+
+function writeStored(key: string, value: unknown): void {
+  if (typeof localStorage === 'undefined') return
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* storage may be denied in a sandboxed frame */ }
+}
+
+/** Copy without requiring a secure context: the LAN UI is plain HTTP. */
+async function copyText(text: string): Promise<boolean> {
+  try { await navigator.clipboard.writeText(text); return true } catch { /* fall through */ }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const copied = document.execCommand('copy')
+    area.remove()
+    return copied
+  } catch { return false }
+}
+
+function quoteShell(value: string): string {
+  return "'" + value.replaceAll("'", "'\\''") + "'"
+}
 
 function emptyHost(): SshHost {
-  return { id: '', name: '', description: '', tags: [], clusterId: null, environment: 'development', hostname: '', port: 22, username: '', authKind: 'password', credentialId: null, credentialConfigured: false, jumpHostId: null, knownHostFingerprint: null, keepAliveSeconds: 30 }
+  return { id: '', name: '', description: '', tags: [], clusterId: null, environment: 'development', hostname: '', port: 22, username: '', authKind: 'password', credentialId: null, credentialConfigured: false, jumpHostId: null, knownHostFingerprint: null, keepAliveSeconds: 30, defaultDirectory: '' }
 }
 
 function emptyForward(hostId: string): SshPortForwardRequest {
@@ -105,6 +153,10 @@ function encodeFile(buffer: ArrayBuffer): string {
   let binary = ''
   for (let offset = 0; offset < data.length; offset += 0x8000) binary += String.fromCharCode(...data.subarray(offset, offset + 0x8000))
   return btoa(binary)
+}
+
+function messageOf(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure)
 }
 
 function IconButton({ label, children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {
@@ -120,9 +172,13 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   const [credential, setCredential] = useState<SshCredentialInput>({})
   const [clusterForm, setClusterForm] = useState<SshCluster | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [connectionStatus, setConnectionStatus] = useState<string | null>(null)
+  const [wizardTest, setWizardTest] = useState<StatusTagProps | null>(null)
+  const [wizardResult, setWizardResult] = useState<{ latencyMs: number; fingerprint: string } | null>(null)
+  const [wizardBusy, setWizardBusy] = useState(false)
+  const [probing, setProbing] = useState(false)
   const [terminals, setTerminals] = useState<SshTerminalSession[]>([])
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null)
+  const [pendingInput, setPendingInput] = useState<Record<string, string | undefined>>({})
   const [view, setView] = useState<WorkspaceView>('hosts')
   const [inventoryOpen, setInventoryOpen] = useState(true)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
@@ -132,8 +188,15 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   const [forwards, setForwards] = useState<SshPortForward[]>([])
   const [forwardForm, setForwardForm] = useState<SshPortForwardRequest | null>(null)
   const [contextMenu, setContextMenu] = useState<InventoryContextMenu | null>(null)
+  const [usage, setUsage] = useState<Record<string, HostUsage>>(() => readStored(USAGE_KEY, {}))
+  const [commandMap, setCommandMap] = useState<Record<string, SavedCommand[]>>(() => readStored(COMMANDS_KEY, {}))
+  const [commandLabel, setCommandLabel] = useState('')
+  const [commandText, setCommandText] = useState('')
+  const [testingHosts, setTestingHosts] = useState<Set<string>>(new Set())
+  const [notice, setNotice] = useState<string | null>(null)
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   const uploadInput = useRef<HTMLInputElement | null>(null)
+  const terminalRefs = useRef(new Map<string, TerminalPaneHandle>())
 
   const selected = state.hosts.find(host => host.id === selectedId) ?? null
   const activeTerminal = terminals.find(terminal => terminal.id === activeTerminalId) ?? null
@@ -143,16 +206,47 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   }, [search, state.hosts])
   const groups = useMemo(() => [...state.clusters.map(cluster => ({ cluster, hosts: filtered.filter(host => host.clusterId === cluster.id) })), { cluster: null, hosts: filtered.filter(host => host.clusterId === null) }], [filtered, state.clusters])
   const hostForwards = selected === null ? [] : forwards.filter(forward => forward.hostId === selected.id)
+  const recent = useMemo(() => recentHosts(filtered, usage, 4), [filtered, usage])
+  const hostTerminals = useMemo(() => selected === null ? [] : terminals.filter(terminal => terminal.hostId === selected.id).sort((left, right) => right.connectedAt - left.connectedAt), [selected, terminals])
+  const commands = selected === null ? [] : commandMap[selected.id] ?? []
   const environmentOptions = useMemo<SelectOption[]>(() => ENVIRONMENTS.map(value => ({ value, label: t(ENVIRONMENT_LABELS[value]) })), [t])
   const authOptions = useMemo<SelectOption[]>(() => AUTH_OPTION_KEYS.map(option => ({ value: option.value, label: t(option.label), description: t(option.description) })), [t])
   const directionOptions = useMemo<SelectOption[]>(() => DIRECTION_OPTION_KEYS.map(option => ({ value: option.value, label: t(option.label), description: t(option.description) })), [t])
   const clusterOptions = useMemo<SelectOption[]>(() => [{ value: '', label: t('inventory.unclustered') }, ...state.clusters.map(cluster => ({ value: cluster.id, label: cluster.name }))], [state.clusters, t])
   const jumpHostOptions = useMemo<SelectOption[]>(() => [{ value: '', label: t('host.none') }, ...state.hosts.filter(host => host.id !== hostForm?.id).map(host => ({ value: host.id, label: host.name, description: host.username + '@' + host.hostname }))], [hostForm?.id, state.hosts, t])
 
-  const report = (failure: unknown): void => { setError(failure instanceof Error ? failure.message : String(failure)) }
+  const remember = (hostId: string, patch: HostUsage): void => {
+    setUsage(current => {
+      const next = { ...current, [hostId]: { ...current[hostId], ...patch } }
+      writeStored(USAGE_KEY, next)
+      return next
+    })
+  }
+  const saveCommands = (hostId: string, list: SavedCommand[]): void => {
+    setCommandMap(current => {
+      const next = { ...current, [hostId]: list }
+      writeStored(COMMANDS_KEY, next)
+      return next
+    })
+  }
+  const flash = (message: string): void => {
+    setNotice(message)
+    window.setTimeout(() => { setNotice(current => current === message ? null : current) }, 2600)
+  }
+
+  const report = (failure: unknown): void => { setError(messageOf(failure)) }
   const beginHost = (clusterId: string | null = null): void => {
     setHostForm({ ...emptyHost(), clusterId })
     setCredential({})
+    setWizardTest(null)
+    setWizardResult(null)
+    setContextMenu(null)
+  }
+  const editHost = (host: SshHost): void => {
+    setHostForm({ ...host })
+    setCredential({})
+    setWizardTest(null)
+    setWizardResult(null)
     setContextMenu(null)
   }
   const beginCluster = (cluster: SshCluster = { id: '', name: '', description: '', tags: [], hostIds: [] }): void => {
@@ -160,6 +254,8 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     setContextMenu(null)
   }
   const deleteHost = async (hostId: string): Promise<void> => {
+    const host = state.hosts.find(item => item.id === hostId)
+    if (host !== undefined && !window.confirm(t('host.deleteConfirm', { name: host.name }))) return
     try {
       const next = await sshApi<SshManagerState>('hosts.delete', { hostId })
       setState(next)
@@ -218,8 +314,9 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   useEffect(() => {
     setFiles(null)
     setFilePath('.')
-    setConnectionStatus(null)
     setForwardForm(selectedId === null ? null : emptyForward(selectedId))
+    setCommandLabel('')
+    setCommandText('')
   }, [selectedId])
   useEffect(() => {
     if (contextMenu === null) return
@@ -249,13 +346,20 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   const saveHost = async (): Promise<void> => {
     if (hostForm === null) return
     try {
+      setWizardBusy(true)
       const next = await sshApi<SshManagerState>('hosts.save', { host: hostForm, credential })
       setState(next)
-      setSelectedId(next.hosts.find(host => host.id === hostForm.id || host.name === hostForm.name)?.id ?? null)
+      const saved = next.hosts.find(host => host.id === hostForm.id || host.name === hostForm.name)
+      setSelectedId(saved?.id ?? null)
+      // The wizard's successful test is the host's first known status; carry it into the
+      // list/detail instead of showing "untested" right after a green test tag.
+      if (saved !== undefined && wizardResult !== null) remember(saved.id, { test: { ok: true, latencyMs: wizardResult.latencyMs, fingerprint: wizardResult.fingerprint, at: Date.now() } })
       setHostForm(null)
       setCredential({})
+      setWizardTest(null)
+      setWizardResult(null)
       setError(null)
-    } catch (failure) { report(failure) }
+    } catch (failure) { report(failure) } finally { setWizardBusy(false) }
   }
 
   const saveCluster = async (): Promise<void> => {
@@ -273,21 +377,65 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     input.setDraft(current === '' ? reference : current + '\n\n' + reference)
   }
 
-  const testConnection = async (host: SshHost): Promise<void> => {
+  const testWizardDraft = async (): Promise<void> => {
+    if (hostForm === null) return
+    setWizardBusy(true)
+    setWizardTest({ tone: 'testing', label: t('host.connectionTesting') })
     try {
-      setConnectionStatus(t('host.connectionTesting'))
-      const result = await sshApi<{ latencyMs: number; fingerprint: string }>('hosts.test', { hostId: host.id })
-      setConnectionStatus(t('host.connectionConnected', { latency: result.latencyMs, fingerprint: result.fingerprint }))
-      setError(null)
-    } catch (failure) { setConnectionStatus(null); report(failure) }
+      const result = await sshApi<{ latencyMs: number; fingerprint: string; pinned: boolean }>('hosts.testDraft', { host: hostForm, credential })
+      setHostForm(current => current === null ? null : { ...current, knownHostFingerprint: result.fingerprint })
+      setWizardResult({ latencyMs: result.latencyMs, fingerprint: result.fingerprint })
+      setWizardTest({
+        tone: 'ok',
+        label: t('wizard.testOk', { latency: result.latencyMs }),
+        detail: t('wizard.testOkDetail', { fingerprint: result.fingerprint }),
+      })
+    } catch (failure) {
+      setWizardTest({ tone: 'fail', label: t('wizard.testFail'), detail: messageOf(failure) })
+    } finally { setWizardBusy(false) }
   }
 
-  const openTerminal = async (host: SshHost): Promise<void> => {
+  const probeFingerprint = async (): Promise<void> => {
+    if (hostForm === null) return
+    setProbing(true)
+    try {
+      const result = await sshApi<{ fingerprint: string }>('hosts.probe', { host: hostForm })
+      setHostForm(current => current === null ? null : { ...current, knownHostFingerprint: result.fingerprint })
+      setWizardTest({ tone: 'idle', label: t('wizard.fingerprintObserved'), detail: result.fingerprint })
+    } catch (failure) {
+      setWizardTest({ tone: 'fail', label: t('wizard.probeFail'), detail: messageOf(failure) })
+    } finally { setProbing(false) }
+  }
+
+  const testSavedHost = async (host: SshHost): Promise<void> => {
+    setTestingHosts(current => new Set(current).add(host.id))
+    try {
+      const result = await sshApi<{ latencyMs: number; fingerprint: string; pinned: boolean }>('hosts.testDraft', { host, credential: {} })
+      if (!result.pinned) {
+        // Trust on first use, on the user's explicit test: persist the observed key so the
+        // terminal that follows connects instead of failing on a missing fingerprint.
+        setState(await sshApi<SshManagerState>('hosts.save', { host: { ...host, knownHostFingerprint: result.fingerprint }, credential: {} }))
+      }
+      remember(host.id, { test: { ok: true, latencyMs: result.latencyMs, fingerprint: result.fingerprint, at: Date.now() } })
+      setError(null)
+    } catch (failure) {
+      const result: HostTestResult = { ok: false, error: messageOf(failure), at: Date.now() }
+      remember(host.id, { test: result })
+    } finally {
+      setTestingHosts(current => { const next = new Set(current); next.delete(host.id); return next })
+    }
+  }
+
+  const openTerminal = async (host: SshHost, initialInput?: string): Promise<void> => {
     try {
       const result = await sshApi<{ terminal: SshTerminalSession; terminals: SshTerminalSession[] }>('terminals.open', { sessionId, hostId: host.id, cols: 80, rows: 24 })
       setTerminals(result.terminals)
       setActiveTerminalId(result.terminal.id)
       setView('terminal')
+      remember(host.id, { openedAt: Date.now() })
+      const directory = host.defaultDirectory?.trim() ?? ''
+      const input = initialInput ?? (directory === '' ? undefined : 'cd ' + quoteShell(directory))
+      if (input !== undefined && input !== '') setPendingInput(current => ({ ...current, [result.terminal.id]: input }))
       setError(null)
     } catch (failure) { report(failure) }
   }
@@ -310,6 +458,29 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
   }
 
   const updateTerminal = (value: SshTerminalSession): void => { setTerminals(current => current.map(terminal => terminal.id === value.id ? value : terminal)) }
+
+  const activeHandle = (): TerminalPaneHandle | undefined => activeTerminal === null ? undefined : terminalRefs.current.get(activeTerminal.id)
+
+  const copyTerminal = async (): Promise<void> => {
+    const handle = activeHandle()
+    if (handle === undefined) return
+    const text = handle.selection() === '' ? handle.transcript() : handle.selection()
+    flash(await copyText(text) ? t('terminal.copied') : t('terminal.copyFailed'))
+  }
+
+  const clearTerminal = (): void => { activeHandle()?.clear() }
+
+  const downloadTerminal = (): void => {
+    const handle = activeHandle()
+    if (handle === undefined || activeTerminal === null) return
+    const blob = new Blob([handle.transcript()], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = activeTerminal.title.replace(/[^\w.-]+/gu, '_') + '-' + new Date().toISOString().replace(/[:.]/gu, '-') + '.log'
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
 
   const browse = async (host: SshHost, path = filePath): Promise<void> => {
     try {
@@ -373,6 +544,30 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     try { setForwards(await sshApi<SshPortForward[]>('forwards.close', { sessionId, forwardId })); setError(null) } catch (failure) { report(failure) }
   }
 
+  const addCommand = (): void => {
+    if (selected === null || commandText.trim() === '') return
+    const label = commandLabel.trim() === '' ? commandText.trim().split(/\s+/u)[0] : commandLabel.trim()
+    // The LAN UI runs over plain HTTP, where `crypto.randomUUID` is not exposed: a secure
+    // context is required. Fall back to a timestamp+counter id; it only has to be unique
+    // inside one host's local command list.
+    const id = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const entry: SavedCommand = { id, label, command: commandText.trim() }
+    saveCommands(selected.id, [...commands, entry])
+    setCommandLabel('')
+    setCommandText('')
+  }
+
+  const insertCommand = async (host: SshHost, command: string): Promise<void> => {
+    const existing = terminals.find(terminal => terminal.hostId === host.id)
+    if (existing === undefined) { await openTerminal(host, command); return }
+    setActiveTerminalId(existing.id)
+    setView('terminal')
+    await new Promise<void>(resolve => { requestAnimationFrame(() => { resolve() }) })
+    const handle = terminalRefs.current.get(existing.id)
+    if (handle === undefined) { await openTerminal(host, command); return }
+    handle.insert(command)
+  }
+
   const toggleGroup = (key: string): void => {
     setCollapsedGroups(current => {
       const next = new Set(current)
@@ -380,6 +575,14 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
       else next.add(key)
       return next
     })
+  }
+
+  const testLabel = (host: SshHost): StatusTagProps => {
+    if (testingHosts.has(host.id)) return { tone: 'testing', label: t('status.testing') }
+    const result = usage[host.id]?.test
+    if (result === undefined) return { tone: 'idle', label: t('status.untested') }
+    if (result.ok) return { tone: 'ok', label: t('status.connectedLatency', { latency: result.latencyMs ?? 0 }), detail: result.fingerprint === undefined ? undefined : t('status.fingerprint', { fingerprint: result.fingerprint }) }
+    return { tone: 'fail', label: t('status.failed'), detail: result.error ?? t('status.failed') }
   }
 
   const renderContextMenu = () => {
@@ -409,9 +612,9 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     >
       {host !== undefined ? <>
         <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void openTerminal(host) }}><VscTerminal /><span>{t('host.openTerminal')}</span></button>
-        <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void testConnection(host) }}><VscPulse /><span>{t('host.testConnection')}</span></button>
+        <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void testSavedHost(host) }}><VscPulse /><span>{t('host.testConnection')}</span></button>
         <button type="button" role="menuitem" onClick={() => { setContextMenu(null); sendToConversation(host) }}><VscComment /><span>{t('host.sendToConversation')}</span></button>
-        <button type="button" role="menuitem" onClick={() => { setContextMenu(null); setHostForm({ ...host }); setCredential({}) }}><VscEdit /><span>{t('host.edit')}</span></button>
+        <button type="button" role="menuitem" onClick={() => { editHost(host) }}><VscEdit /><span>{t('host.edit')}</span></button>
         <button type="button" role="menuitem" data-separator="true" data-danger="true" onClick={() => { void deleteHost(host.id) }}><VscTrash /><span>{t('host.delete')}</span></button>
       </> : <>
         <button type="button" role="menuitem" onClick={() => { beginHost(cluster?.id ?? null) }}><VscAdd /><span>{t('inventory.addHostToCluster')}</span></button>
@@ -421,15 +624,45 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
     </div>, document.body)
   }
 
+  const renderHostRow = (host: SshHost) => {
+    const result = usage[host.id]?.test
+    const tone: StatusTone = testingHosts.has(host.id) ? 'testing' : result === undefined ? 'idle' : result.ok ? 'ok' : 'fail'
+    const detail = testingHosts.has(host.id) ? t('status.testing') : result === undefined ? t(host.credentialConfigured ? 'inventory.credentialConfigured' : 'inventory.credentialMissing') : result.ok ? t('status.connectedLatency', { latency: result.latencyMs ?? 0 }) : result.error ?? t('status.failed')
+    return <button
+      type="button"
+      className={css.hostRow}
+      data-selected={host.id === selectedId}
+      data-production={host.environment === 'production'}
+      data-tone={tone}
+      key={host.id}
+      onClick={() => { setSelectedId(host.id) }}
+      onDoubleClick={() => { void openTerminal(host) }}
+      onContextMenu={event => { showPointerContextMenu(event, 'host', host.id) }}
+      onKeyDown={event => { showKeyboardContextMenu(event, 'host', host.id) }}
+    >
+      <VscServerEnvironment aria-hidden="true" />
+      <span>
+        <strong>{host.name}</strong>
+        <small>{host.username}@{host.hostname}:{host.port}</small>
+        {host.tags.length > 0 && <em className={css.rowTags}>{host.tags.slice(0, 3).map(tag => <span key={tag}>{tag}</span>)}</em>}
+      </span>
+      <i data-tone={tone} title={detail} aria-label={detail} />
+    </button>
+  }
+
   const renderInventory = () => <aside className={css.inventory} aria-label={t('inventory.label')} data-overlay={view !== 'hosts'}>
     <header className={css.inventoryHeader}>
       <span title={t('inventory.label')}>{filtered.length}</span>
       <IconButton label={t('inventory.addCluster')} onClick={() => { beginCluster() }}><VscFolder /></IconButton>
-      <IconButton label={t('inventory.addHost')} onClick={() => { beginHost() }}><VscAdd /></IconButton>
+      <IconButton label={t('inventory.newConnection')} onClick={() => { beginHost() }}><VscAdd /></IconButton>
       {view !== 'hosts' && <IconButton label={t('inventory.close')} onClick={() => { setInventoryOpen(false) }}><VscClose /></IconButton>}
     </header>
     <label className={css.search}><VscSearch aria-hidden="true" /><input value={search} onChange={event => { setSearch(event.target.value) }} placeholder={t('inventory.search')} aria-label={t('inventory.search')} /></label>
     <div className={css.tree}>
+      {recent.length > 0 && <section className={css.recentSection} aria-label={t('inventory.recent')}>
+        <div className={css.recentHeader}><VscHistory aria-hidden="true" /><span>{t('inventory.recent')}</span></div>
+        {recent.map(renderHostRow)}
+      </section>}
       {groups.map(group => {
         const key = group.cluster?.id ?? 'unclustered'
         if (group.hosts.length === 0 && group.cluster === null) return null
@@ -458,52 +691,106 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
               }}
             ><VscKebabVertical /></IconButton>}
           </div>
-          {!collapsed && group.hosts.map(host => <button
-            type="button"
-            className={css.hostRow}
-            data-selected={host.id === selectedId}
-            key={host.id}
-            onClick={() => { setSelectedId(host.id) }}
-            onDoubleClick={() => { void openTerminal(host) }}
-            onContextMenu={event => { showPointerContextMenu(event, 'host', host.id) }}
-            onKeyDown={event => { showKeyboardContextMenu(event, 'host', host.id) }}
-          >
-            <VscServerEnvironment aria-hidden="true" />
-            <span><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span>
-            <i data-ready={host.credentialConfigured} title={t(host.credentialConfigured ? 'inventory.credentialConfigured' : 'inventory.credentialMissing')} />
-          </button>)}
+          {!collapsed && group.hosts.map(renderHostRow)}
         </section>
       })}
-      {filtered.length === 0 && <div className={css.emptySmall}>{t('inventory.empty')}</div>}
+      {state.hosts.length === 0 && <div className={css.emptyState}>
+        <VscServerEnvironment aria-hidden="true" />
+        <strong>{t('inventory.emptyTitle')}</strong>
+        <span>{t('inventory.emptyDescription')}</span>
+        <button type="button" className={css.primary} onClick={() => { beginHost() }}><VscAdd />{t('inventory.newConnection')}</button>
+      </div>}
+      {state.hosts.length > 0 && filtered.length === 0 && <div className={css.emptySmall}>{t('inventory.empty')}</div>}
     </div>
   </aside>
 
   const renderHostHeader = (title: string) => <header className={css.workHeader}>
-    <div className={css.workTitle}><VscServerEnvironment /><span><strong>{title}</strong><small>{selected === null ? t('host.chooseFromExplorer') : selected.username + '@' + selected.hostname + ':' + selected.port.toString()}</small></span></div>
+    <div className={css.workTitle}><VscServerEnvironment /><span><strong>{title}</strong><small>{selected === null ? t('host.chooseFromExplorer') : selected.username + '@' + selected.hostname + ':' + selected.port.toString()}</small></span>{selected !== null && selected.environment === 'production' && <span className={css.productionBadge}>{t('environment.production')}</span>}</div>
     {selected !== null && <div className={css.workActions}>
       <IconButton label={t('host.openTerminal')} onClick={() => { void openTerminal(selected) }}><VscTerminal /></IconButton>
-      <IconButton label={t('host.testConnection')} onClick={() => { void testConnection(selected) }}><VscPulse /></IconButton>
+      <IconButton label={t('host.testConnection')} onClick={() => { void testSavedHost(selected) }}><VscPulse /></IconButton>
       <IconButton label={t('host.sendToConversation')} onClick={() => { sendToConversation(selected) }}><VscComment /></IconButton>
-      <IconButton label={t('host.edit')} onClick={() => { setHostForm({ ...selected }); setCredential({}) }}><VscEdit /></IconButton>
+      <IconButton label={t('host.edit')} onClick={() => { editHost(selected) }}><VscEdit /></IconButton>
       <IconButton label={t('host.delete')} onClick={() => { void deleteHost(selected.id) }}><VscTrash /></IconButton>
     </div>}
   </header>
 
   const renderOverview = () => <section className={css.workView} aria-label={t('host.overviewLabel')}>
     {renderHostHeader(selected?.name ?? t('host.overviewTitle'))}
-    {selected === null ? <div className={css.empty}><VscServerEnvironment /><strong>{t('host.select')}</strong><span>{t('host.selectDescription')}</span></div> : <div className={css.scrollBody}>
-      {connectionStatus !== null && <div className={css.connectionStatus}><VscPulse />{connectionStatus}</div>}
-      <dl className={css.hostFacts}>
-        <div><dt>{t('host.address')}</dt><dd>{selected.hostname}:{selected.port}</dd></div>
-        <div><dt>{t('host.user')}</dt><dd>{selected.username}</dd></div>
-        <div><dt>{t('host.environment')}</dt><dd><span className={css.environment} data-environment={selected.environment}>{t(ENVIRONMENT_LABELS[selected.environment])}</span></dd></div>
-        <div><dt>{t('host.cluster')}</dt><dd>{state.clusters.find(cluster => cluster.id === selected.clusterId)?.name ?? t('inventory.unclustered')}</dd></div>
-        <div><dt>{t('host.authentication')}</dt><dd><VscKey />{t(selected.authKind === 'password' ? 'auth.password' : selected.authKind === 'private-key' ? 'auth.privateKey' : 'auth.agent')} · {t(selected.credentialConfigured ? 'host.configured' : 'host.notConfigured')}</dd></div>
-        <div><dt>{t('host.jumpHost')}</dt><dd>{state.hosts.find(host => host.id === selected.jumpHostId)?.name ?? t('host.none')}</dd></div>
-        <div><dt>{t('host.keepalive')}</dt><dd>{selected.keepAliveSeconds === 0 ? t('host.disabled') : t('host.seconds', { count: selected.keepAliveSeconds })}</dd></div>
-        <div><dt>{t('host.fingerprint')}</dt><dd>{selected.knownHostFingerprint ?? t('host.notPinned')}</dd></div>
-      </dl>
-      <div className={css.description}><strong>{t('host.description')}</strong><p>{selected.description || t('host.noDescription')}</p>{selected.tags.length > 0 && <div className={css.tags}>{selected.tags.map(tag => <span key={tag}>{tag}</span>)}</div>}</div>
+    {selected === null ? <div className={css.empty}>
+      <VscServerEnvironment aria-hidden="true" />
+      <strong>{t('host.select')}</strong>
+      <span>{t('host.selectDescription')}</span>
+      <button type="button" className={css.primary} onClick={() => { beginHost() }}><VscAdd />{t('inventory.newConnection')}</button>
+    </div> : <div className={css.detailScroll}>
+      <section className={css.detailSection} aria-label={t('detail.connection')}>
+        <div className={css.detailHeader}><strong>{t('detail.connection')}</strong><StatusTag {...testLabel(selected)} /></div>
+        {testLabel(selected).tone === 'fail' && usage[selected.id]?.test?.error !== undefined && <p className={css.testReason}>{usage[selected.id]?.test?.error}</p>}
+        <dl className={css.hostFacts}>
+          <div><dt>{t('host.address')}</dt><dd>{selected.hostname}:{selected.port}</dd></div>
+          <div><dt>{t('host.user')}</dt><dd>{selected.username}</dd></div>
+          <div><dt>{t('host.environment')}</dt><dd><span className={css.environment} data-environment={selected.environment}>{t(ENVIRONMENT_LABELS[selected.environment])}</span></dd></div>
+          <div><dt>{t('host.cluster')}</dt><dd>{state.clusters.find(cluster => cluster.id === selected.clusterId)?.name ?? t('inventory.unclustered')}</dd></div>
+          <div><dt>{t('host.authentication')}</dt><dd><VscKey />{t(selected.authKind === 'password' ? 'auth.password' : selected.authKind === 'private-key' ? 'auth.privateKey' : 'auth.agent')} · {t(selected.credentialConfigured ? 'host.configured' : 'host.notConfigured')}</dd></div>
+          <div><dt>{t('host.jumpHost')}</dt><dd>{state.hosts.find(host => host.id === selected.jumpHostId)?.name ?? t('host.none')}</dd></div>
+          <div><dt>{t('host.keepalive')}</dt><dd>{selected.keepAliveSeconds === 0 ? t('host.disabled') : t('host.seconds', { count: selected.keepAliveSeconds })}</dd></div>
+          <div><dt>{t('host.defaultDirectory')}</dt><dd>{selected.defaultDirectory === undefined || selected.defaultDirectory === '' ? t('host.none') : selected.defaultDirectory}</dd></div>
+          <div className={css.full}><dt>{t('host.fingerprint')}</dt><dd>{fingerprintOf(selected) === '' ? t('host.notPinned') : fingerprintOf(selected)}</dd></div>
+        </dl>
+        <div className={css.description}><strong>{t('host.description')}</strong><p>{selected.description || t('host.noDescription')}</p>{selected.tags.length > 0 && <div className={css.tags}>{selected.tags.map(tag => <span key={tag}>{tag}</span>)}</div>}</div>
+      </section>
+
+      <section className={css.detailSection} aria-label={t('detail.tunnels')}>
+        <div className={css.detailHeader}>
+          <strong>{t('detail.tunnels')}</strong><span className={css.count}>{hostForwards.length}</span>
+          <button type="button" className={css.linkButton} onClick={() => { chooseView('tunnels') }}>{t('detail.manage')}</button>
+        </div>
+        {hostForwards.length === 0 ? <p className={css.sectionEmpty}>{t('detail.noTunnels')}</p> : <ul className={css.forwardList}>
+          {hostForwards.map(forward => <li key={forward.id}>
+            <VscPlug aria-hidden="true" />
+            <span><strong>{forward.direction === 'local' ? t('tunnels.local') : t('tunnels.remote')} {forward.bindHost}:{forward.bindPort}</strong><small>→ {forward.targetHost}:{forward.targetPort}</small></span>
+            <i data-state={forward.state} />
+            <IconButton label={t('tunnels.close')} onClick={() => { void closeForward(forward.id) }}><VscClose /></IconButton>
+          </li>)}
+        </ul>}
+        {forwardForm !== null && <div className={css.quickForward}>
+          <Select label={t('tunnels.direction')} value={forwardForm.direction} options={directionOptions} onChange={value => { setForwardForm({ ...forwardForm, direction: value as SshPortForwardRequest['direction'] }) }} />
+          <input aria-label={t('tunnels.bindPort')} type="number" min={0} max={65535} value={forwardForm.bindPort} onChange={event => { setForwardForm({ ...forwardForm, bindPort: Number(event.target.value) }) }} />
+          <input aria-label={t('tunnels.targetHost')} value={forwardForm.targetHost} onChange={event => { setForwardForm({ ...forwardForm, targetHost: event.target.value }) }} />
+          <input aria-label={t('tunnels.targetPort')} type="number" min={1} max={65535} value={forwardForm.targetPort} onChange={event => { setForwardForm({ ...forwardForm, targetPort: Number(event.target.value) }) }} />
+          <IconButton label={t('tunnels.open')} onClick={() => { void openForward() }}><VscAdd /></IconButton>
+        </div>}
+      </section>
+
+      <section className={css.detailSection} aria-label={t('detail.commands')}>
+        <div className={css.detailHeader}><strong>{t('detail.commands')}</strong><span className={css.count}>{commands.length}</span></div>
+        {commands.length === 0 ? <p className={css.sectionEmpty}>{t('detail.noCommands')}</p> : <ul className={css.commandList}>
+          {commands.map(command => <li key={command.id}>
+            <span><strong>{command.label}</strong><code>{command.command}</code></span>
+            <IconButton label={t('detail.copyCommand', { name: command.label })} onClick={() => { void copyText(command.command).then(ok => { flash(ok ? t('detail.copied') : t('detail.copyFailed')) }) }}><VscCopy /></IconButton>
+            <IconButton label={t('detail.insertCommand', { name: command.label })} onClick={() => { void insertCommand(selected, command.command) }}><VscPlay /></IconButton>
+            <IconButton label={t('detail.removeCommand', { name: command.label })} onClick={() => { saveCommands(selected.id, commands.filter(item => item.id !== command.id)) }}><VscTrash /></IconButton>
+          </li>)}
+        </ul>}
+        <div className={css.commandAdd}>
+          <input aria-label={t('detail.commandLabel')} placeholder={t('detail.commandLabel')} value={commandLabel} onChange={event => { setCommandLabel(event.target.value) }} />
+          <input aria-label={t('detail.commandText')} placeholder={t('detail.commandExample')} value={commandText} onChange={event => { setCommandText(event.target.value) }} onKeyDown={event => { if (event.key === 'Enter') addCommand() }} />
+          <IconButton label={t('detail.addCommand')} disabled={commandText.trim() === ''} onClick={addCommand}><VscAdd /></IconButton>
+        </div>
+      </section>
+
+      <section className={css.detailSection} aria-label={t('detail.recentSessions')}>
+        <div className={css.detailHeader}><strong>{t('detail.recentSessions')}</strong><span className={css.count}>{hostTerminals.length}</span></div>
+        {hostTerminals.length === 0 ? <p className={css.sectionEmpty}>{t('detail.noSessions')}</p> : <ul className={css.sessionList}>
+          {hostTerminals.map(terminal => <li key={terminal.id}>
+            <button type="button" onClick={() => { setActiveTerminalId(terminal.id); setView('terminal') }}>
+              <VscTerminal aria-hidden="true" />
+              <span><strong>{terminal.title}</strong><small>{new Date(terminal.connectedAt).toLocaleString()}</small></span>
+              <em data-state={terminal.state}>{t(TERMINAL_STATE_LABELS[terminal.state])}</em>
+            </button>
+          </li>)}
+        </ul>}
+      </section>
     </div>}
   </section>
 
@@ -517,19 +804,36 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
       </div>
       <div className={css.terminalActions}>
         <IconButton label={t('terminal.new')} disabled={selected === null} onClick={() => { if (selected !== null) void openTerminal(selected) }}><VscAdd /></IconButton>
+        <IconButton label={t('terminal.clear')} disabled={activeTerminal === null} onClick={clearTerminal}><VscClearAll /></IconButton>
+        <IconButton label={t('terminal.copy')} disabled={activeTerminal === null} onClick={() => { void copyTerminal() }}><VscCopy /></IconButton>
+        <IconButton label={t('terminal.downloadLog')} disabled={activeTerminal === null} onClick={downloadTerminal}><VscDownload /></IconButton>
         <IconButton label={t('terminal.reconnect')} disabled={activeTerminal === null} onClick={() => { if (activeTerminal !== null) void reconnectTerminal(activeTerminal.id) }}><VscRefresh /></IconButton>
         <IconButton label={t('terminal.closeActive')} disabled={activeTerminal === null} onClick={() => { if (activeTerminal !== null) void closeTerminal(activeTerminal.id) }}><VscDebugDisconnect /></IconButton>
       </div>
     </header>
+    {activeTerminal !== null && (activeTerminal.state === 'failed' || activeTerminal.state === 'disconnected') && <div className={css.reconnectBar} role="status">
+      <VscWarning aria-hidden="true" />
+      <span>{activeTerminal.state === 'failed' ? t('terminal.failedHint') : t('terminal.disconnectedHint')}</span>
+      <button type="button" onClick={() => { void reconnectTerminal(activeTerminal.id) }}><VscRefresh />{t('terminal.reconnect')}</button>
+    </div>}
     <div className={css.terminalStage}>
-      {terminals.map(terminal => <TerminalPane key={terminal.id} sessionId={sessionId} terminal={terminal} active={terminal.id === activeTerminalId} onSnapshot={updateTerminal} />)}
+      {terminals.map(terminal => <TerminalPane
+        key={terminal.id}
+        ref={node => { if (node === null) terminalRefs.current.delete(terminal.id); else terminalRefs.current.set(terminal.id, node) }}
+        sessionId={sessionId}
+        terminal={terminal}
+        active={terminal.id === activeTerminalId}
+        initialInput={pendingInput[terminal.id]}
+        onInitialInputConsumed={() => { setPendingInput(current => { const next = { ...current }; delete next[terminal.id]; return next }) }}
+        onSnapshot={updateTerminal}
+      />)}
       {activeTerminal === null && <div className={css.empty}><VscTerminal /><strong>{t('terminal.empty')}</strong><span>{selected === null ? t('terminal.selectHost') : t('terminal.openOn', { name: selected.name })}</span>{selected !== null && <button type="button" className={css.primary} onClick={() => { void openTerminal(selected) }}><VscAdd />{t('terminal.new')}</button>}</div>}
     </div>
     <footer className={css.statusBar}>
-      <span><i data-state={activeTerminal?.state ?? 'disconnected'} />{activeTerminal?.state ?? 'No session'}</span>
-      <span>{activeTerminal?.cwd ?? 'Working directory unavailable'}</span>
+      <span><i data-state={activeTerminal?.state ?? 'disconnected'} />{activeTerminal === null ? t('terminal.noSession') : t(TERMINAL_STATE_LABELS[activeTerminal.state])}</span>
+      <span>{activeTerminal?.cwd ?? t('terminal.cwdUnavailable')}</span>
       <span className={css.spacer} />
-      <span>{terminals.length} session{terminals.length === 1 ? '' : 's'}</span>
+      <span>{t(terminals.length === 1 ? 'terminal.sessionCountOne' : 'terminal.sessionCountMany', { count: terminals.length })}</span>
       {selected !== null && <span>{selected.name}</span>}
     </footer>
   </section>
@@ -602,38 +906,33 @@ export function SshManager({ ctx, sessionId, visible }: { ctx: Context; sessionI
       <div className={css.globalActions}>
         <IconButton label={t(inventoryOpen ? 'app.hideExplorer' : 'app.showExplorer')} aria-pressed={inventoryOpen} onClick={() => { setInventoryOpen(current => !current) }}><VscLayoutSidebarLeft /></IconButton>
         <IconButton label={t('inventory.addCluster')} onClick={() => { beginCluster() }}><VscFolder /></IconButton>
-        <IconButton label={t('inventory.addHost')} onClick={() => { beginHost() }}><VscAdd /></IconButton>
+        <IconButton label={t('inventory.newConnection')} onClick={() => { beginHost() }}><VscAdd /></IconButton>
       </div>
     </header>
     {error !== null && <div className={css.error} role="alert"><VscInfo />{error}<IconButton label={t('action.dismissError')} onClick={() => { setError(null) }}><VscClose /></IconButton></div>}
+    {notice !== null && <div className={css.notice} role="status">{notice}</div>}
     <div className={css.workspace} data-inventory={inventoryOpen} data-overlay={view !== 'hosts'}>
       {inventoryOpen && renderInventory()}
       <main className={css.mainWorkspace}>{view === 'hosts' ? renderOverview() : view === 'terminal' ? renderTerminal() : view === 'files' ? renderFiles() : renderTunnels()}</main>
     </div>
     {renderContextMenu()}
 
-    {hostForm !== null && <div className={css.backdrop}>
-      <div className={css.dialog} role="dialog" aria-modal="true" aria-label={t('dialog.host')}>
-        <header><div><strong>{t(hostForm.id === '' ? 'dialog.addHost' : 'dialog.editHost')}</strong><span>{t('dialog.hostSecrets')}</span></div><IconButton label={t('action.close')} onClick={() => { setHostForm(null); setCredential({}) }}><VscClose /></IconButton></header>
-        <div className={css.form}>
-          <label>{t('field.name')}<input autoFocus value={hostForm.name} onChange={event => { setHostForm({ ...hostForm, name: event.target.value }) }} /></label>
-          <label>{t('field.hostname')}<input value={hostForm.hostname} onChange={event => { setHostForm({ ...hostForm, hostname: event.target.value }) }} /></label>
-          <label>{t('field.port')}<input type="number" min={1} max={65535} value={hostForm.port} onChange={event => { setHostForm({ ...hostForm, port: Number(event.target.value) }) }} /></label>
-          <label>{t('field.user')}<input value={hostForm.username} onChange={event => { setHostForm({ ...hostForm, username: event.target.value }) }} /></label>
-          <label>{t('field.environment')}<Select label={t('field.environment')} value={hostForm.environment} options={environmentOptions} onChange={value => { setHostForm({ ...hostForm, environment: value as SshEnvironment }) }} /></label>
-          <label>{t('field.cluster')}<Select label={t('field.cluster')} value={hostForm.clusterId ?? ''} options={clusterOptions} onChange={value => { setHostForm({ ...hostForm, clusterId: value || null }) }} /></label>
-          <label>{t('field.authentication')}<Select label={t('field.authentication')} value={hostForm.authKind} options={authOptions} onChange={value => { setHostForm({ ...hostForm, authKind: value as SshHost['authKind'] }); setCredential({}) }} /></label>
-          {hostForm.authKind === 'password' && <label>{t('field.password')}<input type="password" value={credential.password ?? ''} onChange={event => { setCredential({ password: event.target.value }) }} placeholder={hostForm.credentialConfigured ? t('field.keepCredential') : ''} /></label>}
-          {hostForm.authKind === 'private-key' && <><label className={css.full}>{t('field.privateKey')}<textarea value={credential.privateKey ?? ''} onChange={event => { setCredential({ ...credential, privateKey: event.target.value }) }} placeholder={hostForm.credentialConfigured ? t('field.keepCredential') : t('field.privateKeyPlaceholder')} /></label><label>{t('field.passphrase')}<input type="password" value={credential.passphrase ?? ''} onChange={event => { setCredential({ ...credential, passphrase: event.target.value }) }} /></label></>}
-          <label>{t('field.jumpHost')}<Select label={t('field.jumpHost')} value={hostForm.jumpHostId ?? ''} options={jumpHostOptions} onChange={value => { setHostForm({ ...hostForm, jumpHostId: value || null }) }} /></label>
-          <label>{t('field.keepaliveSeconds')}<input type="number" min={0} value={hostForm.keepAliveSeconds} onChange={event => { setHostForm({ ...hostForm, keepAliveSeconds: Number(event.target.value) }) }} /></label>
-          <label className={css.full}>{t('field.knownHostFingerprint')}<input value={hostForm.knownHostFingerprint ?? ''} onChange={event => { setHostForm({ ...hostForm, knownHostFingerprint: event.target.value || null }) }} placeholder={t('field.fingerprintPlaceholder')} /></label>
-          <label className={css.full}>{t('field.tags')}<input value={hostForm.tags.join(', ')} onChange={event => { setHostForm({ ...hostForm, tags: event.target.value.split(',').map(tag => tag.trim()).filter(Boolean) }) }} placeholder={t('field.tagsPlaceholder')} /></label>
-          <label className={css.full}>{t('field.description')}<textarea value={hostForm.description} onChange={event => { setHostForm({ ...hostForm, description: event.target.value }) }} /></label>
-        </div>
-        <footer><button type="button" onClick={() => { setHostForm(null); setCredential({}) }}>{t('action.cancel')}</button><button type="button" className={css.primary} disabled={hostForm.name.trim() === '' || hostForm.hostname.trim() === '' || hostForm.username.trim() === ''} onClick={() => { void saveHost() }}>{t('action.saveHost')}</button></footer>
-      </div>
-    </div>}
+    {hostForm !== null && <ConnectionWizard
+      mode={hostForm.id === '' ? 'create' : 'edit'}
+      host={hostForm}
+      credential={credential}
+      clusters={state.clusters}
+      hosts={state.hosts}
+      busy={wizardBusy}
+      probing={probing}
+      testTag={wizardTest}
+      onChangeHost={next => { setHostForm(next) }}
+      onChangeCredential={next => { setCredential(next) }}
+      onTest={() => { void testWizardDraft() }}
+      onSave={() => { void saveHost() }}
+      onClose={() => { setHostForm(null); setCredential({}); setWizardTest(null); setWizardResult(null) }}
+      onProbe={() => { void probeFingerprint() }}
+    />}
 
     {clusterForm !== null && <div className={css.backdrop}>
       <div className={css.dialog} role="dialog" aria-modal="true" aria-label={t('dialog.cluster')}>

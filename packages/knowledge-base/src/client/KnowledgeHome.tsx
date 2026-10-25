@@ -17,6 +17,7 @@
  */
 
 import { ownerLabelOf } from './ownerLabel.ts'
+import { departmentPathLabels, folderLabelOf } from './departmentFolders.ts'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Button,
@@ -26,6 +27,7 @@ import {
   IconRightUpOutlineRegular,
   SegmentedTabs,
   Tag,
+  Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgeHome.module.css'
@@ -39,6 +41,7 @@ import {
   type TreeClipboard,
 } from './KnowledgeContextMenu.tsx'
 import { shareCopyFor } from './knowledgeMenuCopy.ts'
+import { KnowledgeShareDialog } from './KnowledgeShareDialog.tsx'
 import {
   mergeShareRows,
   shareRelationText,
@@ -47,7 +50,7 @@ import {
   type ShareGrant,
   type ShareRow,
 } from './shareRelations.ts'
-import { DEFAULT_PAGE_SIZE, paginate } from './paging.ts'
+import { DEFAULT_PAGE_SIZE, needsPager, paginate } from './paging.ts'
 import { bucketOfPath, isInOwnPersonalFolder } from './mineScope.ts'
 
 /** One document row, as the table renders it. */
@@ -113,6 +116,22 @@ export interface KnowledgeHomeProps {
   /** The caller's own department name; the code stands in when this is absent. */
   departmentName?: string
   /**
+   * Display names for the three buckets.
+   *
+   * The same map the file tree uses, so one vocabulary covers both surfaces: a folder
+   * called `personal` on disk reads as 「个人」 in the tree AND in this table's Location
+   * column. A second mapping table here is exactly the two-truths defect this reuses the
+   * tree's helper to avoid.
+   */
+  bucketLabels?: Readonly<Record<string, string>>
+  /**
+   * The caller's organization chain, codes first and names aligned.
+   *
+   * Passed the same way the tree takes it, so a nested department path reads as
+   * 「部门/数据平台」 here instead of `department/data-platform`.
+   */
+  departmentPath?: { codes: readonly string[]; names: readonly string[] }
+  /**
    * Whether the Host verified this caller may manage grants.
    *
    * This is the ONLY per-caller permission answer the client receives. There is no
@@ -169,6 +188,25 @@ export interface KnowledgeHomeProps {
    */
   onUpload?: (directory: string, files: readonly { file: unknown; relativePath: string }[]) => void
   /**
+   * Read the document rows for this mount.
+   *
+   * TEST SEAM, NOT AN EXTENSION POINT. It exists so a test can count how many times the
+   * table re-reads when `refreshTick` bumps -- the only way to tell "the table refreshed"
+   * apart from "a row happened to appear". It is optional and defaults to the real
+   * implementation below, so production behaviour is unchanged; do not use it as a hook
+   * for new features.
+   */
+  readHomeRows?: (mountPoint: string) => Promise<HomeRow[]>
+  /**
+   * Re-read trigger.
+   *
+   * A file uploaded from anywhere in the panel changes what this table should list, and
+   * the panel already bumps one counter for exactly that. Without this the tree refreshed
+   * and the table did not, so a reader who had just uploaded a file could not find it --
+   * indistinguishable from the upload having failed.
+   */
+  refreshTick?: number
+  /**
    * Where a drop on this table lands, tree-relative.
    *
    * The reader's own folder is the right default: `global` is the bucket everyone
@@ -176,6 +214,85 @@ export interface KnowledgeHomeProps {
    * means the mount root, which is what a caller with no personal bucket gets.
    */
   dropDirectory?: string
+}
+
+/**
+ * Read the document rows for one mount.
+ *
+ * One level deep in each bucket, because documents live inside the buckets, not beside
+ * them: the mount's own level holds only `global`/`department`/`personal`, so listing it
+ * alone yields an empty table no matter how many documents exist. Each bucket is one
+ * directory deep, which is where a document sits, so the walk stops there instead of
+ * turning a landing page into a full filesystem scan.
+ * @param mountPoint - the knowledge root, absolute.
+ * @returns Every document row the table shows, in bucket order.
+ */
+async function loadHomeRows(mountPoint: string): Promise<HomeRow[]> {
+  const listLevel = async (path: string): Promise<Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>> => {
+    const response = await fetch(kbApiPath(KB_API.list), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+      cache: 'no-store',
+    })
+    if (!response.ok) throw new Error('HTTP ' + String(response.status))
+    const body = await readKnowledgeJson<{
+      entries?: Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>
+    }>(response)
+    return body.entries ?? []
+  }
+  const root = await listLevel('')
+  // A bucket that cannot be read must not hide the others; the tree reports per-row
+  // readability, so this surface stays a convenience listing.
+  const buckets = root.filter(entry => entry.isDir).map(entry => entry.relPath)
+  const nested = await Promise.all(buckets.map(async bucket => {
+    try {
+      return (await listLevel(bucket)).filter(entry => !entry.isDir)
+    } catch {
+      return []
+    }
+  }))
+  return nested.flat().map(entry => ({
+    relPath: entry.relPath,
+    name: entry.name,
+    location: locationOf(entry.relPath),
+    ...(entry.mtimeMs === undefined ? {} : { mtimeMs: entry.mtimeMs }),
+  }))
+}
+
+/**
+ * Resolve a Location cell to the reader's vocabulary.
+ *
+ * Reuses `folderLabelOf` and `departmentPathLabels` -- the two helpers the file tree
+ * already resolves its own rows with -- instead of a second mapping. A path is walked from
+ * its deepest segment up, translating the first prefix that has a label and keeping the
+ * rest of the path as-is, which is what makes `department/data-platform/specs` read as
+ * 「部门/数据平台/specs」 rather than as an untranslated slug or a bare bucket name.
+ *
+ * Only the DISPLAY changes: sorting and filtering still use the raw path, so a translated
+ * label can never reorder rows.
+ * @param relPath - the document's tree-relative path.
+ * @param labels - bucket labels and department chain labels, already flattened.
+ * @returns The text a reader should see.
+ */
+function locationLabelOf(
+  location: string,
+  bucketLabels: Readonly<Record<string, string>> | undefined,
+  chainLabels: ReadonlyMap<string, string> | undefined,
+): string {
+  if (location === '—' || location === '') return location
+  const segments = location.split('/')
+  // Deepest prefix first: `department/ops/q1` must prefer the label for
+  // `department/ops/q1` over the one for `department`.
+  for (let take = segments.length; take >= 1; take -= 1) {
+    const prefix = segments.slice(0, take).join('/')
+    const label = folderLabelOf(prefix, bucketLabels, chainLabels)
+    if (label !== undefined) {
+      const rest = segments.slice(take)
+      return rest.length === 0 ? label : label + '/' + rest.join('/')
+    }
+  }
+  return location
 }
 
 /** Format one instant for the table, matching the preview's own absolute form. */
@@ -328,6 +445,18 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
    */
   const [menu, setMenu] = useState<{ target: ContextTarget; at: { x: number; y: number } } | null>(null)
   /**
+   * The row whose Share dialog is open, or null.
+   *
+   * The context menu mounts its own dialog for ITS share entry; the actions column needs
+   * the same dialog for a row a reader never right-clicked, and it cannot reach into the
+   * menu's state. One extra instance of the same component -- the dialog is self-contained
+   * (path in, callbacks out), so this shares behaviour without sharing state, which is the
+   * only thing that could drift.
+   */
+  const [shareTarget, setShareTarget] = useState<ContextTarget | null>(null)
+  /** The row being deleted, so its button can show it is working. */
+  const [deletingPath, setDeletingPath] = useState<string | undefined>(undefined)
+  /**
    * The cut/copied entry, held for the clipboard's lifetime.
    *
    * Client state, like the tree's: nothing about a pending paste is worth persisting,
@@ -336,6 +465,16 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   const [clipboard, setClipboard] = useState<TreeClipboard | null>(null)
   /** Locale-resolved copy for the share dialog, whose strings are dialog-specific. */
   const shareCopy = useMemo(() => shareCopyFor(props.locale), [props.locale])
+  /**
+   * The label resolver for the Location column.
+   *
+   * Built from the same two inputs the file tree takes, so both surfaces name a folder
+   * identically. `useMemo` keeps the map from being rebuilt per row.
+   */
+  const locationOfPath = useMemo(() => {
+    const chainLabels = departmentPathLabels(props.departmentPath?.codes, props.departmentPath?.names)
+    return (location: string): string => locationLabelOf(location, props.bucketLabels, chainLabels)
+  }, [props.bucketLabels, props.departmentPath])
 
   /**
    * The two share groups, read from the grants route the permissions page already uses.
@@ -461,43 +600,49 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
       }
       setState('loading')
       try {
-        const listLevel = async (path: string): Promise<Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>> => {
-          const response = await fetch(kbApiPath(KB_API.list), {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ path }),
-            cache: 'no-store',
-          })
-          if (!response.ok) throw new Error('HTTP ' + String(response.status))
-          const body = await readKnowledgeJson<{
-            entries?: Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>
-          }>(response)
-          return body.entries ?? []
-        }
-        const root = await listLevel('')
-        // A bucket that cannot be read must not hide the others; the tree reports
-        // per-row readability, so this surface stays a convenience listing.
-        const buckets = root.filter(entry => entry.isDir).map(entry => entry.relPath)
-        const nested = await Promise.all(buckets.map(async bucket => {
-          try {
-            return (await listLevel(bucket)).filter(entry => !entry.isDir)
-          } catch {
-            return []
-          }
-        }))
-        setRows(nested.flat().map(entry => ({
-          relPath: entry.relPath,
-          name: entry.name,
-          location: locationOf(entry.relPath),
-          ...(entry.mtimeMs === undefined ? {} : { mtimeMs: entry.mtimeMs }),
-        })))
+        // The loader is injectable so a test can count re-reads; in production it is the
+        // module-level implementation, so this call is the same work it always was.
+        const loaded = await (props.readHomeRows ?? loadHomeRows)(props.mountPoint)
+        setRows(loaded)
         setState('ready')
       } catch {
         setState('error')
       }
-    }, [props.mountPoint])
+    }, [props.mountPoint, props.refreshTick])
 
   useEffect(() => { void read() }, [read])
+
+  /**
+   * Delete one row to the trash, then re-read the table.
+   *
+   * The same route the context menu's Delete uses (`trash.remove` records a tombstone; it
+   * does not unlink, which is why the tree and this table must both reload rather than
+   * patch a row out locally). The confirmation is the browser's own, because the actions
+   * column is a one-click control: a destructive icon a reader can hit by accident needs a
+   * stop in front of it, and the menu's Delete has the row already named by the click.
+   * @param row - the row to remove.
+   */
+  const removeRow = useCallback(async (row: HomeRow): Promise<void> => {
+    const label = c('actionDelete') + ' ' + row.name
+    if (typeof window !== 'undefined' && !window.confirm(label + '?')) return
+    setDeletingPath(row.relPath)
+    try {
+      const response = await fetch(kbApiPath(KB_API.trashRemove), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ relPath: row.relPath, kind: 'file' }),
+        cache: 'no-store',
+      })
+      if (!response.ok) throw new Error('HTTP ' + String(response.status))
+      props.onTreeChanged?.()
+    } catch {
+      // The table re-reads either way: a failed delete that silently left the row on
+      // screen would read as a successful one.
+      props.onTreeChanged?.()
+    } finally {
+      setDeletingPath(undefined)
+    }
+  }, [c, props])
 
   /**
    * Which create/upload flow one card row starts.
@@ -531,6 +676,15 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
    * no owner per file, only DataOps grants -- so they keep the empty list and their own
    * empty-state wording rather than inventing a split the data cannot support.
    */
+  /**
+   * Which page of the document table is showing.
+   *
+   * Held here because this component renders the table: the page index and the rows it
+   * slices have to live in the same scope, or the slice refers to a name the table cannot
+   * see.
+   */
+  const [docPage, setDocPage] = useState(1)
+
   const visible = useMemo(() => {
     if (tab === 'recent') return [...rows].sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
     if (tab === 'starred') {
@@ -558,6 +712,21 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
     }
     return []
   }, [tab, rows, props.isFavorite, props.callerId, props.canManageGrants])
+
+  /**
+   * The rows the table actually draws, one page at a time.
+   *
+   * `paginate` owns the clamping: it keeps the page inside the available range, so a tab
+   * switch that leaves fewer rows than the current page does not render an empty table.
+   */
+  const docPageRows = useMemo(
+    () => paginate(visible, docPage, DEFAULT_PAGE_SIZE),
+    [visible, docPage],
+  )
+
+  // A tab switch changes the row set under a fixed page index, which would otherwise show
+  // page 3 of a two-page list. Reset to the first page whenever the tab changes.
+  useEffect(() => { setDocPage(1) }, [tab])
 
   // The product's own glyphs rather than drawn characters: a text glyph renders at
   // the font's weight and baseline, which reads heavier than the 1px icon stroke
@@ -728,22 +897,27 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         <table className={styles.table}>
           <thead>
             <tr>
-              <th>{c('homeColTitle')}</th>
-              <th>{c('homeColLocation')}</th>
-              <th>{c('homeColOwner')}</th>
-              <th>{c('homeColCreated')}</th>
-              <th>{c('homeColOpened')}</th>
+              {/* Fixed widths, set on the columns rather than the cells: with
+                  `table-layout: fixed` the browser distributes from these and a long
+                  file name can then only ellipsise, never push the date columns out of
+                  the surface (which is what the reported screenshot showed). */}
+              <th className={styles.colTitle}>{c('homeColTitle')}</th>
+              <th className={styles.colLocation}>{c('homeColLocation')}</th>
+              <th className={styles.colOwner}>{c('homeColOwner')}</th>
+              <th className={styles.colTime}>{c('homeColCreated')}</th>
+              <th className={styles.colTime}>{c('homeColOpened')}</th>
+              <th className={styles.colActions}>{c('colActions')}</th>
             </tr>
           </thead>
           <tbody>
             {state === 'loading' && (
               <tr className={styles.emptyRow}>
-                <td colSpan={5}>{c('loading')}</td>
+                <td colSpan={6}>{c('loading')}</td>
               </tr>
             )}
             {state === 'error' && (
               <tr className={styles.emptyRow}>
-                <td colSpan={5}>{c('unavailable')}</td>
+                <td colSpan={6}>{c('unavailable')}</td>
               </tr>
             )}
             {state === 'ready' && visible.length === 0 && (
@@ -751,10 +925,10 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                 {/* A starred tab with nothing in it is not an empty knowledge base; it
                     is "you have not starred anything yet". Saying the former would send
                     the reader looking for lost documents. */}
-                <td colSpan={5}>{tab === 'starred' ? c('homeStarredEmpty') : c('homeEmpty')}</td>
+                <td colSpan={6}>{tab === 'starred' ? c('homeStarredEmpty') : c('homeEmpty')}</td>
               </tr>
             )}
-            {visible.map(row => (
+            {docPageRows.rows.map(row => (
               <tr
                 key={row.relPath}
                 // On the row root, not on a cell: a right-click lands on whichever
@@ -779,14 +953,21 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                     {/* The title is the link and the rest of the row is data, so the
                         control belongs inside the cell rather than wrapping the row.
                         `Button` would paint a bordered control where this reads as a
-                        link. */}
-                    <button
-                      type="button"
-                      className={styles.rowLink}
-                      onClick={() => { props.onOpen(row.relPath) }}
-                    >
-                      {row.name}
-                    </button>
+                        link.
+
+                        The `Tooltip` is what makes the ellipsis honest: a truncated name
+                        is unreadable in the one place a reader needs to tell two
+                        documents apart, so hovering has to reveal it. `portal` keeps the
+                        bubble out of the table's own clipping. */}
+                    <Tooltip label={row.name} portal side="top" align="end">
+                      <button
+                        type="button"
+                        className={styles.rowLink}
+                        onClick={() => { props.onOpen(row.relPath) }}
+                      >
+                        {row.name}
+                      </button>
+                    </Tooltip>
                     {props.isFavorite?.(row.relPath) === true && (
                       <span
                         className={styles.favoriteMark}
@@ -798,7 +979,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                     )}
                   </span>
                 </td>
-                <td className={styles.muted}>{row.location}</td>
+                <td className={styles.muted}>{locationOfPath(row.location)}</td>
                 {/* Ownership follows the bucket the document sits in, not a guess
                     from its name: shared documents belong to everyone, a department
                     folder to that department, and a personal folder to its owner. */}
@@ -821,10 +1002,93 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                 </td>
                 <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
                 <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
+                {/* The actions column. Three controls, each with its own accessible
+                    name: an icon-only button without one is unusable by keyboard and
+                    invisible to a screen reader. */}
+                <td className={styles.actionsCell}>
+                  <span className={styles.rowActions}>
+                    <Tooltip label={props.isFavorite?.(row.relPath) === true ? c('actionUnfavorite') : c('actionFavorite')} portal side="top">
+                      <button
+                        type="button"
+                        className={props.isFavorite?.(row.relPath) === true ? styles.iconButtonOn : styles.iconButton}
+                        aria-label={props.isFavorite?.(row.relPath) === true ? c('actionUnfavorite') : c('actionFavorite')}
+                        aria-pressed={props.isFavorite?.(row.relPath) === true}
+                        onClick={() => { props.onFavorite?.(row.relPath, props.isFavorite?.(row.relPath) !== true) }}
+                      >
+                        {props.isFavorite?.(row.relPath) === true ? '★' : '☆'}
+                      </button>
+                    </Tooltip>
+                    <Tooltip label={c('actionShare')} portal side="top">
+                      <button
+                        type="button"
+                        className={styles.iconButton}
+                        aria-label={c('actionShare')}
+                        onClick={() => { setShareTarget({ relPath: row.relPath, name: row.name, isDir: false }) }}
+                      >
+                        {/* A share knot: three nodes joined, drawn inline so this control
+                            adds no dependency for one glyph. */}
+                        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                          <circle cx="12" cy="3.4" r="1.9" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                          <circle cx="4" cy="8" r="1.9" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                          <circle cx="12" cy="12.6" r="1.9" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                          <path d="M5.7 7.1 10.3 4.3M5.7 8.9l4.6 2.8" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    </Tooltip>
+                    <Tooltip label={c('actionDelete')} portal side="top">
+                      <button
+                        type="button"
+                        className={styles.iconButtonDanger}
+                        aria-label={c('actionDelete')}
+                        disabled={deletingPath === row.relPath}
+                        onClick={() => { void removeRow(row) }}
+                      >
+                        {/* A bin: lid, body, handle. */}
+                        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                          <path d="M3 4.4h10M6.3 4.4V3.1h3.4v1.3M4.3 4.4l.6 8.2a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.6-8.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
+                    </Tooltip>
+                  </span>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
+        )}
+
+        {/* The pager for the document table.
+
+            Rendered on the same condition the audit trail uses (`needsPager`), so the
+            control appears exactly when there is more than one page -- a pager reading
+            "1 / 1" is noise on a short list.
+
+            The counts come from `docPageRows`, which clamps the page, so the label always
+            describes a page that exists. */}
+        {tab !== 'shared' && needsPager(visible.length, DEFAULT_PAGE_SIZE) && (
+          <div className={styles.docPager}>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={docPageRows.page <= 1}
+              onClick={() => { setDocPage(docPageRows.page - 1) }}
+            >
+              {c('auditPagePrev')}
+            </Button>
+            <span className={styles.muted}>
+              {c('auditPageOf')
+                .replace('{page}', String(docPageRows.page))
+                .replace('{pages}', String(docPageRows.pageCount))}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={docPageRows.page >= docPageRows.pageCount}
+              onClick={() => { setDocPage(docPageRows.page + 1) }}
+            >
+              {c('auditPageNext')}
+            </Button>
+          </div>
         )}
 
         {/* The Share tab is two tables, not one: the two directions answer different
@@ -856,6 +1120,17 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
       {/* One menu for the whole table, mounted outside the scroll container so it is
           not clipped by it. Rows are re-read often; a menu owned by a row would unmount
           mid-interaction. */}
+      <KnowledgeShareDialog
+        relPath={shareTarget === null ? null : shareTarget.relPath}
+        isDir={false}
+        copy={shareCopy}
+        onClose={() => { setShareTarget(null) }}
+        onShared={() => {
+          setShareTarget(null)
+          props.onTreeChanged?.()
+        }}
+      />
+
       <KnowledgeContextMenu
         target={menu?.target ?? null}
         at={menu?.at ?? null}

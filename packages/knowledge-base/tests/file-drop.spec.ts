@@ -18,7 +18,7 @@ import {
   type DroppedFile,
   type DropTargetLike,
 } from '../src/client/useFileDrop.ts'
-import { PROGRESS_DEFAULT_HEIGHT, PROGRESS_MIN_HEIGHT, clampProgressHeight, canRetryExtraction, failureReason } from '../src/client/progressRules.ts'
+import { canRetryExtraction, failureReason, pendingCount, tallyExtraction, tallyUploads } from '../src/client/progressRules.ts'
 
 /** A folder row that accepts drops. */
 const dir = (relativePath: string, overrides: Partial<DropTargetLike> = {}): DropTargetLike => ({
@@ -241,45 +241,50 @@ describe('a failure reason survives a response that is not JSON', () => {
   })
 })
 
-describe('the progress strip height stays inside its bounds', () => {
+describe('the notification badge counts only work still in flight', () => {
   /**
-   * The strip is resizable, so every drag is a chance to make the file tree unreachable
-   * (drag too tall) or to leave an unusable sliver (drag too short). The clamp is the
-   * only thing standing between the reader and either end, so both bounds are pinned.
+   * The badge is what tells a reader whether opening the panel is worth it. A number that
+   * lingers after everything finished trains them to ignore it, and a number that misses a
+   * task hides exactly the work they are waiting on.
+   *
+   * `unsupported` is settled: no extractor exists for the format, so it can never become
+   * finished work and must not keep the badge lit.
    */
-  it('never lets the strip shrink below the minimum', () => {
-    // A reader dragging down hard must still leave a readable row.
-    expect(clampProgressHeight(0, 800)).toBe(PROGRESS_MIN_HEIGHT)
-    expect(clampProgressHeight(-500, 800)).toBe(PROGRESS_MIN_HEIGHT)
+  it('counts queued and running work on both sides', () => {
+    expect(pendingCount(
+      [{ state: 'waiting' }, { state: 'uploading' }],
+      [{ state: 'pending' }, { state: 'running' }],
+    )).toBe(4)
   })
 
-  it('never lets the strip take more than its share of the panel', () => {
-    // 60% of 800 = 480: the tree keeps 320px, so it is still reachable and usable.
-    const clamped = clampProgressHeight(10_000, 800)
-    expect(clamped).toBeLessThanOrEqual(480)
-    expect(clamped).toBeGreaterThanOrEqual(PROGRESS_MIN_HEIGHT)
+  it('ignores every settled upload', () => {
+    // 3 files, 2 landed: the badge shows the 1 still moving, not 3.
+    expect(pendingCount([{ state: 'done' }, { state: 'done' }, { state: 'uploading' }], [])).toBe(1)
+    expect(pendingCount([{ state: 'done' }, { state: 'failed' }], [])).toBe(0)
   })
 
-  it('scales the maximum with the panel, not a fixed pixel cap', () => {
-    // A taller panel may give the strip more room; a short one must not.
-    expect(clampProgressHeight(10_000, 1200)).toBeGreaterThan(clampProgressHeight(10_000, 400))
+  it('ignores settled and unsupported extractions', () => {
+    // `unsupported` 是终态：它永远不会变成完成的工作，留着会让角标长亮。
+    expect(pendingCount([], [
+      { state: 'succeeded' },
+      { state: 'failed' },
+      { state: 'unsupported' },
+    ])).toBe(0)
   })
 
-  it('passes a height that is already legal straight through', () => {
-    expect(clampProgressHeight(180, 800)).toBe(180)
-    expect(clampProgressHeight(PROGRESS_MIN_HEIGHT, 800)).toBe(PROGRESS_MIN_HEIGHT)
+  it('is zero when nothing has been queued', () => {
+    // 角标为 0 时不渲染，这个 0 是那个判断的输入。
+    expect(pendingCount([], [])).toBe(0)
   })
 
-  it('falls back to the default when the panel height is unknown', () => {
-    // Before layout the parent height is 0/undefined; the drag must still be sane
-    // rather than collapsing to the minimum.
-    expect(clampProgressHeight(500, undefined)).toBeGreaterThanOrEqual(PROGRESS_MIN_HEIGHT)
-    expect(clampProgressHeight(500, 0)).toBeGreaterThanOrEqual(PROGRESS_MIN_HEIGHT)
-  })
-
-  it('returns the default for a non-finite drag value', () => {
-    // A pointer event can report NaN mid-teardown; a NaN height would blank the strip.
-    expect(clampProgressHeight(Number.NaN, 800)).toBe(PROGRESS_DEFAULT_HEIGHT)
-    expect(clampProgressHeight(Number.POSITIVE_INFINITY, 800)).toBe(PROGRESS_DEFAULT_HEIGHT)
+  it('decrements as each task settles', () => {
+    // 一次上传 3 个：显示 3，完成一个减到 2，全部完成后归零。
+    const batch = [{ state: 'uploading' }, { state: 'uploading' }, { state: 'uploading' }]
+    expect(pendingCount(batch, [])).toBe(3)
+    batch[0].state = 'done'
+    expect(pendingCount(batch, [])).toBe(2)
+    batch[1].state = 'failed'
+    batch[2].state = 'done'
+    expect(pendingCount(batch, [])).toBe(0)
   })
 })

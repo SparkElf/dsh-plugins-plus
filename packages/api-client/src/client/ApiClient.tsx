@@ -8,6 +8,7 @@ import {
   VscCloudUpload,
   VscCode,
   VscComment,
+  VscCopy,
   VscEdit,
   VscFolder,
   VscHistory,
@@ -25,6 +26,7 @@ import type {
   ApiClientState,
   ApiCollection,
   ApiEnvironment,
+  ApiEnvironmentVariable,
   ApiKeyValue,
   ApiMethod,
   ApiMultipartPart,
@@ -35,7 +37,10 @@ import type {
 import { apiClientCall, type ApiExchangeFormat, type ExecuteResult, type ExportResult, type ImportResult, loadApiState } from './api.ts'
 import { ActionMenu, Select, type SelectOption } from './Dropdown.tsx'
 import { useT, type Translate, type TranslationKey } from './i18n.tsx'
-import { cloneRequest, formatResponseBody, readMultipartParts, requestFingerprint, responseCookies, responseForRequest, writeMultipartParts } from './model.ts'
+import { cloneRequest, findUndefinedVariables, readMultipartParts, requestFingerprint, responseCookies, responseForRequest, validateJsonBody, writeMultipartParts } from './model.ts'
+import { parseCurl } from '../curl.ts'
+import { JsonTree, parseJsonValue } from './JsonTree.tsx'
+import { copyText } from './clipboard.ts'
 import css from './ApiClient.module.css'
 
 interface ConversationInput { state: { getSnapshot(): { draft: string } }; setDraft(text: string): void }
@@ -125,25 +130,27 @@ function MultipartEditor({ content, onChange }: { content: string; onChange(cont
   </div>
 }
 
-function ResponseViewer({ response, history, tab, onTab, onHistory }: { response: ApiResponse | null; history: ApiResponse[]; tab: ResponseTab; onTab(tab: ResponseTab): void; onHistory(id: string): void }) {
+function ResponseViewer({ response, history, tab, onTab, onHistory, onCopyCurl, copiedCurl }: { response: ApiResponse | null; history: ApiResponse[]; tab: ResponseTab; onTab(tab: ResponseTab): void; onHistory(id: string): void; onCopyCurl(): void; copiedCurl: boolean }) {
   const t = useT()
   const cookies = response === null ? [] : responseCookies(response)
+  const json = response === null ? undefined : parseJsonValue(response.body)
   const tabLabels: Record<ResponseTab, string> = { pretty: t('response.pretty'), raw: t('response.raw'), headers: t('response.headers'), cookies: t('response.cookies'), history: t('response.history') }
-  return <section className={css.responsePane} aria-label={t('response.title')}>
+  return <section className={css.responsePane} data-response-pane aria-label={t('response.title')}>
     <header className={css.responseHeader}>
       <strong>{t('response.title')}</strong>
       {response !== null && <div className={css.responseMetrics}><span data-status={response.status}>{response.status} {response.statusText}</span><span>{response.durationMs} ms</span><span>{response.sizeBytes.toLocaleString()} B</span>{response.bodyTruncated && <span>{t('response.truncated')}</span>}</div>}
+      {response !== null && <button type="button" className={css.responseCopy} aria-label={t('response.copyCurl')} onClick={onCopyCurl}><VscCopy aria-hidden="true" /><span>{copiedCurl ? t('response.copied') : t('response.copyCurl')}</span></button>}
     </header>
     <nav className={css.tabs} aria-label={t('response.views')}>
       {(['pretty', 'raw', 'headers', 'cookies', 'history'] as ResponseTab[]).map(value => <button type="button" data-active={tab === value} key={value} onClick={() => { onTab(value) }}>{tabLabels[value]}{value === 'history' && history.length > 0 ? ' (' + history.length.toString() + ')' : ''}</button>)}
     </nav>
     <div className={css.responseContent}>
       {tab !== 'history' && response === null && <div className={css.empty}>{t('response.empty')}</div>}
-      {response !== null && tab === 'pretty' && <pre className={css.code}>{formatResponseBody(response.body)}</pre>}
+      {response !== null && tab === 'pretty' && (json === undefined ? <pre className={css.code}>{response.body}</pre> : <JsonTree value={json} />)}
       {response !== null && tab === 'raw' && <pre className={css.code}>{response.body}</pre>}
       {response !== null && tab === 'headers' && <div className={css.responseTable}>{response.headers.map((header, index) => <div key={index}><strong>{header.key}</strong><span>{header.value}</span></div>)}</div>}
       {response !== null && tab === 'cookies' && (cookies.length === 0 ? <div className={css.empty}>{t('response.noCookies')}</div> : <div className={css.responseTable}>{cookies.map((cookie, index) => <div key={index}><strong>{cookie.name}</strong><span>{cookie.value}</span><small>{cookie.attributes}</small></div>)}</div>)}
-      {tab === 'history' && <div className={css.history}>{history.length === 0 ? <div className={css.empty}>{t('response.noHistory')}</div> : history.map(item => <button type="button" key={item.id} data-selected={item.id === response?.id} onClick={() => { onHistory(item.id) }}><strong>{item.status}</strong><span>{new Date(item.receivedAt).toLocaleString()}</span><span>{item.durationMs} ms</span><span>{item.sizeBytes.toLocaleString()} B</span></button>)}</div>}
+      {tab === 'history' && <div className={css.history} aria-label={t('history.recent')}>{history.length === 0 ? <div className={css.empty}>{t('response.noHistory')}</div> : history.map(item => <button type="button" key={item.id} data-selected={item.id === response?.id} onClick={() => { onHistory(item.id) }}><strong data-status={item.status}>{item.status}</strong><span>{new Date(item.receivedAt).toLocaleString()}</span><span>{item.durationMs} ms</span><span>{item.sizeBytes.toLocaleString()} B</span></button>)}</div>}
     </div>
   </section>
 }
@@ -162,9 +169,12 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
   const [createKind, setCreateKind] = useState<CreateKind | null>(null)
   const [createName, setCreateName] = useState('')
   const [editResourceId, setEditResourceId] = useState<string | null>(null)
-  const [environmentKey, setEnvironmentKey] = useState('baseUrl')
-  const [environmentValue, setEnvironmentValue] = useState('')
-  const [environmentSecret, setEnvironmentSecret] = useState(false)
+  const [environmentVariables, setEnvironmentVariables] = useState<ApiEnvironmentVariable[]>([])
+  const [curlOpen, setCurlOpen] = useState(false)
+  const [curlText, setCurlText] = useState('')
+  const [curlError, setCurlError] = useState<string | null>(null)
+  const [sendingRequestId, setSendingRequestId] = useState<string | null>(null)
+  const [copiedCurl, setCopiedCurl] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const importInput = useRef<HTMLInputElement | null>(null)
@@ -182,11 +192,13 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
     return state.requests.filter(item => ids.has(item.id) && (needle === '' || [item.name, item.url, item.description].some(value => value.toLowerCase().includes(needle))))
   }, [collections, search, state.requests])
   const response = responseForRequest(state.history, draft?.id, activeTab?.selectedResponseId ?? null)
-  const requestHistory = state.history.filter(item => item.requestId === draft?.id)
 
   const updateActiveTab = (update: (tab: RequestDraftTab) => RequestDraftTab): void => { if (activeTabKey !== null) setRequestTabs(items => items.map(item => item.key === activeTabKey ? update(item) : item)) }
   const updateDraft = (update: (draft: ApiRequest) => ApiRequest): void => { updateActiveTab(item => ({ ...item, draft: update(item.draft) })) }
   const updateAuthSecret = (value: ApiAuthSecretInput): void => { updateActiveTab(item => ({ ...item, authSecret: value })) }
+  const updateEnvironmentVariable = (index: number, patch: Partial<ApiEnvironmentVariable>): void => {
+    setEnvironmentVariables(items => items.map((item, row) => row === index ? { ...item, ...patch } : item))
+  }
 
   const refresh = async (): Promise<void> => {
     try {
@@ -240,13 +252,87 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
     try {
       const request = await save()
       if (request === null) return
+      setSendingRequestId(request.id)
       const result = await apiClientCall<ExecuteResult>('requests.execute', { requestId: request.id })
       setState(result.state)
       updateActiveTab(item => ({ ...item, selectedResponseId: result.response.id }))
       setResponseTab('pretty')
       setNarrowView('response')
       setError(null)
-    } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) } finally { setSending(false) }
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure)
+      setError(message === 'API request cancelled' ? t('request.cancelled') : message)
+    } finally { setSending(false); setSendingRequestId(null) }
+  }
+  const cancelSend = async (): Promise<void> => {
+    if (sendingRequestId === null) return
+    try { await apiClientCall('requests.cancel', { requestId: sendingRequestId }) } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
+  }
+  const copyCurl = async (): Promise<void> => {
+    if (response === null) return
+    try {
+      const result = await apiClientCall<{ curl: string }>('requests.curl', { requestId: response.requestId })
+      if (!await copyText(result.curl)) throw new Error(t('request.copyCurlFailed'))
+      setCopiedCurl(true)
+      window.setTimeout(() => { setCopiedCurl(false) }, 1_500)
+      setError(null)
+    } catch (failure) { setError(t('request.copyCurlFailed') + ': ' + (failure instanceof Error ? failure.message : String(failure))) }
+  }
+  const importCurl = async (): Promise<void> => {
+    if (curlText.trim() === '') return
+    try {
+      const parsed = parseCurl(curlText)
+      if (workspace === null) throw new Error(t('error.workspaceRequired'))
+      let collectionId: string | undefined = collections[0]?.id
+      if (collectionId === undefined) {
+        const next = await apiClientCall<ApiClientState>('collections.save', { collection: { id: '', workspaceId: workspace.id, parentId: null, name: t('curl.importedName'), description: '', tags: [], requestIds: [] } satisfies ApiCollection })
+        setState(next)
+        collectionId = next.collections.find(item => item.workspaceId === workspace.id)?.id
+      }
+      if (collectionId === undefined) throw new Error(t('error.workspaceRequired'))
+      const name = (() => {
+        try {
+          const parsedUrl = new URL(parsed.url)
+          return parsedUrl.pathname.split('/').filter(Boolean).at(-1) ?? parsedUrl.hostname
+        } catch { return t('curl.importedName') }
+      })()
+      const nextRequest: ApiRequest = {
+        ...emptyRequest(collectionId, name),
+        method: parsed.method,
+        url: parsed.url,
+        headers: parsed.headers,
+        body: parsed.body,
+        auth: { ...parsed.auth, credentialId: null },
+        environmentId: selectedEnvironmentId === '' ? null : selectedEnvironmentId,
+      }
+      const key = 'curl-' + (++newTabId.current).toString()
+      setRequestTabs(items => [...items, { key, draft: nextRequest, savedFingerprint: null, authSecret: parsed.authSecret, selectedResponseId: null }])
+      setActiveTabKey(key)
+      setEditorTab(parsed.body.kind === 'none' ? 'headers' : 'body')
+      setNarrowView('request')
+      setCurlOpen(false)
+      setCurlText('')
+      setCurlError(null)
+      setError(null)
+    } catch (failure) { setCurlError(failure instanceof Error ? failure.message : String(failure)) }
+  }
+  const formatJsonBody = (): void => {
+    if (draft === null || draft.body.kind !== 'json') return
+    try {
+      const pretty = JSON.stringify(JSON.parse(draft.body.content), null, 2)
+      updateDraft(item => ({ ...item, body: { ...item.body, content: pretty } }))
+    } catch {
+      // The status line already says why; formatting cannot improve invalid JSON.
+    }
+  }
+  const openHistoryResponse = (responseId: string): void => {
+    const item = state.history.find(entry => entry.id === responseId)
+    if (item === undefined) return
+    const request = state.requests.find(entry => entry.id === item.requestId)
+    if (request === undefined) return
+    activateRequest(request)
+    setRequestTabs(items => items.map(entry => entry.draft.id === request.id ? { ...entry, selectedResponseId: responseId } : entry))
+    setResponseTab('pretty')
   }
   const sendToConversation = (): void => {
     if (draft === null) return
@@ -266,11 +352,10 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
     else if (kind === 'collection') setCreateName(state.collections.find(item => item.id === id)?.name ?? '')
     else {
       const environment = state.environments.find(item => item.id === id)
-      const variable = environment?.variables[0]
       setCreateName(environment?.name ?? '')
-      setEnvironmentKey(variable?.key ?? 'baseUrl')
-      setEnvironmentValue(variable?.value ?? '')
-      setEnvironmentSecret(variable?.secret ?? false)
+      setEnvironmentVariables(environment === undefined
+        ? [{ key: 'baseUrl', value: '', credentialId: null, enabled: true, secret: false }]
+        : environment.variables.map(variable => ({ ...variable })))
     }
   }
   const deleteResource = async (kind: CreateKind, id: string): Promise<void> => {
@@ -334,16 +419,17 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
         next = await apiClientCall('collections.save', { collection: { id: editResourceId ?? '', workspaceId: workspace.id, parentId: existing?.parentId ?? null, name: createName, description: existing?.description ?? '', tags: existing?.tags ?? [], requestIds: existing?.requestIds ?? [] } satisfies ApiCollection })
       } else {
         if (workspace === null) throw new Error(t('error.workspaceRequired'))
-        const existing = state.environments.find(item => item.id === editResourceId)
-        const first = environmentKey.trim() === '' ? [] : [{ key: environmentKey, value: environmentValue, credentialId: existing?.variables[0]?.credentialId ?? null, enabled: true, secret: environmentSecret }]
-        next = await apiClientCall('environments.save', { environment: { id: editResourceId ?? '', workspaceId: workspace.id, name: createName, variables: [...first, ...(existing?.variables.slice(1) ?? [])] } satisfies ApiEnvironment })
+        const variables = environmentVariables
+          .map(variable => ({ ...variable, key: variable.key.trim() }))
+          .filter(variable => variable.key !== '')
+        next = await apiClientCall('environments.save', { environment: { id: editResourceId ?? '', workspaceId: workspace.id, name: createName, variables } satisfies ApiEnvironment })
       }
       setState(next)
       if (createKind === 'workspace') setWorkspaceId(editResourceId ?? next.workspaces.at(-1)?.id ?? null)
       setCreateKind(null)
       setEditResourceId(null)
       setCreateName('')
-      setEnvironmentValue('')
+      setEnvironmentVariables([])
       setError(null)
     } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
   }
@@ -354,6 +440,15 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
   const requestBodyOptions = bodyOptions(t)
   const locationOptions = [{ value: 'header', label: t('location.header') }, { value: 'query', label: t('location.query') }]
   const selectedEnvironmentId = draft?.environmentId ?? activeEnvironmentId ?? ''
+  // Values are irrelevant for "is this name defined?"; only the enabled keys matter.
+  const environmentKeys = useMemo(() => {
+    const environment = environments.find(item => item.id === selectedEnvironmentId)
+    const values: Record<string, string> = {}
+    for (const variable of environment?.variables ?? []) if (variable.enabled) values[variable.key] = ''
+    return values
+  }, [environments, selectedEnvironmentId])
+  const undefinedNames = draft === null ? [] : findUndefinedVariables(draft, environmentKeys)
+  const jsonCheck = draft !== null && draft.body.kind === 'json' ? validateJsonBody(draft.body.content) : null
   const narrowLabels: Record<NarrowView, TranslationKey> = { explorer: 'nav.explorer', request: 'nav.request', response: 'nav.response' }
   const editorLabels: Record<EditorTab, TranslationKey> = { params: 'request.params', headers: 'request.headers', auth: 'request.auth', body: 'request.body' }
   const resourceLabel = createKind === null ? '' : t(RESOURCE_KEYS[createKind])
@@ -377,6 +472,7 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
         { id: 'edit-workspace', label: t('menu.renameWorkspace'), icon: <VscEdit />, disabled: workspace === null, onSelect: () => { if (workspace !== null) beginResource('workspace', workspace.id) } },
         { id: 'delete-workspace', label: t('menu.deleteWorkspace'), icon: <VscTrash />, danger: true, disabled: workspace === null, onSelect: () => { if (workspace !== null) void deleteResource('workspace', workspace.id) } },
         { id: 'import', label: t('menu.import'), icon: <VscCloudUpload />, separator: true, onSelect: () => { importInput.current?.click() } },
+        { id: 'import-curl', label: t('menu.importCurl'), icon: <VscCode />, onSelect: () => { setCurlOpen(true); setCurlText(''); setCurlError(null) } },
         { id: 'export-postman', label: t('menu.exportPostman'), icon: <VscJson />, disabled: workspace === null, onSelect: () => { void exportWorkspace('postman') } },
         { id: 'export-openapi', label: t('menu.exportOpenApi'), icon: <VscCode />, disabled: workspace === null, onSelect: () => { void exportWorkspace('openapi') } },
       ]} />
@@ -408,14 +504,17 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
           {requestTabs.map(item => <div key={item.key} data-active={item.key === activeTabKey}><button type="button" title={item.draft.name} onClick={() => { setActiveTabKey(item.key); setNarrowView('request') }}><b data-method={item.draft.method}>{item.draft.method}</b><span>{item.draft.name || t('request.untitled')}</span>{isDirty(item) && <i aria-label={t('request.unsavedChanges')} />}</button><IconButton label={t('request.close', { name: item.draft.name || t('request.fallbackName') })} onClick={() => { closeRequestTab(item.key) }}><VscClose /></IconButton></div>)}
         </nav>
         {draft === null ? <div className={css.empty}>{t('request.selectFromExplorer')}</div> : <div className={css.split}>
-          <section className={css.requestPane} aria-label={t('request.editor')}>
+          <section className={css.requestPane} data-request-pane aria-label={t('request.editor')}>
             <div className={css.requestBar}>
               <Select className={css.methodSelect} label={t('request.httpMethod')} value={draft.method} options={METHOD_OPTIONS} onChange={method => { updateDraft(item => ({ ...item, method })) }} renderValue={option => <b data-method={option?.value}>{option?.label}</b>} />
               <input className={css.urlInput} aria-label={t('request.url')} value={draft.url} onChange={event => { updateDraft(item => ({ ...item, url: event.target.value })) }} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void send() }} placeholder="https://api.example.com/resource" />
               <IconButton label={t('request.save')} onClick={() => { void save() }}><VscSave /></IconButton>
               <IconButton label={t('request.sendToConversation')} onClick={sendToConversation}><VscComment /></IconButton>
-              <button type="button" className={css.send} disabled={sending} onClick={() => { void send() }}><VscPlay aria-hidden="true" /><span>{sending ? t('request.sending') : t('request.send')}</span></button>
+              {sending
+                ? <button type="button" className={css.cancel} onClick={() => { void cancelSend() }}><VscClose aria-hidden="true" /><span>{t('request.cancel')}</span></button>
+                : <button type="button" className={css.send} onClick={() => { void send() }}><VscPlay aria-hidden="true" /><span>{t('request.send')}</span></button>}
             </div>
+            {undefinedNames.length > 0 && <div className={css.variableWarning} role="status">{t('environment.undefined', { names: undefinedNames.join(', ') })}</div>}
             <div className={css.requestMeta}>
               <input aria-label={t('request.name')} value={draft.name} onChange={event => { updateDraft(item => ({ ...item, name: event.target.value })) }} placeholder={t('request.name')} />
               <span className={css.collectionPath}><VscFolder aria-hidden="true" />{state.collections.find(item => item.id === draft.collectionId)?.name ?? t('request.unknownCollection')}</span>
@@ -436,20 +535,41 @@ export function ApiClient({ ctx, sessionId, visible }: { ctx: Context; sessionId
               </div>}
               {editorTab === 'body' && <div className={css.bodyEditor}>
                 <Select className={css.bodyType} label={t('body.requestType')} value={draft.body.kind} options={requestBodyOptions} onChange={kind => { updateDraft(item => ({ ...item, body: { ...item.body, kind } })) }} />
+                {draft.body.kind === 'json' && <div className={css.bodyToolbar}>
+                  <button type="button" disabled={jsonCheck === null || !jsonCheck.valid || draft.body.content.trim() === ''} onClick={formatJsonBody}>{t('body.format')}</button>
+                  <span className={css.bodyStatus} data-valid={jsonCheck?.valid === true}>{jsonCheck?.valid ? t('body.valid') : t('body.invalid', { reason: jsonCheck?.message ?? '' })}</span>
+                </div>}
                 {draft.body.kind === 'none' ? <div className={css.empty}>{t('body.empty')}</div> : draft.body.kind === 'multipart' ? <MultipartEditor content={draft.body.content} onChange={bodyContent => { updateDraft(item => ({ ...item, body: { ...item.body, content: bodyContent } })) }} /> : <textarea aria-label={t('body.editor')} spellCheck={false} value={draft.body.content} onChange={event => { updateDraft(item => ({ ...item, body: { ...item.body, content: event.target.value } })) }} />}
               </div>}
             </div>
           </section>
           <div className={css.splitter} aria-hidden="true" />
-          <ResponseViewer response={response} history={requestHistory} tab={responseTab} onTab={setResponseTab} onHistory={id => { updateActiveTab(item => ({ ...item, selectedResponseId: id })); setResponseTab('pretty') }} />
+          <ResponseViewer response={response} history={state.history} tab={responseTab} onTab={setResponseTab} onHistory={openHistoryResponse} onCopyCurl={() => { void copyCurl() }} copiedCurl={copiedCurl} />
         </div>}
       </main>
     </div>
     {createKind !== null && <div className={css.backdrop} onMouseDown={event => { if (event.currentTarget === event.target) setCreateKind(null) }}><div className={css.dialog} role="dialog" aria-modal="true" aria-label={resourceDialogTitle}>
       <header><strong>{resourceDialogTitle}</strong><IconButton label={t('action.close')} onClick={() => { setCreateKind(null) }}><VscClose /></IconButton></header>
       <label><span>{t('field.name')}</span><input autoFocus value={createName} onChange={event => { setCreateName(event.target.value) }} onKeyDown={event => { if (event.key === 'Enter') void create() }} /></label>
-      {createKind === 'environment' && <><label><span>{t('field.variableKey')}</span><input value={environmentKey} onChange={event => { setEnvironmentKey(event.target.value) }} /></label><label><span>{t('field.variableValue')}</span><input type={environmentSecret ? 'password' : 'text'} value={environmentValue} onChange={event => { setEnvironmentValue(event.target.value) }} /></label><label className={css.check}><input type="checkbox" checked={environmentSecret} onChange={event => { setEnvironmentSecret(event.target.checked) }} /><span>{t('field.storeSecret')}</span></label></>}
+      {createKind === 'environment' && <><label><span>{t('environment.variables')}</span></label>
+        <div className={css.envTable}>
+          {environmentVariables.map((variable, index) => <div className={css.envRow} key={index}>
+            <input type="checkbox" aria-label={t('environment.enableVariable', { index: index + 1 })} checked={variable.enabled} onChange={event => { updateEnvironmentVariable(index, { enabled: event.target.checked }) }} />
+            <input type="text" aria-label={t('field.variableKey')} placeholder={t('field.variableKey')} value={variable.key} onChange={event => { updateEnvironmentVariable(index, { key: event.target.value }) }} />
+            <input type={variable.secret ? 'password' : 'text'} aria-label={t('field.variableValue')} placeholder={variable.secret && variable.value === null ? t('auth.keepCurrent') : t('field.variableValue')} value={variable.value ?? ''} onChange={event => { updateEnvironmentVariable(index, { value: event.target.value }) }} />
+            <label className={css.envSecret}><input type="checkbox" aria-label={t('environment.secretVariable', { index: index + 1 })} checked={variable.secret} onChange={event => { updateEnvironmentVariable(index, { secret: event.target.checked }) }} /><span>{t('field.storeSecret')}</span></label>
+            <IconButton label={t('environment.deleteVariable', { index: index + 1 })} onClick={() => { setEnvironmentVariables(items => items.filter((_, row) => row !== index)) }}><VscTrash /></IconButton>
+          </div>)}
+          <button type="button" className={css.envAdd} onClick={() => { setEnvironmentVariables(items => [...items, { key: '', value: '', credentialId: null, enabled: true, secret: false }]) }}><VscAdd />{t('environment.addVariable')}</button>
+        </div></>}
       <footer><button type="button" onClick={() => { setCreateKind(null) }}>{t('action.cancel')}</button><button type="button" className={css.primary} disabled={createName.trim() === ''} onClick={() => { void create() }}>{editResourceId === null ? t('action.create') : t('action.save')}</button></footer>
+    </div></div>}
+    {curlOpen && <div className={css.backdrop} onMouseDown={event => { if (event.currentTarget === event.target) setCurlOpen(false) }}><div className={[css.dialog, css.curlDialog].join(' ')} role="dialog" aria-modal="true" aria-label={t('curl.title')}>
+      <header><strong>{t('curl.title')}</strong><IconButton label={t('action.close')} onClick={() => { setCurlOpen(false) }}><VscClose /></IconButton></header>
+      <textarea aria-label={t('curl.title')} placeholder={t('curl.placeholder')} spellCheck={false} value={curlText} onChange={event => { setCurlText(event.target.value); setCurlError(null) }} />
+      {curlError !== null && <p className={css.curlError} role="alert">{t('curl.error', { reason: curlError })}</p>}
+      <p className={css.hint}>{t('curl.hint')}</p>
+      <footer><button type="button" onClick={() => { setCurlOpen(false) }}>{t('action.cancel')}</button><button type="button" className={css.primary} disabled={curlText.trim() === ''} onClick={() => { void importCurl() }}>{t('curl.import')}</button></footer>
     </div></div>}
   </div>
 }

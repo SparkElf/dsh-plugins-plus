@@ -79,6 +79,8 @@ export function KnowledgeSelectionBar(props: KnowledgeSelectionBarProps) {
     <div
       className={styles.bar}
       role="toolbar"
+      data-kb-selection-bar=""
+      data-kb-selection-count={props.count}
       aria-label={props.t('filesSelected', { count: props.count })}
       data-testid="kb-selection-bar"
     >

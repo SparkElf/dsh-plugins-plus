@@ -354,3 +354,123 @@
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* ---------------------------------------------------------------------------
+ * The document table's column contract.
+ *
+ * `table-layout: fixed` is what makes the widths below authoritative: with the default
+ * layout a long file name widens its column and pushes the date columns out of the
+ * surface, which is the reported defect. Fixed layout distributes from these widths and
+ * ellipsises instead.
+ *
+ * The three buckets are sized by what they hold: a title is the widest thing a reader
+ * scans, a location is a path fragment, an owner is a short label, and the two dates are
+ * fixed-format strings that need the same room.
+ * ------------------------------------------------------------------------- */
+
+.table {
+  table-layout: fixed;
+}
+
+/* 42% for the title: the widest column, because it is the one a reader reads. */
+.colTitle {
+  width: 42%;
+}
+
+.colLocation {
+  width: 18%;
+}
+
+.colOwner {
+  width: 10%;
+}
+
+/* Both date columns render the same fixed-format stamp, so they share one width. */
+.colTime {
+  width: 11%;
+}
+
+/* The actions column: three 24px controls plus their gaps, and it never shrinks. */
+.colActions {
+  width: 96px;
+}
+
+.actionsCell {
+  padding: 0 6px;
+}
+
+/* Three buttons in a row, right-aligned so they line up regardless of the name above. */
+.rowActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+/* An icon button: a square hit area with no chrome until hovered. */
+.iconButton,
+.iconButtonOn,
+.iconButtonDanger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* A favourited row's star stays lit, so the state is visible without hovering. */
+.iconButtonOn {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.iconButtonOn:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* Delete is the one destructive control in the row, so it announces itself on hover
+   rather than looking like its neighbours until the click lands. */
+.iconButtonDanger {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.iconButtonDanger:hover {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.iconButton:focus-visible,
+.iconButtonOn:focus-visible,
+.iconButtonDanger:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+
+.iconButtonDanger:disabled,
+.iconButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The document table's pager.
+
+   Same row shape as the share table's, placed under the table it pages and aligned to the
+   trailing edge, so the two pagers read as one convention rather than two. */
+.docPager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+}

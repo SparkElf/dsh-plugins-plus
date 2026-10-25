@@ -14,6 +14,8 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-width: 720px;
+  color: var(--dsw-alias-label-primary);
 }
 
 .title {
@@ -31,8 +33,10 @@
 /* The product's settings groups head their block with a quiet small label, not
    an uppercased one: the design system carries no letter-spaced caps step. */
 .groupTitle {
-  margin: 10px 0 0;
-  font: var(--dsw-font-xxs-strong-12);
+  margin: 16px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
   color: var(--dsw-alias-label-secondary);
 }
 
@@ -103,7 +107,7 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .fieldLabel {
@@ -214,19 +218,32 @@
 /* A editable value inside the connection list. Sized to the row it sits in rather than
    the column, because these are short transport facts: a host, a port, a path. */
 .input {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--dsw-alias-border-l3);
-  border-radius: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
   background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
-  font: var(--dsw-font-xxs-12);
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.input::placeholder {
+  color: var(--dsw-alias-label-dimmed);
 }
 
 .input:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: 1px;
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.input:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* The save affordance and its answer on one line: the button is the action, the text
@@ -234,8 +251,8 @@
 .saveRow {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 12px 0 4px;
+  gap: 8px;
+  padding-top: 16px;
 }
 
 .saveRow .notice {

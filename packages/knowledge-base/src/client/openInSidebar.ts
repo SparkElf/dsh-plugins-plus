@@ -23,7 +23,7 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { absoluteFileAddress } from 'dsh-better-sidebar/src/client/resource-address.ts'
+import { absoluteFileAddress, sessionFileAddress } from 'dsh-better-sidebar/src/client/resource-address.ts'
 
 /**
  * The slice of the host's right-sidebar controller this module calls.
@@ -63,6 +63,7 @@ interface ContextLike {
 /** Outcome of asking the host to show a document. */
 export type OpenOutcome =
   | 'opened'
+  | 'no-seat'
   | 'no-context'
   | 'no-registry'
   | 'unclaimed'
@@ -79,13 +80,14 @@ export type OpenOutcome =
  * @returns Why it did or did not open; the caller reports the failure rather than
  *   appearing to do nothing.
  */
-export function openInSidebar(
+export async function openInSidebar(
   ctx: unknown,
   sessionId: string | undefined,
   cwd: string | undefined,
   absolutePath: string,
-): OpenOutcome {
-  if (sessionId === undefined || absolutePath === '') return 'no-context'
+  ensureSession?: () => Promise<string | undefined>,
+): Promise<OpenOutcome> {
+  if (absolutePath === '') return 'no-context'
   const context = ctx as ContextLike | undefined
   if (typeof context?.get !== 'function') return 'no-context'
 
@@ -102,8 +104,41 @@ export function openInSidebar(
   // fails with ENOENT -- for a file that exists the whole time. An absolute address
   // carries the path the page already resolved and is returned as-is, so no cwd can
   // redirect it.
-  const address = absoluteFileAddress(absolutePath)
-  const best = registry.candidates(address)[0]
+  // The official document-preview tab only claims `scope === 'session'` addresses
+  // (`canOpen: parseFileAddress(a)?.scope === 'session'`), while better-sidebar's own
+  // editor refuses host-owned extensions (.xlsx/.docx/.pdf/...) and hands them to that
+  // tab. An absolute address therefore has NO claimant for those types: the column opens
+  // and stays empty with no request and no error. Asking for the session scope first
+  // gives those types a claimant; every path that already worked still resolves, because
+  // the absolute address is the fallback when the session one has no claimant.
+  // Preference order matters. The absolute address is what every path that works today
+  // already uses (markdown, images, plain text -- better-sidebar's editor claims it), so it
+  // stays FIRST. The session address is only a rescue for host-owned types (.xlsx/.docx/
+  // .pdf/...): better-sidebar refuses those and hands them to the official preview tab,
+  // which only claims `scope === 'session'`. Preferring the session address broke every
+  // markdown file, which is why it is consulted only when the absolute address has no
+  // claimant at all.
+  const absoluteAddress = absoluteFileAddress(absolutePath)
+  const absoluteClaimants = registry.candidates(absoluteAddress)
+  // Host-owned types (.pdf/.docx/.xlsx/...) have no absolute-address claimant; they
+  // need a session-scoped address. A placeholder such as `@kb-explorer` is fine for
+  // fs routes but NOT for a session-scoped resource: the sidebar persists that address
+  // and a restart resolves it as a real session, which answers `session not found`.
+  // `@kb-explorer` (or any `@`-prefixed sentinel) is not a session. Treat it as
+  // absent here even if an older caller still passes it.
+  let effectiveSession = sessionId !== undefined && !sessionId.startsWith('@') ? sessionId : undefined
+  if (absoluteClaimants.length === 0 && (effectiveSession === undefined || effectiveSession === '')) {
+    effectiveSession = await ensureSession?.().catch(() => undefined)
+  }
+  if (absoluteClaimants.length === 0 && (effectiveSession === undefined || effectiveSession === '')) {
+    // No real session and no way to create one: degrade without touching the
+    // session/open path rather than handing it a placeholder.
+    return 'no-seat'
+  }
+  const sessionAddress = effectiveSession === undefined ? '' : sessionFileAddress(effectiveSession, absolutePath)
+  const claimants = absoluteClaimants.length > 0 ? absoluteClaimants : registry.candidates(sessionAddress)
+  const address = absoluteClaimants.length > 0 ? absoluteAddress : sessionAddress
+  const best = claimants[0]
   if (best === undefined || best.kind === undefined) return 'unclaimed'
 
   const column = context.get('sidebarRight') as RightColumnOpener | undefined
@@ -131,7 +166,17 @@ export function openInSidebar(
     // The column opens at whatever width the frame gives it; the reader still gets
     // the document.
   }
-  column.openResource(address)
+  // `openResource` runs through the same `require()` as `toggleExpanded`: on a global
+  // panel with no session surface it throws `sidebarRight: no session surface is
+  // mounted` before any renderer is consulted. Left unguarded, the throw escaped this
+  // function, the caller's `setSelection`/`setOpenFailure` never ran, and the UI still
+  // announced "opened in the right window" over an empty column -- the reader was told
+  // the document opened when nothing had. Report it instead of claiming success.
+  try {
+    column.openResource(address)
+  } catch {
+    return 'no-seat'
+  }
   return 'opened'
 }
 

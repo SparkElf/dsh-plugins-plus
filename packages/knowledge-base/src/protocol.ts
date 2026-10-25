@@ -211,6 +211,18 @@ export const ENDPOINTS = {
    * category yet.
    */
   templates: '/api/resources/wiki/pages/templates',
+  /**
+   * The MinerU address the 「文档识别」 plugin's administrator shares with the deployment.
+   *
+   * Read-only here. The knowledge base keeps its own per-caller address field, and when that
+   * is empty this shared value is what the parser is called with. It is never written back:
+   * a copy in this plugin's settings file would stop following the administrator's later
+   * change and become a second source of truth.
+   *
+   * `AuthGuard`-only on the backend, so any signed-in member may read it: the address is not
+   * a secret, and being allowed to USE it is not being allowed to CHANGE it (`canEdit`).
+   */
+  ocrConfig: '/api/ocr/config',
 } as const
 
 /**

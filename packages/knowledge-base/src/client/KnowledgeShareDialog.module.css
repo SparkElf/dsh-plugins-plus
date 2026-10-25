@@ -10,7 +10,7 @@
 .body {
   display: flex;
   flex-direction: column;
-  gap: var(--dsw-space-3);
+  gap: 6px;
   min-width: 0;
 }
 
@@ -23,7 +23,7 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: var(--dsw-space-1);
+  gap: 4px;
   min-width: 0;
 }
 
@@ -35,22 +35,24 @@
 .list {
   display: flex;
   flex-direction: column;
-  margin: 0;
+  /* Separated from the field above: without this the list reads as part of the input
+     rather than as its results. */
+  margin: 6px 0 0;
   padding: 0;
   list-style: none;
-  max-height: 15rem;
+  max-height: min(240px, 40vh);
   overflow-y: auto;
-  border: var(--dsw-border-width) solid var(--dsw-alias-border-l1);
+  border: 0.5px solid var(--dsw-alias-border-l2);
   border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-bg-layer-1);
+  background: var(--dsw-alias-bg-layer-2);
 }
 
 .option {
   display: flex;
   align-items: baseline;
-  gap: var(--dsw-space-2);
+  gap: 6px;
   width: 100%;
-  padding: var(--dsw-space-2) var(--dsw-space-3);
+  padding: 8px 10px;
   border: none;
   background: transparent;
   color: inherit;
@@ -86,7 +88,7 @@
 }
 
 .state {
-  padding: var(--dsw-space-2) var(--dsw-space-3);
+  padding: 8px 10px;
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxs-12);
 }
@@ -94,7 +96,7 @@
 .chosen {
   display: flex;
   align-items: center;
-  gap: var(--dsw-space-2);
+  gap: 6px;
   flex-wrap: wrap;
 }
 

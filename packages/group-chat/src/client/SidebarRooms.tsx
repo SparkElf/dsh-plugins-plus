@@ -53,6 +53,20 @@ export interface SidebarRoomsInjected {
   readonly tPreset: (key: string) => string
   /** The list both sidebar and page read, owned by the Client entry. */
   readonly store: RoomStore
+  /**
+   * The seat passes the shell's own `wide` flag: false when the sidebar is
+   * collapsed to the icon rail.
+   *
+   * Collapsed shows the LIST's entry as one compact icon, NOT the room rows: the rail has
+   * room for an icon, not for a room name, and a clipped name ("文融合分析" cut mid-glyph)
+   * reads as a rendering fault rather than as a collapsed list. The icon is what the
+   * reader clicks to get the rooms back, so a collapsed rail still advertises that this
+   * region exists -- rendering nothing made the feature disappear entirely.
+   *
+   * Optional because a host that does not supply the flag keeps the previous
+   * always-render behaviour.
+   */
+  readonly wide?: boolean
 }
 
 /**
@@ -110,8 +124,50 @@ const markQuery = (text: string, query: string): ReactNode => {
   return parts
 }
 
+/**
+ * The collapsed rail's stand-in for this region: one icon, no rows.
+ *
+ * `onSelect` is the same "open the group chat" action the room list header offers, so the
+ * collapsed rail is not a dead end — clicking it gets the reader to the rooms.
+ * @param props - the realm's injected copy resolver and the open action.
+ * @returns The compact control.
+ */
+function SidebarRoomsCollapsed(props: {
+  t: (key: GroupChatKey) => string
+  /** What clicking the rail icon does: open the rooms (see the caller). */
+  onOpen: () => void
+}): ReactNode {
+  return (
+    <Tooltip label={props.t('title')} side="right" delayMs={400}>
+      <button
+        type="button"
+        className={styles['railButton']}
+        aria-label={props.t('title')}
+        onClick={props.onOpen}
+      >
+        <IconQueueOutlineRegular size={18} />
+      </button>
+    </Tooltip>
+  )
+}
+
 export function SidebarRooms(props: SidebarRoomsInjected) {
   const { t, tPreset, store } = props
+  if (props.wide === false) {
+    // Collapsed: the icon is the whole region. Clicking it opens the active room — the same
+    // destination the row would have taken the reader to, so the rail is not a dead end.
+    // `openCreate` is deliberately NOT used: a reader clicking the rail wants their
+    // conversations, not a new-room form.
+    const firstRoom = store.getState().rooms?.[0]
+    return (
+      <SidebarRoomsCollapsed
+        t={t}
+        onOpen={() => {
+          if (firstRoom !== undefined) void store.open(firstRoom.id)
+        }}
+      />
+    )
+  }
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
   const { rooms, activeRoomId, failure, searchQuery, discoverable } = state
 

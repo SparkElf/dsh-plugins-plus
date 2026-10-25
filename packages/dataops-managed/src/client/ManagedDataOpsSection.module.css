@@ -107,3 +107,30 @@
   line-height: 18px;
   color: var(--dsw-alias-state-error-primary);
 }
+
+
+.reviewHint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.reviewRows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.reviewRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+}
+
+.reviewActions {
+  display: flex;
+  justify-content: flex-end;
+}

@@ -1,16 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { ApiAuthSecretInput, ApiKeyValue, ApiMultipartPart, ApiRequest, ApiResponse } from './types.ts'
 import { ApiClientStore } from './store.ts'
+import { interpolate } from './curl.ts'
+import { buildCurlCommand } from './curl-command.ts'
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-const TEMPLATE = /\{\{\s*([^{}]+?)\s*\}\}/gu
-
-function interpolate(value: string, variables: Record<string, string>): string {
-  return value.replace(TEMPLATE, (_match, key: string) => {
-    if (!(key in variables)) throw new Error('API environment variable is not defined: ' + key)
-    return variables[key] as string
-  })
-}
 
 function enabled(values: ApiKeyValue[], variables: Record<string, string>): ApiKeyValue[] {
   return values.filter(value => value.enabled).map(value => ({ ...value, key: interpolate(value.key, variables), value: interpolate(value.value, variables) }))
@@ -119,7 +113,7 @@ function responseCookies(headers: Headers): string[] {
   return combined === null ? [] : [combined]
 }
 
-export async function executeApiRequest(store: ApiClientStore, requestId: string): Promise<ApiResponse> {
+export async function executeApiRequest(store: ApiClientStore, requestId: string, cancel?: AbortSignal): Promise<ApiResponse> {
   const request = await store.request(requestId)
   const variables = await store.environmentValues(request.environmentId)
   const url = new URL(interpolate(request.url, variables))
@@ -132,7 +126,17 @@ export async function executeApiRequest(store: ApiClientStore, requestId: string
   if (cookie !== '' && !headers.has('cookie')) headers.set('cookie', cookie)
   const body = requestBody(request, variables, headers)
   const started = performance.now()
-  const response = await fetch(url, { method: request.method, headers, body, redirect: 'follow', signal: AbortSignal.timeout(30_000) })
+  const timeout = AbortSignal.timeout(30_000)
+  const signal = cancel === undefined ? timeout : AbortSignal.any([timeout, cancel])
+  let response: Response
+  try {
+    response = await fetch(url, { method: request.method, headers, body, redirect: 'follow', signal })
+  } catch (cause) {
+    // A user cancellation is a decision, not a transport failure; saying so is what keeps
+    // the panel from reporting "fetch failed" after the reader pressed Cancel.
+    if (cancel?.aborted === true) throw new Error('API request cancelled')
+    throw cause
+  }
   await store.storeResponseCookies(url, responseCookies(response.headers))
   const payload = await boundedBody(response)
   const result: ApiResponse = {
@@ -142,4 +146,24 @@ export async function executeApiRequest(store: ApiClientStore, requestId: string
   }
   await store.addHistory(result)
   return result
+}
+
+
+/**
+ * Build the copyable `curl` command for one saved request.
+ *
+ * Separate from {@link executeApiRequest} because the command must also be available from
+ * a history row (the response is already stored; nothing is sent). It resolves the same
+ * environment values and secrets the executor would use.
+ * @param store - the API client store.
+ * @param requestId - the saved request.
+ * @returns the command text.
+ */
+export async function buildCurlForRequest(store: ApiClientStore, requestId: string): Promise<string> {
+  const request = await store.request(requestId)
+  const variables = await store.environmentValues(request.environmentId)
+  const secret = await store.authSecret(request)
+  const url = new URL(interpolate(request.url, variables))
+  const cookie = await store.cookieHeader(url)
+  return buildCurlCommand(request, variables, secret, cookie)
 }

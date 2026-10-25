@@ -48,6 +48,39 @@ export const EXTRACTABLE_EXTENSIONS = [
 /** One extractable extension. */
 export type ExtractableExtension = typeof EXTRACTABLE_EXTENSIONS[number]
 
+/**
+ * Formats that are already plain text, so there is nothing to extract.
+ *
+ * A `.md` document IS the Markdown an extraction would produce. Asking for one to be
+ * extracted is not a failure and not an unsupported format: the honest answer is that no
+ * work is needed. Without this list such a request fell through to "this type has no
+ * extractor", which told a reader their own Markdown file was unreadable.
+ */
+export const MARKDOWN_EXTENSIONS = ['.md', '.markdown', '.mdown', '.mkd'] as const
+
+/**
+ * Whether this path is already Markdown.
+ * @param relPath - the document's path.
+ * @returns Whether no extraction is needed.
+ */
+export function isAlreadyMarkdown(relPath: string): boolean {
+  return (MARKDOWN_EXTENSIONS as readonly string[]).includes(extname(relPath).toLowerCase())
+}
+
+/** One MinerU layout block, normalized for the SQLite provenance tables. */
+export interface MineruBlock {
+  page: number
+  bbox: [number, number, number, number]
+  text: string
+  type: string
+  blockIndex: number
+  occurrence: number
+  confidence?: number
+  pageWidth?: number
+  pageHeight?: number
+  coordSpace: 'normalized' | 'points'
+}
+
 /** How one request to the extraction authorities ended. */
 export interface ExtractResult {
   /** Markdown text, when extraction produced any. */
@@ -63,6 +96,8 @@ export interface ExtractResult {
   via?: 'mineru' | 'mineru-ocr' | 'libreoffice' | 'python' | 'native'
   /** Why no markdown was produced. Present whenever {@link markdown} is absent. */
   reason?: string
+  /** Layout blocks from MinerU (`middle_json`), used only for provenance metadata. */
+  blocks?: MineruBlock[]
 }
 
 /** Time one extraction may take before it is abandoned. */
@@ -206,12 +241,82 @@ const MINERU_TIER = 'basic'
  */
 const MINERU_PARSE_PATH = '/v1/file_parse'
 
+/** Parse MinerU's middle_json pages/blocks into provenance rows. */
+export function parseMineruBlocks(value: unknown): MineruBlock[] {
+  if (typeof value !== 'object' || value === null) return []
+  const root = value as Record<string, unknown>
+  const pages = root.pages
+  if (!Array.isArray(pages)) return []
+  const layoutPages = (((root.extensions as Record<string, unknown> | undefined)?.docvortex_layout as Record<string, unknown> | undefined)?.pages) as unknown
+  const dimensions = new Map<number, { width?: number; height?: number }>()
+  if (Array.isArray(layoutPages)) {
+    for (const page of layoutPages) {
+      if (typeof page !== 'object' || page === null) continue
+      const row = page as Record<string, unknown>
+      const index = typeof row.page_idx === 'number' ? row.page_idx : undefined
+      if (index === undefined) continue
+      dimensions.set(index, {
+        ...(typeof row.width_pt === 'number' ? { width: row.width_pt } : {}),
+        ...(typeof row.height_pt === 'number' ? { height: row.height_pt } : {}),
+      })
+    }
+  }
+  const out: MineruBlock[] = []
+  for (const page of pages) {
+    if (typeof page !== 'object' || page === null) continue
+    const pageRow = page as Record<string, unknown>
+    const pageIndex = typeof pageRow.page_idx === 'number' ? pageRow.page_idx : 0
+    const blocks = Array.isArray(pageRow.blocks) ? pageRow.blocks : []
+    const seen = new Map<string, number>()
+    for (const [fallbackIndex, raw] of blocks.entries()) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const block = raw as Record<string, unknown>
+      const bbox = Array.isArray(block.bbox)
+        ? block.bbox.filter((value): value is number => typeof value === 'number')
+        : []
+      if (bbox.length !== 4) continue
+      const textParts: string[] = []
+      if (Array.isArray(block.content)) {
+        for (const item of block.content) {
+          if (typeof item !== 'object' || item === null) continue
+          const content = (item as Record<string, unknown>).content
+          if (typeof content === 'string') textParts.push(content)
+        }
+      }
+      if (typeof block.text === 'string') textParts.push(block.text)
+      const text = textParts.join(' ').replace(/\s+/gu, ' ').trim()
+      if (text === '') continue
+      const max = Math.max(...bbox)
+      const coordinate: MineruBlock['coordSpace'] = max <= 1.01 ? 'normalized' : max <= 1000 ? 'normalized' : 'points'
+      const normalized = coordinate === 'normalized' && max > 1.01
+        ? bbox.map(value => value / 1000) as [number, number, number, number]
+        : bbox as [number, number, number, number]
+      const occurrence = (seen.get(text) ?? 0) + 1
+      seen.set(text, occurrence)
+      const dimensionsForPage = dimensions.get(pageIndex)
+      out.push({
+        page: pageIndex + 1,
+        bbox: normalized,
+        text,
+        type: typeof block.type === 'string' ? block.type : 'text',
+        blockIndex: typeof block.index === 'number' ? block.index : fallbackIndex,
+        occurrence,
+        coordSpace: coordinate,
+        ...(typeof dimensionsForPage?.width === 'number' ? { pageWidth: dimensionsForPage.width } : {}),
+        ...(typeof dimensionsForPage?.height === 'number' ? { pageHeight: dimensionsForPage.height } : {}),
+        ...(typeof block.confidence === 'number' ? { confidence: block.confidence } : {}),
+      })
+    }
+  }
+  return out
+}
+
 async function viaMineru(
   baseUrl: string,
   fullPath: string,
   fileName: string,
   mode: 'auto' | 'ocr' = 'auto',
-): Promise<string | undefined> {
+): Promise<{ markdown: string; blocks?: MineruBlock[] } | undefined> {
   try {
     const bytes = await readFile(fullPath)
     const url = new URL(MINERU_PARSE_PATH, baseUrl)
@@ -223,6 +328,9 @@ async function viaMineru(
     // 17.8 s against 2.0 s for `basic` on the same one-page PDF.
     url.searchParams.set('tier', MINERU_TIER)
     url.searchParams.append('output_formats', 'markdown')
+    // `middle_json` is the supported layout artifact (content_list is not an output
+    // format in MinerU 4.x). It carries page_idx + normalized bbox + block index.
+    url.searchParams.append('output_formats', 'middle_json')
     // `auto` lets the parser classify the document itself: it samples pages and
     // switches to OCR when a page carries too little extractable text, which is what
     // a scan looks like. Forcing `ocr` everywhere would run OCR over born-digital
@@ -245,7 +353,11 @@ async function viaMineru(
         const content = (entry as { content?: unknown }).content
         if (typeof content !== 'object' || content === null) continue
         const markdown = (content as { markdown?: unknown }).markdown
-        if (typeof markdown === 'string' && markdown.trim() !== '') return markdown
+        if (typeof markdown === 'string' && markdown.trim() !== '') {
+          const middle = (content as { middle_json?: unknown }).middle_json
+          const blocks = parseMineruBlocks(middle)
+          return { markdown, ...(blocks.length === 0 ? {} : { blocks }) }
+        }
       }
       // The task answered but produced no Markdown: not a parser-shaped reply, so
       // there is nothing to poll for either.
@@ -255,7 +367,10 @@ async function viaMineru(
     // not upgraded degrades to "no text" rather than to a thrown request.
     for (const key of ['markdown', 'md_content', 'mdContent']) {
       const value = body[key]
-      if (typeof value === 'string' && value.trim() !== '') return value
+      if (typeof value === 'string' && value.trim() !== '') {
+        const blocks = parseMineruBlocks(body.middle_json ?? body.middleJson)
+        return { markdown: value, ...(blocks.length === 0 ? {} : { blocks }) }
+      }
     }
     // Task answer without inline content: poll the result route.
     const taskId = typeof body.task_id === 'string' ? body.task_id
@@ -270,7 +385,10 @@ async function viaMineru(
       const result = await poll.json() as Record<string, unknown>
       for (const key of ['markdown', 'md_content', 'mdContent', 'content']) {
         const value = result[key]
-        if (typeof value === 'string' && value.trim() !== '') return value
+        if (typeof value === 'string' && value.trim() !== '') {
+          const blocks = parseMineruBlocks(result.middle_json ?? result.middleJson)
+          return { markdown: value, ...(blocks.length === 0 ? {} : { blocks }) }
+        }
       }
     }
     return undefined
@@ -416,18 +534,30 @@ export async function extractDocument(fullPath: string, relPath: string, options
     // to search is retried with OCR forced, once. A real one-page text PDF loses
     // nothing by being retried; a scanned contract stops being invisible to grep,
     // which is the whole point of extracting it.
-    if (remote !== undefined && !looksTooThinToSearch(remote)) {
-      return { markdown: withHeader(title, tidy(remote), 'mineru'), via: 'mineru' }
+    if (remote !== undefined && !looksTooThinToSearch(remote.markdown)) {
+      return {
+        markdown: withHeader(title, tidy(remote.markdown), 'mineru'),
+        via: 'mineru',
+        ...(remote.blocks === undefined ? {} : { blocks: remote.blocks }),
+      }
     }
     if (remote !== undefined) {
       attempts.push('mineru-thin')
       const forced = await viaMineru(options.mineruUrl, fullPath, title, 'ocr')
       if (forced !== undefined) {
-        return { markdown: withHeader(title, tidy(forced), 'mineru-ocr'), via: 'mineru' }
+        return {
+          markdown: withHeader(title, tidy(forced.markdown), 'mineru-ocr'),
+          via: 'mineru',
+          ...(forced.blocks === undefined ? {} : { blocks: forced.blocks }),
+        }
       }
       // The retry produced nothing, so the thin first answer is what exists. Keeping
       // it beats returning nothing: whatever text it held is still searchable.
-      return { markdown: withHeader(title, tidy(remote), 'mineru'), via: 'mineru' }
+      return {
+        markdown: withHeader(title, tidy(remote.markdown), 'mineru'),
+        via: 'mineru',
+        ...(remote.blocks === undefined ? {} : { blocks: remote.blocks }),
+      }
     }
     attempts.push('mineru')
   }

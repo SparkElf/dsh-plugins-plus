@@ -21,6 +21,7 @@
 import { appendFile, copyFile, link, lstat, mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, sep } from 'node:path'
 import { VIEW_METADATA_FILENAMES } from './viewMetadata.ts'
+import { markInternalMutation } from './externalChange.ts'
 
 /** One path a user may read, as DataOps resolved it. */
 export interface ResolvedPath {
@@ -1245,6 +1246,39 @@ export async function readSettings(viewDir: string): Promise<KnowledgeSettings> 
 }
 
 /**
+ * Whether this caller's settings file holds a MinerU address that was refused as invalid.
+ *
+ * {@link readSettings} normalises a hand-edited or foreign value down to `''`, which makes
+ * "never configured" and "configured with something unusable" indistinguishable. The
+ * settings page has to tell them apart: the second case must not leave the reader thinking
+ * their own address is in use when it was dropped and a fallback answered instead.
+ *
+ * Read separately rather than threaded through {@link readSettings} because only the page
+ * needs it -- the extractor either has a usable address or it does not, and the reason it
+ * does not is a message for a human.
+ *
+ * @param viewDir - the user's view directory.
+ * @returns true when the file holds a non-empty value that the normaliser rejected.
+ */
+export async function storedMineruInvalid(viewDir: string): Promise<boolean> {
+  let raw: string
+  try {
+    raw = await readFile(settingsPathFor(viewDir), 'utf8')
+  } catch {
+    return false
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown> | null
+    if (parsed === null || typeof parsed !== 'object') return false
+    const value = parsed.mineruBaseUrl
+    if (typeof value !== 'string') return false
+    return value.trim() !== '' && normalizeMineruBaseUrl(value) === ''
+  } catch {
+    return false
+  }
+}
+
+/**
  * Replace this knowledge base's settings.
  *
  * Atomic by rename for the same reason the pins and the view mode are: a reader must
@@ -1630,6 +1664,10 @@ export async function moveEntry(
   if (destinationTaken) throw new Error('destination already exists: ' + JSON.stringify(toRelPath))
   await mkdir(dirname(destination), { recursive: true })
   await rename(source, destination)
+  // Both paths changed outside the watcher's notion of "external": this process is
+  // about to write its own audit entry for the move.
+  markInternalMutation(fromRelPath)
+  markInternalMutation(toRelPath)
   return { from: fromRelPath, to: toRelPath }
 }
 
@@ -1766,6 +1804,7 @@ export async function copyEntry(
         await copyFile(join(options.actualRoot, entry.relPath), targetPath)
       }
       written.push(targetPath)
+      markInternalMutation(targetRel)
     }
   } catch (error) {
     // Undo in reverse order so a directory is empty before it is removed. Best effort:
@@ -1875,12 +1914,23 @@ export interface KnowledgeAuditEntry {
    * here" and "who changed it last". A save through the host's own file editor
    * reports here through a side channel (see the `audit.appended` route), which is
    * what keeps the host's write path untouched.
+   *
+   * `delete` is a caller-scoped tombstone (the bytes stay on disk); `external-change`
+   * is written by the filesystem watcher when a process outside these tools (usually
+   * a shell command) modifies the authoritative tree.
    */
-  action: 'create' | 'upload' | 'move' | 'approve' | 'reject' | 'edit'
+  action: 'create' | 'upload' | 'move' | 'approve' | 'reject' | 'edit' | 'delete' | 'external-change'
   /** The path the action concerned, relative to the knowledge root. */
   relPath: string
   /** For a move, the destination path. */
   toRelPath?: string
+  /**
+   * Extra detail for actions that have more than one flavour.
+   *
+   * Only `external-change` currently uses it (`updated` / `renamed` / `deleted`).
+   * Optional so older lines remain readable.
+   */
+  detail?: 'updated' | 'renamed' | 'deleted'
   /**
    * What became of it.
    *

@@ -77,8 +77,14 @@ describe('apply', () => {
     await expect(apply(context as never, CONFIG)).resolves.toBeUndefined()
     expect(routes.map((route) => route.path).sort()).toEqual([
       '/integrations/dataops/auth-state',
+      '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',
       '/integrations/dataops/model-sync',
+      '/integrations/dataops/rbac',
+      '/integrations/dataops/review',
+      '/integrations/dataops/review-context',
+      '/integrations/dataops/review-notifications',
+      '/integrations/dataops/review-settings',
       '/integrations/dataops/skill-plaza',
       '/integrations/dataops/tool-timeout',
       '/integrations/dataops/workspace-limits',
@@ -93,8 +99,14 @@ describe('apply', () => {
     // than only by count, so adding a route cannot silently displace one that a panel needs.
     expect(routes.map((route) => route.path).sort()).toEqual([
       '/integrations/dataops/auth-state',
+      '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',
       '/integrations/dataops/model-sync',
+      '/integrations/dataops/rbac',
+      '/integrations/dataops/review',
+      '/integrations/dataops/review-context',
+      '/integrations/dataops/review-notifications',
+      '/integrations/dataops/review-settings',
       '/integrations/dataops/skill-plaza',
       '/integrations/dataops/tool-timeout',
       '/integrations/dataops/workspace-limits',

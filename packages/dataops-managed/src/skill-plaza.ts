@@ -17,6 +17,15 @@ export interface PlazaSkill {
   /** Whether the current user shared this entry. */
   sharedByMe: boolean
   updatedAt: string
+  reviewStatus: 'pending' | 'approved' | 'rejected'
+  visibility: 'global' | 'department' | 'private'
+  departmentCode?: string | null
+  departmentName?: string
+  departmentPath?: { code: string; name: string }[]
+  ownerName?: string
+  riskReport?: unknown
+  reviewNote?: string | null
+  submittedAt?: string
 }
 
 /** A skill the local workspace holds, offered by name for sharing. */
@@ -127,14 +136,35 @@ export class SkillPlaza {
    * @param options - Tag and text filters.
    * @returns Entries, newest first; empty when the workspace is not authorized.
    */
-  async list(options: { tag?: string; query?: string } = {}): Promise<PlazaSkill[]> {
+  async list(options: { tag?: string; query?: string; status?: string; scope?: string; departmentCode?: string } = {}): Promise<PlazaSkill[]> {
+    const page = await this.listPage(options)
+    return page.skills
+  }
+
+  /** List with the server's tab counts, which the plaza shows without re-counting a page. */
+  async listPage(options: { tag?: string; query?: string; status?: string; scope?: string; departmentCode?: string } = {}): Promise<{ skills: PlazaSkill[]; counts?: { pending: number; approved: number; rejected: number; total: number } }> {
     const params = new URLSearchParams()
     if (options.tag !== undefined && options.tag !== '') params.set('tag', options.tag)
     if (options.query !== undefined && options.query !== '') params.set('q', options.query)
+    if (options.status !== undefined && options.status !== '') params.set('status', options.status)
+    if (options.scope !== undefined && options.scope !== '') params.set('scope', options.scope)
+    if (options.departmentCode !== undefined && options.departmentCode !== '') params.set('departmentCode', options.departmentCode)
     const suffix = params.size === 0 ? '' : `?${params.toString()}`
     const body = await this.call(`/api/ai/skill-plaza/skills${suffix}`)
-    if (!Array.isArray(body)) return []
-    return body.flatMap((row) => this.toPlazaSkill(row))
+    const record = asRecord(body)
+    const rows = Array.isArray(body) ? body : Array.isArray(record?.items) ? record.items : []
+    const rawCounts = asRecord(record?.counts)
+    return {
+      skills: rows.flatMap((row) => this.toPlazaSkill(row)),
+      ...(rawCounts === null ? {} : {
+        counts: {
+          pending: Number(rawCounts.pending ?? 0),
+          approved: Number(rawCounts.approved ?? 0),
+          rejected: Number(rawCounts.rejected ?? 0),
+          total: Number(rawCounts.total ?? rows.length),
+        },
+      }),
+    }
   }
 
   /**
@@ -199,6 +229,22 @@ export class SkillPlaza {
       tags: Array.isArray(row.tags) ? row.tags.filter((tag): tag is string => typeof tag === 'string') : [],
       sharedByMe: row.sharedByMe === true,
       updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : '',
+      reviewStatus: row.reviewStatus === 'pending' || row.reviewStatus === 'rejected' ? row.reviewStatus : 'approved',
+      visibility: row.visibility === 'department' || row.visibility === 'private' ? row.visibility : 'global',
+      departmentCode: typeof row.departmentCode === 'string' ? row.departmentCode : null,
+      departmentName: typeof row.departmentName === 'string' ? row.departmentName : undefined,
+      departmentPath: Array.isArray(row.departmentPath)
+        ? row.departmentPath.flatMap(entry => {
+          const node = asRecord(entry)
+          return node !== null && typeof node.name === 'string'
+            ? [{ code: typeof node.code === 'string' ? node.code : '', name: node.name }]
+            : []
+        })
+        : undefined,
+      ownerName: typeof row.ownerName === 'string' ? row.ownerName : undefined,
+      riskReport: row.riskReport ?? null,
+      reviewNote: typeof row.reviewNote === 'string' ? row.reviewNote : null,
+      submittedAt: typeof row.submittedAt === 'string' ? row.submittedAt : undefined,
     }]
   }
 }

@@ -21,17 +21,47 @@
  * a reader should rename. They are filtered with the `exclude` prop, which the host
  * applies to the listing -- so they never arrive rather than being hidden after the fact.
  *
+ * ## This bundle INLINES the explorer's source, which is why sort needs a sync step
+ *
+ * `FileTree` is imported as SOURCE (`dsh-better-sidebar/src/client/FileTree.tsx`), not as
+ * the package's built output, so its code is compiled into this plugin's bundle. Sorting
+ * lives in two places that this file depends on:
+ *
+ * - `file-tree-sort.ts` — the sort keys and comparators (a separate module, imported by
+ *   `FileTree.tsx`);
+ * - `listing-filter.ts` — the name-matching rule set, shared by the explorer and this
+ *   plugin's list view. It lives in the explorer package, not here, precisely so the two
+ *   surfaces cannot drift apart: `KnowledgeListing` imports it from there too, and there
+ *   is only ONE implementation of "substring, case-insensitive, keep the parent chain".
+ *   It also has to be synced, or the tree's `nameFilter` prop arrives with nothing to run;
+ * - `fs-tree.ts` — the HOST side that puts `mtimeMs`/`size` on each row;
+ * - `sidebar.module.css` / `locales.ts` — the visible row for "no file matched" and its
+ *   two strings.
+ *
+ * That means a change to those files reaches this bundle by COPYING THE SOURCE into the
+ * resolved package under `node_modules/.pnpm/@sparkelf+dsh-better-sidebar@.../` and
+ * rebuilding here. It does NOT arrive by reinstalling the dependency from npm, and the
+ * copy is LOST on a fresh `install` — at which point `sort` silently falls back to the
+ * published keys (no `mtime`, no `size`) and the menu's choices stop matching the data.
+ *
+ * The durable source of truth is the fork at `/root/projects/DSH-better-sidebar`,
+ * branch `sparkelf/kb-save-events`. Reinstalling the dependency therefore means: rebuild
+ * and publish from that branch, bump the dependency, and delete this note.
+ *
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { FileTree } from 'dsh-better-sidebar/src/client/FileTree.tsx'
+import type { FileTreeSort } from 'dsh-better-sidebar/src/client/file-tree-sort.ts'
 import type { UploadItem } from 'dsh-better-sidebar/src/client/upload.ts'
 import { departmentPathLabels, folderLabelOf, type DepartmentPath } from './departmentFolders.ts'
+import { resolveUploadDir } from './dropTargetPath.ts'
 import { VIEW_METADATA_FILENAMES } from '../viewMetadata.ts'
 import styles from './KnowledgeFileTree.module.css'
 import { batchRowsFor } from './referenceTargets.ts'
 import { KB_API, kbApiPath } from '../api.ts'
+import { extractionFailureReason } from './progressRules.ts'
 import { en, zh } from './locales.ts'
 
 /**
@@ -87,6 +117,15 @@ export interface KnowledgeFileTreeProps {
   busy: boolean
   /** Bump to reload the visible set after a change made elsewhere. */
   refreshTick: number
+  /**
+   * The caller's DataOps user id, when the page knows it.
+   *
+   * The tree renders the caller's VIEW, where `personal` hides the owner segment. The
+   * Host reads the AUTHORITATIVE tree, where that segment is required, so an extraction
+   * requested from a personal row must put the id back before it leaves the browser.
+   * Without it the Host answers `404 no such file` for a document the reader can see.
+   */
+  callerId?: string
   /** Called after the explorer's own inline rename lands. */
   onPathRenamed?: (oldPath: string, newPath: string) => void
   /** Called after the explorer's own delete lands. */
@@ -128,8 +167,73 @@ export interface KnowledgeFileTreeProps {
    * caller has no favourites store, which keeps the wrapper from touching the DOM at all.
    */
   isFavorite?: (relPath: string) => boolean
+  /** Toggle the caller's favourite flag for one document. */
+  onToggleFavorite?: (relPath: string, next: boolean) => void
   /** The favourites star's accessible name. */
   favoriteMarkLabel?: string
+  /**
+   * Open the Share dialog for one row.
+   *
+   * The dialog itself lives on the page, not in this wrapper: it is a `Modal`, and the
+   * page already owns one for its own surfaces. This hook exists so the native menu can
+   * offer the entry without this component importing a dialog (which would mount a second
+   * one per tree instance and tie a page-level overlay to a widget's lifecycle).
+   */
+  onShare?: (relPath: string, isDir: boolean) => void
+  /**
+   * What the cut/copy entries put on the clipboard.
+   *
+   * The clipboard belongs to the page: a copy from this tree has to paste on the table,
+   * and vice versa. Passing it in keeps ONE clipboard rather than a per-surface copy that
+   * would disagree about what "paste" means.
+   */
+  onClipboard?: (entry: { entries: Array<{ relPath: string; name: string }>; cut: boolean }) => void
+  /**
+   * Whether the clipboard currently holds anything.
+   *
+   * The Paste row is hidden rather than disabled while this is false: an entry that can
+   * never run in this state advertises an action the reader cannot take.
+   */
+  hasClipboard?: boolean
+  /**
+   * Paste the clipboard into one directory (tree-relative, `''` for the root).
+   *
+   * The page performs the move/copy and clears the clipboard on a cut; this wrapper only
+   * reports where the click landed.
+   */
+  onPasteInto?: (directory: string) => void
+  /**
+   * Called the moment an extraction is REQUESTED for one document, before it settles.
+   *
+   * Carries the path so the progress panel can show that document as queued straight away:
+   * a menu item that produces no visible change until a round trip finishes reads as a dead
+   * control. The panel treats this as a guess with a lifetime, and replaces it with the
+   * Host's own task as soon as one is reported.
+   */
+  onExtractionQueued?: (relPath: string) => void
+  /**
+   * Called when an extraction request was refused or never completed.
+   *
+   * Exists because the menu used to discard the response: a refusal was indistinguishable
+   * from a success, so the reader had nothing to act on.
+   */
+  onExtractionFailed?: (relPath: string, reason: string) => void
+  /**
+   * How to order the rows.
+   *
+   * Passed straight through to the explorer's own `sort` prop, so the ordering logic and
+   * its comparators stay in one place. Omitted keeps the explorer's default.
+   */
+  sort?: FileTreeSort
+  /**
+   * Narrow the visible rows to names containing this text.
+   *
+   * Passed straight to the explorer, which applies the same rule set the listing view
+   * uses (`listing-filter.ts`) to the levels it has already loaded: typing therefore costs
+   * no request, a hit inside a collapsed folder keeps its parent chain visible, and
+   * expansion state is untouched so clearing the term restores what was on screen.
+   */
+  nameFilter?: string
 }
 
 /**
@@ -269,6 +373,14 @@ function useRowDecoration(options: {
  * @returns The explorer's tree, rooted at the knowledge directory.
  */
 export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
+  // `extraMenuItems` is rebuilt on every render of THIS component, but the explorer keeps
+  // the array it was given and evaluates `when` later -- when the menu opens. A closure
+  // over `props.hasClipboard` therefore reads whatever it was when that array was built,
+  // which is exactly the stale value that kept Paste hidden after a Cut. A ref is read
+  // fresh at `when` time, so the decision uses the current clipboard state.
+  const live = useRef(props)
+  live.current = props
+
   const {
     sessionId, root, expanded, revealed, onToggle, onOpenFile,
     onReferenceFile, onUploadRequest, busy, refreshTick,
@@ -341,30 +453,133 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
       refreshTick={refreshTick}
       onUploadRequest={onUploadRequest}
       busy={busy}
+      sort={props.sort}
       {...({
         // `extraMenuItems` is the explorer's append hook: the native rows stay exactly as
         // they are and these land after a separator. Cast because the installed explorer
         // typings may predate the prop; the runtime ignores unknown props.
         extraMenuItems: [
           {
+            id: 'kb-favorite',
+            label: (typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en).actionFavorite,
+            when: (target: { relPath: string; isDir: boolean }) => !target.isDir && live.current.onToggleFavorite !== undefined,
+            onSelect: (target: { relPath: string; isDir: boolean }) => {
+              if (target.isDir) return
+              live.current.onToggleFavorite?.(target.relPath, live.current.isFavorite?.(target.relPath) !== true)
+            },
+          },
+          {
             id: 'kb-extract-markdown',
+            // A folder has nothing to extract, so the row is absent rather than disabled.
             label: (typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en).menuExtractMarkdown,
             when: (target: { relPath: string; isDir: boolean }) => !target.isDir,
             onSelect: (target: { relPath: string; isDir: boolean }) => {
               if (target.isDir) return
+              const viewRelPath = relativeToRoot(root, target.relPath)
+              // The row names the VIEW path, where `personal` hides the owner segment.
+              // The Host reads the authoritative tree, so the id has to go back in before
+              // the request leaves the browser -- otherwise it joins `actualRoot` with a
+              // path that only the view has and answers `no such file` for a file the
+              // reader is looking at.
+              const relPath = resolveUploadDir(viewRelPath, live.current.callerId)
+              if (relPath === undefined) {
+                // No caller id yet means the personal subtree cannot be addressed safely.
+                // Report it instead of sending a request that is guaranteed to 404.
+                live.current.onExtractionFailed?.(
+                  viewRelPath,
+                  'the caller identity is not known yet; reload the page and try again',
+                )
+                return
+              }
+              // Tell the page FIRST, before the request settles. The reader clicked a menu
+              // item and expects the panel to acknowledge it immediately; waiting for the
+              // round trip is exactly what made this look like a dead control. The panel
+              // marks the document as queued and clears the mark when the Host reports the
+              // task -- or when the mark expires -- so this is a guess with a lifetime.
+              live.current.onExtractionQueued?.(relPath)
+              // `wait: true` settles the common case in this one call; the panel's poll
+              // takes over either way.
               void fetch(kbApiPath(KB_API.extractRetry), {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ relPath: target.relPath, wait: true }),
+                body: JSON.stringify({ relPath, wait: true }),
+              }).then(async (response) => {
+                if (response.ok) return
+                // The response used to be discarded here, which made a refusal look exactly
+                // like a success. Read what the Host said, fall back to the status code.
+                const body = (await response.json().catch(() => undefined)) as
+                  { error?: unknown; message?: unknown } | undefined
+                live.current.onExtractionFailed?.(relPath, extractionFailureReason(response.status, body))
+              }).catch((error: unknown) => {
+                // The request never completed: offline, DNS, an aborted tab.
+                const detail = error instanceof Error && error.message !== '' ? ': ' + error.message : ''
+                live.current.onExtractionFailed?.(relPath, extractionFailureReason(0, undefined) + detail)
               })
             },
           },
+          {
+            id: 'kb-share',
+            label: (typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en).actionShare,
+            when: (target: { relPath: string; isDir: boolean }) => live.current.onShare !== undefined,
+            onSelect: (target: { relPath: string; isDir: boolean }) => {
+              live.current.onShare?.(relativeToRoot(root, target.relPath), target.isDir)
+            },
+          },
+          {
+            id: 'kb-cut',
+            label: (typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en).actionCut,
+            when: () => live.current.onClipboard !== undefined,
+            onSelect: (target: { relPath: string; isDir: boolean }) => {
+              const relPath = relativeToRoot(root, target.relPath)
+              live.current.onClipboard?.({
+                entries: [{ relPath, name: relPath.slice(relPath.lastIndexOf('/') + 1) }],
+                cut: true,
+              })
+            },
+          },
+          {
+            id: 'kb-copy',
+            label: (typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en).actionCopy,
+            when: () => live.current.onClipboard !== undefined,
+            onSelect: (target: { relPath: string; isDir: boolean }) => {
+              const relPath = relativeToRoot(root, target.relPath)
+              live.current.onClipboard?.({
+                entries: [{ relPath, name: relPath.slice(relPath.lastIndexOf('/') + 1) }],
+                cut: false,
+              })
+            },
+          },
+          {
+            id: 'kb-paste',
+            label: (typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en).actionPaste,
+            // Hidden while the clipboard is empty, not disabled: an action that cannot
+            // run in this state is noise in a menu the reader expects to be actionable.
+            when: (target: { relPath: string; isDir: boolean }) => {
+              ;(globalThis as Record<string, unknown>).__pasteWhen = {
+                hasCb: live.current.onClipboard !== undefined,
+                hasPaste: live.current.onPasteInto !== undefined,
+                hasClipboard: live.current.hasClipboard,
+              }
+              return live.current.onPasteInto !== undefined && live.current.hasClipboard === true
+            },
+            onSelect: (target: { relPath: string; isDir: boolean }) => {
+              // A folder pastes INTO itself; a file pastes beside itself, in its parent --
+              // the same rule the context menu's own Paste follows, so the two surfaces
+              // cannot disagree about where a paste lands.
+              const path = relativeToRoot(root, target.relPath)
+              const into = target.isDir
+                ? path
+                : (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '')
+              live.current.onPasteInto?.(into)
+            },
+          },
         ],
+        // Props the installed explorer runtime accepts but its current typings may not
+        // declare yet; kept in one cast so a typings refresh cannot silently drop them.
+        hideRoot: true,
+        nameFilter: props.nameFilter,
       } as Record<string, unknown>)}
       visible={props.visible ?? true}
-      // The tree is already scoped to the knowledge root, so a row naming that root
-      // would repeat a level the reader never navigates through.
-      hideRoot
       // Readers open one document at a time; the batch bar answers Ctrl/Shift-click
       // gestures this surface does not use, and costs a row of height when it shows.
       selectionBar={false}

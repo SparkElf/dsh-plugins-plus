@@ -82,17 +82,20 @@ describe('房间会话的模型选择', () => {
     // 会话的 modelSelection 才是决定跑哪个 provider 的东西，preset 不决定它。房间若不装自己
     // 的选择就落到部署默认；默认 provider 的凭证被拒时，房间能建会话、turn 能起，却在一次
     // 鉴权失败上收尾——读起来像这个插件的缺陷。选择必须在第一个 turn 之前装上。
-    expect(HOST).toContain('sessionController.selectModel')
-    const create = HOST.indexOf('sessionController.create(')
-    const select = HOST.indexOf('sessionController.selectModel(')
+    // 安装点现在在 RoomSessions.open 的创建/恢复两条路径之后，而不是创建块内部：
+    // 恢复一个已持久化的房间会话时同样要把它带回房间当前配置的模型。
+    const open = HOST.slice(HOST.indexOf('private async open('))
+    const create = open.indexOf('sessionController.create(')
+    const install = open.indexOf('await this.installRoomModel(session, room, true)')
     expect(create).toBeGreaterThan(0)
-    expect(select).toBeGreaterThan(create)
+    expect(install).toBeGreaterThan(create)
+    expect(HOST).toMatch(/installRoomModel[\s\S]{0,900}selectRoomModel/u)
   })
 
   it('模型是一个 provider+model 的对，缺一半就不装', () => {
     // 只有 provider 没有 model（或相反）不构成可走的路由。装一半等于把会话送回默认，
     // 而又让人以为房间已经指定过了。
-    expect(HOST).toMatch(/room\.modelProvider !== undefined && room\.model !== undefined/u)
+    expect(HOST).toMatch(/room\.modelProvider === undefined \|\| room\.model === undefined\) return/u)
   })
 
   it('房间摘要带出模型，否则容器无从知道该装什么', () => {

@@ -47,6 +47,8 @@ export const KB_API = {
   list: 'list',
   /** Read one file for the preview, without needing a conversation session. */
   read: 'read',
+  /** Resolve a kb://doc/<docId>/chunk/<chunkId> token to all page boxes. */
+  chunk: 'chunk',
   /** Rebuild the caller's visible tree from what DataOps resolves for them. */
   viewsSync: 'views.sync',
   /** Rescan the mounted tree and report its shape. */
@@ -374,6 +376,8 @@ export interface KnowledgeStatusView {
    * with that single name exactly as it did before hierarchy existed. Code that
    * assumed the path was present would break against such a backend.
    */
+  /** Backend DSH permission keys for this caller; used only to hide dead-end menus. */
+  permissions?: readonly string[]
   caller?: {
     userId: string
     label: string
@@ -618,7 +622,7 @@ export interface KnowledgeTemplateSaveInput {
 }
 
 /** Where one extraction task is in its lifecycle, as the Host reports it. */
-export type ExtractionStateView = 'pending' | 'running' | 'succeeded' | 'failed' | 'unsupported'
+export type ExtractionStateView = 'pending' | 'running' | 'succeeded' | 'failed' | 'unsupported' | 'already-markdown'
 
 /**
  * One extraction task.
@@ -632,6 +636,8 @@ export interface ExtractionTaskView {
   relPath: string
   /** Where the task is in its lifecycle. */
   state: ExtractionStateView
+  /** Current Agentic RAG stage (parse/chunk/index/done), when running. */
+  step?: 'parse' | 'chunk' | 'index' | 'done'
   /** When the task was accepted, ISO-8601. */
   queuedAt: string
   /** When the run started, ISO-8601. */

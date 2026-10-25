@@ -403,7 +403,112 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
     onClose()
   }, [ctx, entries, onClose, props, t])
 
-  /** Create a fresh conversation, put the reference in it, and go there. */
+  /**
+   * Put the selection into the conversation this page is bound to.
+   *
+   * This is the primary path and it deliberately does NOT create a conversation. The
+   * host's own `@`-file button inserts into the draft of the conversation it is attached
+   * to, so the reader sees the chip in the composer already on screen. An earlier
+   * revision created a session here and then guessed which one to target; the guess was
+   * often a different session whose composer was not mounted, and because that session's
+   * draft revision really did change, the insert reported success while the visible
+   * composer stayed empty.
+   *
+   * Two conditions have to hold, in this order:
+   *
+   *   1. the target conversation's composer must be MOUNTED -- this page is a global
+   *      panel with no chat of its own, so a composer exists only once the host has
+   *      navigated to a conversation;
+   *   2. the insert then has to run against that same conversation's input.
+   *
+   * The host is therefore asked to open the conversation first, and the insert waits
+   * for the composer element to appear (or reports that it never did).
+   */
+  const insertIntoBoundSession = useCallback((): void => {
+    setBusy(true)
+    setError(undefined)
+    const target = selectedSessionId?.()
+    if (typeof target !== 'string' || target === '') {
+      // Nowhere to put it: say so rather than inserting into nothing.
+      setError(t('refPickerNoTarget'))
+      setBusy(false)
+      return
+    }
+
+    // Navigate first, so the composer for this conversation mounts.
+    try {
+      const navigator = (ctx as { get?: (name: string) => unknown } | undefined)?.get
+      const workspace = typeof navigator === 'function'
+        ? navigator.call(ctx, 'uiWorkspace') as UiWorkspaceLike | undefined
+        : undefined
+      workspace?.openSession?.({ kind: 'known', sessionId: target })
+    } catch {
+      // A host that cannot navigate may still have the composer mounted; the wait
+      // below decides instead of this catch.
+    }
+
+    // One deadline for the whole attempt, computed once. Recomputing per retry would
+    // push it forward forever and the failure branch would be unreachable.
+    const deadline = deadlineFrom(Date.now(), NEW_SESSION_READY_TIMEOUT_MS)
+
+    /**
+     * Whether the composer for `target` is on screen.
+     *
+     * The composer is a contenteditable Lexical editor marked `data-composer-input`; it
+     * carries no session id of its own. Membership is established through the
+     * conversation service instead: a resident input shell for `target` exists exactly
+     * when the host has mounted that conversation's input. Presence alone is therefore
+     * not treated as readiness -- a composer belonging to another conversation would be
+     * the wrong destination.
+     */
+    const composerReady = (): boolean => {
+      if (typeof document === 'undefined') return false
+      if (document.querySelector('[data-composer-input="true"]') === null) return false
+      try {
+        const services = (ctx as { get?: (name: string) => unknown }).get
+        if (typeof services !== 'function') return true
+        const conversation = services.call(ctx, 'conversation') as
+          | { input?: { shell?: (id: string) => unknown } } | undefined
+        if (conversation?.input?.shell === undefined) return true
+        return conversation.input.shell(target) !== undefined
+      } catch {
+        return true
+      }
+    }
+
+    const insertWhenReady = (): void => {
+      const expired = isExpired(Date.now(), deadline)
+      const ready = composerReady()
+      if (!ready && !expired) {
+        window.setTimeout(insertWhenReady, NEW_SESSION_READY_POLL_MS)
+        return
+      }
+      const landed = ready
+        ? entries.filter(entry => referenceInto(ctx, target, entry.path, entry.isDir))
+        : []
+      const inserted = ready && landed.length === entries.length
+      console.log('[kb-ref] bound target=' + target + ' ready=' + ready
+        + ' landed=' + landed.length + '/' + entries.length + ' expired=' + expired)
+      if (!inserted) {
+        // Keep the dialog open so the message is readable.
+        setError(t('refPickerFailed'))
+        setBusy(false)
+        return
+      }
+      props.onReferenced?.(target)
+      onClose()
+    }
+    window.setTimeout(insertWhenReady, 0)
+  }, [ctx, entries, onClose, props, selectedSessionId, t])
+
+  /**
+   * Create a fresh conversation and put the reference in it.
+   *
+   * Secondary to {@link insertIntoBoundSession}: the reader explicitly asked for a new
+   * conversation, so creating one is the point. The insert still has to wait for that
+   * conversation's composer, because a freshly created session has no mounted input
+   * yet -- inserting before the composer exists writes into a draft nobody is showing.
+   */
   const createNew = useCallback((): void => {
     setBusy(true)
     setError(undefined)
@@ -413,86 +518,76 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
         const workspace = typeof navigator === 'function'
           ? navigator.call(ctx, 'uiWorkspace') as UiWorkspaceLike | undefined
           : undefined
-        // `startSession` is the host's own New Session flow: it creates the
-        // conversation, selects it, and understands the workspace. Preferred over
-        // `sessions.create` because it also owns the navigation half, which a bare
-        // create does not.
-        if (typeof workspace?.startSession === 'function') {
-          workspace.startSession(workspaceId)
-
-          // The conversation is created asynchronously and its id is not returned, so
-          // it has to be discovered. Two things must both be true before the insert can
-          // land, and neither is guaranteed on the next tick:
-          //
-          //   1. the catalog lists the new session (there is an id to target), and
-          //   2. `insertWorkspaceReference` can resolve the workspace that OWNS it --
-          //      it looks the session up in `workspace.sessionIds`, and a session that
-          //      was created a moment ago is not in that list yet.
-          //
-          // Waiting only one tick was why "new conversation" produced no chip: the
-          // insert ran while condition (2) was still false, the mention resolved to
-          // `undefined`, and the failure was a logged no-op. Polling both conditions
-          // and reporting a timeout is what turns that silence into a message.
-          // One deadline for the whole attempt, computed once. Recomputing it per
-          // retry would push it forward forever and the window would never expire --
-          // the "report a failure" branch would become unreachable and the dialog
-          // would sit there forever, which is the silence this whole path exists to
-          // remove. `isExpired`/`decideReadiness` are the tested form of that rule.
-          const deadline = deadlineFrom(Date.now(), NEW_SESSION_READY_TIMEOUT_MS)
-          const insertWhenReady = (): void => {
-            const expired = isExpired(Date.now(), deadline)
-            let target: string | undefined
-            try {
-              const snapshot = sessions?.list?.getSnapshot()
-              const ids = snapshot?.ids ?? []
-              const selected = selectedSessionId?.()
-              target = typeof selected === 'string' && selected !== ''
-                ? selected
-                : ids[ids.length - 1]
-            } catch {
-              target = undefined
-            }
-            const hasTarget = typeof target === 'string' && target !== ''
-            const landed = hasTarget
-              ? entries.filter(entry => referenceInto(ctx, target as string, entry.path, entry.isDir))
-              : []
-            const inserted = landed.length === entries.length
-            const action = decideReadiness({ hasTarget, inserted }, expired)
-            if (action === 'retry') {
-              window.setTimeout(insertWhenReady, NEW_SESSION_READY_POLL_MS)
-              return
-            }
-            if (action === 'failed-no-target') {
-              setError(t('refPickerNoTarget'))
-              onClose()
-              return
-            }
-            if (action === 'failed-insert') {
-              // Out of time with nothing inserted: say so instead of closing on a
-              // silent no-op.
-              setError(t('refPickerFailed'))
-            }
-            props.onReferenced?.(target as string)
-            onClose()
-          }
-          window.setTimeout(insertWhenReady, 0)
+        if (typeof workspace?.startSession !== 'function') {
+          setError(t('refPickerCreateFailed'))
+          setBusy(false)
           return
         }
-        // No navigator (an older or stripped host): create through the controller.
-        // Nothing switches the view, so this path cannot show the result -- it is
-        // the fallback that still puts the reference somewhere.
-        const id = await sessions?.create?.({ ...(workspaceId === undefined ? {} : { workspaceId }) })
-        if (typeof id === 'string' && id !== '') {
-          const landed = entries.filter(entry => referenceInto(ctx, id, entry.path, entry.isDir))
-          if (landed.length === 0) setError(t('refPickerFailed'))
-          props.onReferenced?.(id)
-        } else {
-          setError(t('refPickerNoTarget'))
+        // Remember the catalog BEFORE creating: a new session lands at index 0 and the
+        // tail keeps pointing at an older session, so the diff is the only identity
+        // available (the create call does not return the new id).
+        const knownIds = new Set<string>(sessions?.list?.getSnapshot()?.ids ?? [])
+        workspace.startSession(workspaceId)
+
+        const deadline = deadlineFrom(Date.now(), NEW_SESSION_READY_TIMEOUT_MS)
+
+        /**
+         * Whether the composer for the freshly created conversation is on screen.
+         *
+         * Creating a conversation does not mount its composer; the host navigates to it
+         * first. Inserting before that writes into a draft nobody is showing, which is
+         * why the chip was invisible even though the draft revision changed. The new
+         * session is identified by diffing the catalog against `knownIds`.
+         */
+        const probe = (): { target: string | undefined; ready: boolean } => {
+          let target: string | undefined
+          try {
+            const ids = sessions?.list?.getSnapshot()?.ids ?? []
+            target = ids.find(id => !knownIds.has(id))
+          } catch {
+            target = undefined
+          }
+          if (target === undefined) return { target: undefined, ready: false }
+          if (typeof document === 'undefined') return { target, ready: false }
+          if (document.querySelector('[data-composer-input="true"]') === null) {
+            return { target, ready: false }
+          }
+          try {
+            const services = (ctx as { get?: (name: string) => unknown }).get
+            if (typeof services !== 'function') return { target, ready: true }
+            const conversation = services.call(ctx, 'conversation') as
+              | { input?: { shell?: (id: string) => unknown } } | undefined
+            if (conversation?.input?.shell === undefined) return { target, ready: true }
+            return { target, ready: conversation.input.shell(target) !== undefined }
+          } catch {
+            return { target, ready: true }
+          }
         }
-        onClose()
+
+        const insertWhenReady = (): void => {
+          const expired = isExpired(Date.now(), deadline)
+          const { target, ready } = probe()
+          if ((target === undefined || !ready) && !expired) {
+            window.setTimeout(insertWhenReady, NEW_SESSION_READY_POLL_MS)
+            return
+          }
+          const landed = target !== undefined && ready
+            ? entries.filter(entry => referenceInto(ctx, target as string, entry.path, entry.isDir))
+            : []
+          const inserted = target !== undefined && ready && landed.length === entries.length
+          console.log('[kb-ref] created target=' + String(target) + ' ready=' + ready
+            + ' landed=' + landed.length + '/' + entries.length + ' expired=' + expired)
+          if (!inserted) {
+            setError(t('refPickerFailed'))
+            setBusy(false)
+            return
+          }
+          props.onReferenced?.(target as string)
+          onClose()
+        }
+        window.setTimeout(insertWhenReady, 0)
       } catch {
         setError(t('refPickerCreateFailed'))
-      } finally {
         setBusy(false)
       }
     })()
@@ -529,8 +624,12 @@ export function KnowledgeReferencePicker(props: KnowledgeReferencePickerProps) {
                 draft through the same `referenceInChat` contract the explorer uses, so
                 the composer shows the product's own `@` chip rather than text. */}
             {actionRow(busy ? t('refPickerCreating') : t('refPickerNew'), createNew, busy)}
-            {/* The two-step door. Choosing this is what reveals the search field and
-                the conversation list -- the dialog does not open with a hundred rows. */}
+            {/* Reference into the conversation this page is bound to. That session is
+                the one the reader is looking at, so it is used directly rather than
+                guessed: the insert targets it and the host is asked to show it, which
+                is what makes the chip visible in the composer. The list below stays
+                reachable as the secondary door for a different destination. */}
+            {/* Secondary: pick a different conversation from the catalog. */}
             {actionRow(t('refPickerTitle'), () => { setStep('sessions') }, busy)}
           </ul>
         )}

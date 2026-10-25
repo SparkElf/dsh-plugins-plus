@@ -20,6 +20,8 @@ import {
   type SectionSyncStore,
 } from './settings-sync.ts'
 import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
+import { ReviewApi } from './review-api.ts'
+import { registerAiManagementTools } from './tools.ts'
 import {
   WorkspaceLimits,
   WorkspaceLimitsRejection,
@@ -30,7 +32,7 @@ import {
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
 /** Host services required by managed JWT and MCP ownership. */
-export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills']
+export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval']
 
 export const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
 
@@ -42,6 +44,18 @@ export const MODEL_SYNC_PATH = '/integrations/dataops/model-sync'
 
 /** Same-origin route the skill center uses to read and change plaza sharing. */
 export const SKILL_PLAZA_PATH = '/integrations/dataops/skill-plaza'
+/** Caller role and review capability. */
+export const REVIEW_CONTEXT_PATH = '/integrations/dataops/review-context'
+/** Notification inbox and read receipts. */
+export const REVIEW_NOTIFICATIONS_PATH = '/integrations/dataops/review-notifications'
+/** AI scan and the administrator's decision. */
+export const REVIEW_ACTION_PATH = '/integrations/dataops/review'
+/** Permission-centre reads and writes. */
+export const RBAC_PATH = '/integrations/dataops/rbac'
+/** The three plaza-review switches. */
+export const REVIEW_SETTINGS_PATH = '/integrations/dataops/review-settings'
+/** Department CRUD bridge (task-67). */
+export const DEPARTMENTS_PATH = '/integrations/dataops/departments'
 
 /** Same-origin route the Settings panel uses to read and change this workspace's limits. */
 export const WORKSPACE_LIMITS_PATH = '/integrations/dataops/workspace-limits'
@@ -61,6 +75,9 @@ let modelSyncRef: ModelSync | undefined
 
 /** The live plaza instance, so the skill center routes can act on it after activation. */
 let skillPlazaRef: SkillPlaza | undefined
+
+/** The live review API, once this plugin activated. */
+let reviewApiRef: ReviewApi | undefined
 
 /** The live skill plaza, once this plugin activated. */
 export function currentSkillPlaza(): SkillPlaza | undefined {
@@ -423,6 +440,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   modelSyncRef = modelSync
   const skillPlaza = new SkillPlaza(ctx, { baseUrl, credentialRef: config.credentialRef })
   skillPlazaRef = skillPlaza
+  const reviewApi = new ReviewApi(ctx, { baseUrl, credentialRef: config.credentialRef })
+  reviewApiRef = reviewApi
+  ctx.effect(() => registerAiManagementTools(ctx, reviewApi), 'dataops-managed: skill and review tools')
   const workspaceLimits = new WorkspaceLimits(ctx, { baseUrl, credentialRef: config.credentialRef })
   setWorkspaceLimits(workspaceLimits)
 
@@ -449,7 +469,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       ctx.logger.warn(error)
     }
   }
-  if (await ctx.credentials.resolve(accessRef) !== undefined) await adoptNow()
+  // Adoption talks to the backend and may be slow (model publication, distributed
+  // settings). It must never delay route registration: the workspace readiness probe
+  // asks for `/integrations/dataops/model-sync`, and a stalled adoption used to leave
+  // every managed route at 404 while the process was still booting. The function
+  // catches and reports its own failures, so starting it without awaiting is safe.
+  if (await ctx.credentials.resolve(accessRef) !== undefined) void adoptNow()
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -588,9 +613,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       try {
         if (request.method === 'GET') {
           const url = new URL(request.url ?? '/', 'http://localhost')
+          const mine = url.searchParams.get('mine') === '1'
+          const page = await plaza.listPage({
+            tag: url.searchParams.get('tag') ?? undefined,
+            query: url.searchParams.get('q') ?? undefined,
+            status: url.searchParams.get('status') ?? undefined,
+            scope: mine ? 'mine' : url.searchParams.get('scope') ?? undefined,
+            departmentCode: url.searchParams.get('departmentCode') ?? undefined,
+          })
           writeJson(response, 200, {
-            skills: await plaza.list({ tag: url.searchParams.get('tag') ?? undefined, query: url.searchParams.get('q') ?? undefined }),
-            tags: await plaza.tags(),
+            skills: mine ? page.skills.filter(skill => skill.sharedByMe) : page.skills,
+            tags: mine ? [] : await plaza.tags(),
+            ...(page.counts === undefined ? {} : { counts: page.counts }),
           })
           return
         }
@@ -605,13 +639,36 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           writeJson(response, 200, { skills: await readLocalSkills(ctx) })
           return
         }
-        if (action === 'share') {
+        if (action === 'share' || action === 'submit') {
           const name = typeof body?.name === 'string' ? body.name : ''
           const instruction = typeof body?.instruction === 'string' ? body.instruction : ''
           const description = typeof body?.description === 'string' ? body.description : undefined
           const tags = Array.isArray(body?.tags) ? body.tags.filter((tag): tag is string => typeof tag === 'string') : []
+          if (name.trim() === '' || instruction.trim() === '') {
+            writeJson(response, 400, { error: 'name and instruction are required' })
+            return
+          }
           const shared = await plaza.share({ name, description, instruction, tags })
-          writeJson(response, 200, { skill: shared })
+          writeJson(response, 200, { ok: true, skill: shared })
+          return
+        }
+        if (action === 'review') {
+          const api = reviewApiRef
+          if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
+          const id = typeof body?.id === 'number' ? body.id : undefined
+          const decision = body?.decision === 'reject' ? 'reject' : body?.decision === 'approve' ? 'approve' : null
+          if (id === undefined || decision === null) { writeJson(response, 400, { error: 'id and decision are required' }); return }
+          const result = await api.request('/api/ai/review/decide', {
+            method: 'POST',
+            body: JSON.stringify({
+              skills: [id],
+              workflows: [],
+              decision,
+              note: typeof body?.note === 'string' ? body.note : '',
+              authorization: { confirmed: true, reason: 'skill-plaza-review' },
+            }),
+          })
+          writeJson(response, result.status, result.body)
           return
         }
         if (action === 'unshare') {
@@ -632,6 +689,234 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'dataops-managed: skill plaza routes')
+
+  /**
+   * Review context, notifications, AI scan/decide, the permission centre and review settings.
+   *
+   * These are thin same-origin bridges: DataOps owns identity, authorization, the state machine
+   * and the audit trail; this route only attaches the workspace JWT and forwards answers so the
+   * browser can show a precise waiting/refused state instead of flattening both to "empty".
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: REVIEW_CONTEXT_PATH,
+    handler: async (request, response) => {
+      if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'content-length': '0' }); response.end(); return }
+      const api = reviewApiRef
+      if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
+      try {
+        const result = await api.request('/api/ai/review/context')
+        writeJson(response, result.status, result.body)
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: review context failed')
+        writeJson(response, 502, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: review context route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: REVIEW_NOTIFICATIONS_PATH,
+    handler: async (request, response) => {
+      const api = reviewApiRef
+      if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
+      try {
+        if (request.method === 'GET') {
+          const url = new URL(request.url ?? '/', 'http://localhost')
+          const params = new URLSearchParams()
+          if (url.searchParams.get('unreadOnly') === 'true') params.set('unreadOnly', 'true')
+          if (url.searchParams.get('limit') !== null) params.set('limit', url.searchParams.get('limit') as string)
+          const result = await api.request('/api/ai/review-notifications' + (params.size === 0 ? '' : '?' + params.toString()))
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (request.method !== 'POST') { response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' }); response.end(); return }
+        const body = await readJson(request)
+        const result = await api.request('/api/ai/review-notifications/read', { method: 'POST', body: JSON.stringify(body ?? {}) })
+        writeJson(response, result.status, result.body)
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: review notifications failed')
+        writeJson(response, 502, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: review notifications route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: REVIEW_ACTION_PATH,
+    handler: async (request, response) => {
+      if (request.method !== 'POST') { response.writeHead(405, { allow: 'POST', 'content-length': '0' }); response.end(); return }
+      const api = reviewApiRef
+      if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
+      try {
+        const body = await readJson(request)
+        const action = typeof body?.action === 'string' ? body.action : ''
+        const skills = Array.isArray(body?.skills) ? body.skills : []
+        const workflows = Array.isArray(body?.workflows) ? body.workflows : []
+        if (action === 'scan') {
+          const result = await api.request('/api/ai/review/scan', { method: 'POST', body: JSON.stringify({ skills, workflows }) })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (action === 'decide') {
+          const result = await api.request('/api/ai/review/decide', {
+            method: 'POST',
+            body: JSON.stringify({
+              skills,
+              workflows,
+              decision: body?.decision,
+              note: body?.note,
+              authorization: body?.authorization,
+            }),
+          })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        writeJson(response, 400, { error: 'unknown review action' })
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: review action failed')
+        writeJson(response, 502, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: review action route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: RBAC_PATH,
+    handler: async (request, response) => {
+      const api = reviewApiRef
+      if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
+      try {
+        if (request.method === 'GET') {
+          const url = new URL(request.url ?? '/', 'http://localhost')
+          const section = url.searchParams.get('section') ?? 'matrix'
+          const suffix = section === 'members'
+            ? '?q=' + encodeURIComponent(url.searchParams.get('q') ?? '') + '&departmentCode=' + encodeURIComponent(url.searchParams.get('departmentCode') ?? '')
+            : section === 'resources'
+              ? '?kind=' + encodeURIComponent(url.searchParams.get('kind') ?? '')
+              : ''
+          const target = section === 'members'
+            ? '/api/system/permission-center/members' + suffix
+            : section === 'departments'
+              ? '/api/system/permission-center/departments'
+              : section === 'resources'
+                ? '/api/system/permission-center/resources' + suffix
+                : '/api/system/permission-center/matrix' + (url.searchParams.get('scope') === 'dsh' ? '?scope=dsh' : '')
+          const result = await api.request(target)
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (request.method !== 'PUT') { response.writeHead(405, { allow: 'GET, PUT', 'content-length': '0' }); response.end(); return }
+        const body = await readJson(request)
+        const section = typeof body?.section === 'string' ? body.section : ''
+        const value = typeof body?.value === 'object' && body.value !== null ? body.value as Record<string, unknown> : {}
+        if (section === 'roles') {
+          const result = await api.request('/api/system/permission-center/matrix', { method: 'PUT', body: JSON.stringify(value) })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (section === 'members' && typeof value.userId === 'string') {
+          const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(value.userId) + '/roles', { method: 'PUT', body: JSON.stringify({ roleCodes: value.roleCodes }) })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (section === 'departments' && typeof value.code === 'string') {
+          const result = await api.request('/api/system/permission-center/departments/' + encodeURIComponent(value.code) + '/admin', { method: 'PUT', body: JSON.stringify({ userIds: value.userIds }) })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (section === 'resources' && typeof value.kind === 'string' && value.id !== undefined) {
+          const result = await api.request('/api/system/permission-center/resources/' + encodeURIComponent(value.kind) + '/' + encodeURIComponent(String(value.id)) + '/scope', {
+            method: 'PUT',
+            body: JSON.stringify({ departmentCode: value.departmentCode, visibility: value.visibility, ownerId: value.ownerId }),
+          })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        writeJson(response, 400, { error: 'unknown rbac section' })
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: permission centre failed')
+        writeJson(response, 502, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: permission centre route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: DEPARTMENTS_PATH,
+    handler: async (request, response) => {
+      const api = reviewApiRef
+      if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
+      try {
+        const body = await readJson(request)
+        if (request.method === 'POST') {
+          const result = await api.request('/api/system/departments', { method: 'POST', body: JSON.stringify(body ?? {}) })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (request.method !== 'PATCH' && request.method !== 'DELETE') {
+          response.writeHead(405, { allow: 'POST, PATCH, DELETE', 'content-length': '0' })
+          response.end()
+          return
+        }
+        const code = typeof body?.code === 'string' ? body.code : ''
+        if (code === '') { writeJson(response, 400, { error: 'department code is required' }); return }
+        // The backend uses updatedAt as its optimistic-lock token. Read the current row here so
+        // the browser does not have to carry a field the permission-centre list does not return.
+        const current = await api.request('/api/system/departments/' + encodeURIComponent(code))
+        const record = typeof current.body === 'object' && current.body !== null ? current.body as Record<string, unknown> : {}
+        const department = typeof record.department === 'object' && record.department !== null ? record.department as Record<string, unknown> : {}
+        const updatedAt = typeof body?.updatedAt === 'string' ? body.updatedAt : department.updatedAt
+        if (typeof updatedAt !== 'string') { writeJson(response, current.status === 200 ? 409 : current.status, { error: 'department not found' }); return }
+        if (request.method === 'PATCH') {
+          const result = await api.request('/api/system/departments/' + encodeURIComponent(code), {
+            method: 'PATCH',
+            body: JSON.stringify({
+              updatedAt,
+              name: body?.name,
+              parentCode: body?.parentCode,
+              description: body?.description,
+              owner: body?.owner,
+              enabled: body?.enabled,
+            }),
+          })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        const result = await api.request('/api/system/departments/' + encodeURIComponent(code), {
+          method: 'DELETE',
+          body: JSON.stringify({ updatedAt }),
+        })
+        writeJson(response, result.status, result.body)
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: department bridge failed')
+        writeJson(response, 502, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: department CRUD bridge')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: REVIEW_SETTINGS_PATH,
+    handler: async (request, response) => {
+      const api = reviewApiRef
+      if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
+      try {
+        if (request.method === 'GET') {
+          const result = await api.request('/api/integrations/dataops/review-settings')
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (request.method !== 'PUT' && request.method !== 'POST') { response.writeHead(405, { allow: 'GET, POST, PUT', 'content-length': '0' }); response.end(); return }
+        const body = await readJson(request)
+        const result = await api.request('/api/integrations/dataops/review-settings', { method: 'POST', body: JSON.stringify(body ?? {}) })
+        writeJson(response, result.status, result.body)
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: review settings failed')
+        writeJson(response, 502, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: review settings route')
 
   /**
    * The workspace limits an administrator sets in DataOps.

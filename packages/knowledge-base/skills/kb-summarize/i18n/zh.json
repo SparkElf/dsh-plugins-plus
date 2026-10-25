@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "manual",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-25T00:00:00.000Z"
+  },
+  "title": "知识库文档摘要",
+  "description": "为知识库文档显式生成摘要：先 kb_outline 拿目录，逐章读原文 chunk，由 agent 生成 doc/section summary 与 keyFacts，再用 kb_outline_save 落库；上传/抽取不会自动生成摘要。",
+  "summary": "摘要必须由 agent 阅读原文后生成，插件只做数字/比例/条款号/主体校验与落库；摘要只作导航，引用仍用原文 chunk token。"
+}

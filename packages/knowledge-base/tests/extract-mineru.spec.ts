@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { extractDocument } from '../src/extract.ts'
+import { extractDocument, parseMineruBlocks } from '../src/extract.ts'
 
 /**
  * These tests pin the request MinerU actually receives.
@@ -82,7 +82,7 @@ describe('the MinerU extractor request contract', () => {
     // measured 17.8 s against 2.0 s for `basic` on the same one-page PDF.
     expect(request!.url.searchParams.get('tier')).toBe('basic')
     // `output_formats` has no server default, so a request without it is rejected.
-    expect(request!.url.searchParams.getAll('output_formats')).toEqual(['markdown'])
+    expect(request!.url.searchParams.getAll('output_formats')).toEqual(['markdown', 'middle_json'])
     // `ocr_mode` replaced 3.4.x's `parse_method` form field.
     expect(request!.url.searchParams.get('ocr_mode')).toBe('auto')
   })
@@ -130,5 +130,26 @@ describe('the MinerU extractor request contract', () => {
     // did not stop the chain -- there is exactly one MinerU attempt, then the
     // fallback takes over.
     expect(requests.filter(request => request.url.pathname === '/v1/file_parse')).toHaveLength(1)
+  })
+})
+
+
+describe('MinerU middle_json provenance', () => {
+  it('normalizes page_idx/bbox/block index for both digital and scanned output', () => {
+    const blocks = parseMineruBlocks({
+      extensions: { docvortex_layout: { pages: [{ page_idx: 0, width_pt: 600, height_pt: 800 }] } },
+      pages: [{
+        page_idx: 0,
+        blocks: [
+          { type: 'text', index: 2, bbox: [0.1, 0.2, 0.8, 0.3], content: [{ type: 'text', content: '差旅住宿标准五百元。' }] },
+          { type: 'title', index: 3, bbox: [0.1, 0.4, 0.7, 0.5], content: [{ type: 'text', content: '差旅住宿标准五百元。' }] },
+        ],
+      }],
+    })
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0]).toMatchObject({ page: 1, blockIndex: 2, occurrence: 1, coordSpace: 'normalized' })
+    expect(blocks[1]).toMatchObject({ page: 1, blockIndex: 3, occurrence: 2 })
+    expect(blocks[0]?.bbox).toEqual([0.1, 0.2, 0.8, 0.3])
+    expect(blocks[0]?.pageWidth).toBe(600)
   })
 })

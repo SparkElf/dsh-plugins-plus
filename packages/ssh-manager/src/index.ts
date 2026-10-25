@@ -10,7 +10,7 @@ import { SshManagerStore } from './store.ts'
 import { SshPortForwardManager } from './forward.ts'
 import { downloadSftpFile, listSftpFiles, uploadSftpFile } from './sftp.ts'
 import { SshTerminalManager } from './terminal.ts'
-import { executeSshCommand, testSshHost } from './transport.ts'
+import { executeSshCommand, probeSshHostKey, testSshDraft, testSshHost } from './transport.ts'
 import type { SshAuthKind, SshCluster, SshCommandRequest, SshCredentialInput, SshEnvironment, SshHost, SshPortForwardRequest } from './types.ts'
 
 export * from './types.ts'
@@ -18,7 +18,7 @@ export { SshPortForwardManager } from './forward.ts'
 export { downloadSftpFile, listSftpFiles, uploadSftpFile } from './sftp.ts'
 export { SshManagerStore, sshCredentialKey, type SshCredentialRecords } from './store.ts'
 export { SshTerminalManager } from './terminal.ts'
-export { executeSshCommand, fingerprintFromHash, sshConnectConfig, testSshHost } from './transport.ts'
+export { executeSshCommand, fingerprintFromHash, probeSshHostKey, sshConnectConfig, testSshDraft, testSshHost } from './transport.ts'
 export const name = 'ssh-manager'
 export const inject = ['webServer', 'tools', 'approval', 'credentials']
 
@@ -57,6 +57,17 @@ export function apply(ctx: SshContext): void {
     'hosts.delete': async payload => { await store.deleteHost(String(payload.hostId)); return store.state() },
     'hosts.get': async payload => publicHost(await store.host(String(payload.hostId))),
     'hosts.test': async payload => testSshHost(store, String(payload.hostId)),
+    'hosts.testDraft': async payload => {
+      const host = payload.host as SshHost
+      let credential = payload.credential as SshCredentialInput | undefined
+      // An edited host may test without retyping its secret; the stored grant is the same
+      // credential the save path would keep.
+      if (host.id !== '' && (credential === undefined || Object.values(credential).every(value => value === undefined || value === ''))) {
+        try { credential = await store.credential(host.id) } catch { /* the host may not exist yet */ }
+      }
+      return testSshDraft(host, credential)
+    },
+    'hosts.probe': async payload => ({ fingerprint: await probeSshHostKey(payload.host as SshHost) }),
     'hosts.execute': async payload => executeSshCommand(store, String(payload.hostId), String(payload.command), payload.timeoutMs === undefined ? undefined : Number(payload.timeoutMs)),
     'sftp.list': async payload => listSftpFiles(store, String(payload.hostId), String(payload.path ?? '.')),
     'sftp.download': async payload => downloadSftpFile(store, String(payload.hostId), String(payload.path)),
@@ -108,6 +119,7 @@ export function apply(ctx: SshContext): void {
   const open = { type: 'object', additionalProperties: true } as const
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_save_cluster', description: 'Create or update an SSH cluster using non-secret inventory metadata.', parameters: { cluster_id: { type: 'string' }, name: { type: 'string', required: true }, description: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { cluster_id?: string; name: string; description?: string; tags?: string[] }) => { const state = await store.state(); const existing = state.clusters.find(cluster => cluster.id === args.cluster_id); return toolJson(await store.saveCluster({ id: existing?.id ?? '', name: args.name, description: args.description ?? existing?.description ?? '', tags: args.tags ?? existing?.tags ?? [], hostIds: existing?.hostIds ?? [] })) } })), 'dsh-ssh-manager: save cluster tool')
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_save_host', description: 'Create or update SSH host metadata without accepting credentials. Configure its credential through the SSH or DSH Credentials UI.', parameters: { host_id: { type: 'string' }, name: { type: 'string', required: true }, hostname: { type: 'string', required: true }, port: { type: 'number' }, username: { type: 'string', required: true }, environment: { type: 'string' }, auth_kind: { type: 'string' }, description: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } }, cluster_id: { type: 'string' }, jump_host_id: { type: 'string' }, known_host_fingerprint: { type: 'string' }, keep_alive_seconds: { type: 'number' } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id?: string; name: string; hostname: string; port?: number; username: string; environment?: string; auth_kind?: string; description?: string; tags?: string[]; cluster_id?: string; jump_host_id?: string; known_host_fingerprint?: string; keep_alive_seconds?: number }) => { const existing = args.host_id === undefined ? undefined : await store.host(args.host_id); const environment = (args.environment ?? existing?.environment ?? 'other') as SshEnvironment; if (!['development','testing','staging','production','other'].includes(environment)) throw new Error('Invalid SSH environment'); const authKind = (args.auth_kind ?? existing?.authKind ?? 'private-key') as SshAuthKind; if (!['password','private-key','agent'].includes(authKind)) throw new Error('Invalid SSH auth kind'); const host = await store.saveHost({ id: existing?.id ?? '', name: args.name, description: args.description ?? existing?.description ?? '', tags: args.tags ?? existing?.tags ?? [], clusterId: args.cluster_id ?? existing?.clusterId ?? null, environment, hostname: args.hostname, port: args.port ?? existing?.port ?? 22, username: args.username, authKind, credentialId: existing?.credentialId ?? null, credentialConfigured: existing?.credentialConfigured ?? false, jumpHostId: args.jump_host_id ?? existing?.jumpHostId ?? null, knownHostFingerprint: args.known_host_fingerprint ?? existing?.knownHostFingerprint ?? null, keepAliveSeconds: args.keep_alive_seconds ?? existing?.keepAliveSeconds ?? 30 }); return publicHost(host) } })), 'dsh-ssh-manager: save host tool')
+  ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_test_connection', description: 'Test TCP/SSH connectivity for one configured SSH host by id. The Host resolves the stored credential and returns latency and host-key fingerprint; no password, private key, or passphrase is returned.', parameters: { host_id: { type: 'string', required: true, description: 'Host id from ssh_list_hosts.' } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id: string }) => { const result = await testSshHost(store, args.host_id); return toolJson({ ok: true, hostId: result.hostId, latencyMs: result.latencyMs, fingerprint: result.fingerprint }) } })), 'dsh-ssh-manager: test connection tool')
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_delete_host', description: 'Delete one SSH host inventory entry and its referenced central credential record.', parameters: { host_id: { type: 'string', required: true } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id: string }) => { await store.deleteHost(args.host_id); return toolJson({ deleted: args.host_id }) } })), 'dsh-ssh-manager: delete host tool')
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_list_hosts', description: 'List configured SSH hosts and clusters. Returns non-secret metadata only.', parameters: {}, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async () => { const state = await store.state(); return toolJson({ clusters: state.clusters, hosts: state.hosts.map(publicHost) }) } })), 'dsh-ssh-manager: list hosts tool')
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'ssh_get_host', description: 'Read one SSH host by id. Credentials are never returned.', parameters: { host_id: { type: 'string', required: true } }, output: { schema: open, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }, execute: async (args: { host_id: string }) => publicHost(await store.host(args.host_id)) })), 'dsh-ssh-manager: get host tool')

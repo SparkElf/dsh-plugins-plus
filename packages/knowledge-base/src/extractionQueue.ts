@@ -18,7 +18,23 @@
  */
 
 /** Lifecycle of one extraction task. */
-export type ExtractionState = 'pending' | 'running' | 'succeeded' | 'failed' | 'unsupported'
+export type ExtractionState =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'unsupported'
+  /**
+   * The document is already Markdown, so no extraction was needed.
+   *
+   * Distinct from `succeeded` (a sibling WAS written) and from `unsupported` (no reader
+   * exists for the format). Reporting a `.md` file as `unsupported` told a reader their own
+   * Markdown was unreadable, which is both wrong and alarming.
+   */
+  | 'already-markdown'
+
+/** The visible stage after the parser accepted a document. */
+export type ExtractionStep = 'parse' | 'chunk' | 'index' | 'done'
 
 /** One extraction task, as a reader observes it. */
 export interface ExtractionTask {
@@ -26,6 +42,8 @@ export interface ExtractionTask {
   relPath: string
   /** Where the task is in its lifecycle. */
   state: ExtractionState
+  /** Current Agentic RAG stage: parse → chunk → index → done. */
+  step?: ExtractionStep
   /** When the task was accepted, ISO-8601. */
   queuedAt: string
   /** When the run started, ISO-8601. */
@@ -91,7 +109,11 @@ export interface ExtractionQueueOptions {
    * @param mineruBaseUrl - the caller's own parser address, when set.
    * @returns the terminal state of the run.
    */
-  run: (relPath: string, mineruBaseUrl: string | undefined) => Promise<ExtractionOutcome>
+  run: (
+    relPath: string,
+    mineruBaseUrl: string | undefined,
+    reportStep?: (step: ExtractionStep) => void,
+  ) => Promise<ExtractionOutcome>
   /**
    * Whether this path can be extracted at all.
    *
@@ -99,6 +121,15 @@ export interface ExtractionQueueOptions {
    * occupying the single worker slot to discover it has no reader.
    */
   isExtractable: (relPath: string) => boolean
+  /**
+   * Whether this path is already Markdown, so no extraction is needed.
+   *
+   * Separate from `isExtractable` because the two answer different questions: `false`
+   * from `isExtractable` means "no reader exists" (a failure), while `true` here means
+   * "there is nothing to read" (a success). Collapsing them is what reported a reader's
+   * own `.md` file as an unreadable format.
+   */
+  isAlreadyMarkdown: (relPath: string) => boolean
 }
 
 /** One extraction queue. One instance per plugin registration. */
@@ -205,11 +236,13 @@ export function createExtractionQueue(options: ExtractionQueueOptions): Extracti
     if (task === undefined) return
     const startedAt = new Date().toISOString()
     task.state = 'running'
+    task.step = 'parse'
     task.startedAt = startedAt
     running = item.relPath
     try {
-      const outcome = await options.run(item.relPath, item.mineruBaseUrl)
+      const outcome = await options.run(item.relPath, item.mineruBaseUrl, step => { task.step = step })
       task.state = outcome.state
+      if (outcome.state === 'succeeded' || outcome.state === 'already-markdown') task.step = 'done'
       if (outcome.markdown !== undefined) task.markdown = outcome.markdown
       if (outcome.via !== undefined) task.via = outcome.via
       if (outcome.reason !== undefined) task.reason = outcome.reason
@@ -218,7 +251,14 @@ export function createExtractionQueue(options: ExtractionQueueOptions): Extracti
       // this go on purpose. The message is kept because "why" is the whole value of
       // a status surface when nothing appears beside the document.
       task.state = 'failed'
-      task.reason = error instanceof Error ? error.message : String(error)
+      // A blank reason renders as "失败：" with nothing after the colon, which tells the
+      // reader less than no message at all -- they cannot tell whether to retry. Every
+      // failure therefore carries text, falling back to the error's own name and then to a
+      // literal, so the field is never empty.
+      const message = error instanceof Error ? error.message.trim() : String(error).trim()
+      task.reason = message !== '' ? message
+        : error instanceof Error && error.name !== 'Error' ? error.name
+          : 'the extractor failed without reporting a reason'
     } finally {
       task.finishedAt = new Date().toISOString()
       running = undefined
@@ -263,17 +303,24 @@ export function createExtractionQueue(options: ExtractionQueueOptions): Extracti
       if (existing !== undefined && (existing.state === 'pending' || existing.state === 'running')) {
         return { ...existing }
       }
+      // A Markdown document is already the extraction's own output, so it resolves at
+      // `already-markdown` without occupying the worker. Checked before the
+      // "unsupported" branch: `.md` is not in the extractable list, so it used to be
+      // reported as an unreadable format.
+      const alreadyMarkdown = options.isAlreadyMarkdown(relPath)
       const task: ExtractionTask = {
         relPath,
-        state: options.isExtractable(relPath) ? 'pending' : 'unsupported',
+        state: alreadyMarkdown ? 'already-markdown'
+          : options.isExtractable(relPath) ? 'pending'
+            : 'unsupported',
         queuedAt: new Date().toISOString(),
       }
       if (task.state === 'pending') {
         waiting.push({ relPath, ...(mineruBaseUrl === undefined ? {} : { mineruBaseUrl }) })
       } else {
-        // No reader for this type, so nothing to schedule: answering now is both
-        // faster and honest, and it keeps the single worker free for real work.
-        task.reason = 'this file type has no extractor'
+        // Nothing to schedule, so answering now is both faster and honest, and it keeps
+        // the single worker free for real work.
+        if (!alreadyMarkdown) task.reason = 'this file type has no extractor'
         task.finishedAt = task.queuedAt
       }
       tasks.set(relPath, task)
