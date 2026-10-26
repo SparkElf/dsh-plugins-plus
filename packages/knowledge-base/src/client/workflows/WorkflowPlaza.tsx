@@ -421,6 +421,38 @@ function mineScopeLabel(copy: WorkflowPlazaCopy, item: PublishedWorkflowView): s
   return copy.mineScopePrivate
 }
 
+/** One workflow's full detail, read in a dialog rather than inline on the card. */
+function WorkflowDetailDialog({ item, copy, onClose }: {
+  item: PublishedWorkflowView | undefined
+  copy: WorkflowPlazaCopy
+  onClose: () => void
+}): ReactNode {
+  return (
+    <Modal
+      open={item !== undefined}
+      onClose={onClose}
+      title={item?.title ?? ''}
+      closeLabel={copy.dialogCancel}
+      footer={<Button variant="outline" onClick={onClose}>{copy.dialogCancel}</Button>}
+    >
+      {item === undefined ? null : (
+        <div className={styles.detailDialogBody} data-kb-plaza-detail-dialog="">
+          <p className={styles.detailDescription}>{item.description}</p>
+          <pre className={styles.detailInstruction}>{item.instruction}</pre>
+          <div className={styles.detailFacts}>
+            <span>{copy.mineUpdated}：{item.updatedAt ?? item.reviewedAt ?? item.createdAt ?? '—'}</span>
+            {item.cronHint === undefined || item.cronHint === null || item.cronHint === '' ? null : <span>{item.cronHint}</span>}
+            {item.category === undefined || item.category === '' ? null : <span>{item.category}</span>}
+          </div>
+          {item.reviewNote === undefined || item.reviewNote === '' ? null : (
+            <p className={styles.failure}>{copy.mineReviewNote}：{item.reviewNote}</p>
+          )}
+        </div>
+      )}
+    </Modal>
+  )
+}
+
 /** The caller's own shared workflows, newest update first. */
 function MinePanel({ copy, items, error, busyId, onResubmit, onUnpublish }: {
   copy: WorkflowPlazaCopy
@@ -436,6 +468,7 @@ function MinePanel({ copy, items, error, busyId, onResubmit, onUnpublish }: {
     if (status === 'unpublished') return copy.mineStatusUnpublished
     return copy.mineStatusPending
   }
+  const [detailFor, setDetailFor] = useState<PublishedWorkflowView | undefined>(undefined)
   return (
     <section className={styles.review} data-kb-plaza-mine="">
       {error === undefined ? null : <p className={styles.failure}>{error}</p>}
@@ -465,14 +498,6 @@ function MinePanel({ copy, items, error, busyId, onResubmit, onUnpublish }: {
                 {status === 'rejected' && item.reviewNote !== undefined && item.reviewNote !== '' ? (
                   <p className={styles.failure} data-kb-plaza-mine-reason="">{copy.mineReviewNote}：{item.reviewNote}</p>
                 ) : null}
-                <details className={styles.reviewPrompt}>
-                  <summary>{copy.mineDetails}</summary>
-                  <pre>{item.instruction}</pre>
-                  <div className={styles.reviewMeta}>
-                    {item.cronHint === undefined || item.cronHint === null ? '' : item.cronHint}
-                    {item.category === undefined || item.category === '' ? '' : ' · ' + item.category}
-                  </div>
-                </details>
                 <div className={styles.mineFooter} data-kb-plaza-mine-footer="">
                   {status === 'rejected' || status === 'unpublished' ? (
                     <Button
@@ -496,12 +521,21 @@ function MinePanel({ copy, items, error, busyId, onResubmit, onUnpublish }: {
                       {copy.mineUnpublish}
                     </Button>
                   ) : null}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-kb-plaza-mine-detail={item.id}
+                    onClick={() => { setDetailFor(item) }}
+                  >
+                    {copy.mineDetails}
+                  </Button>
                 </div>
               </li>
             )
           })}
         </ul>
       )}
+      <WorkflowDetailDialog item={detailFor} copy={copy} onClose={() => { setDetailFor(undefined) }} />
     </section>
   )
 }
@@ -522,6 +556,7 @@ function ReviewPanel({ copy, deps, onReviewed }: {
   const [notes, setNotes] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState<string | undefined>(undefined)
+  const [detailFor, setDetailFor] = useState<PublishedWorkflowView | undefined>(undefined)
 
   const load = useCallback(async (): Promise<void> => {
     if (deps.loadPending === undefined) {
@@ -581,10 +616,6 @@ function ReviewPanel({ copy, deps, onReviewed }: {
                 {copy.reviewAuthor}：{item.authorName ?? item.authorId ?? '—'} · {copy.reviewCreated}：{item.createdAt ?? '—'}
               </div>
               <p className={styles.reviewDescription}>{item.description}</p>
-              <details className={styles.reviewPrompt}>
-                <summary>{copy.reviewPromptLabel}</summary>
-                <pre>{item.instruction}</pre>
-              </details>
               <input
                 className={styles.reviewNote}
                 value={notes[item.id] ?? ''}
@@ -607,6 +638,15 @@ function ReviewPanel({ copy, deps, onReviewed }: {
                   variant="outline"
                   size="sm"
                   disabled={busy === item.id}
+                  data-kb-plaza-review-detail={item.id}
+                  onClick={() => { setDetailFor(item) }}
+                >
+                  {copy.mineDetails}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy === item.id}
                   data-kb-plaza-reject={item.id}
                   onClick={() => { void decide(item.id, 'reject') }}
                 >
@@ -617,6 +657,7 @@ function ReviewPanel({ copy, deps, onReviewed }: {
           ))}
         </ul>
       )}
+      <WorkflowDetailDialog item={detailFor} copy={copy} onClose={() => { setDetailFor(undefined) }} />
     </section>
   )
 }
