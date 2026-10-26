@@ -204,6 +204,10 @@ export function readColumnExpanded(ctx: unknown): boolean {
   const context = ctx as ContextLike | undefined
   if (typeof context?.get !== 'function') return false
   try {
+    // The host's shell close control removes the right track without flipping the
+    // controller's expanded flag. The frame publishes that fact as a DOM attribute,
+    // so read it first; otherwise closing the column leaves this page in file mode.
+    if (document.querySelector('[data-rightbar-collapsed]') !== null) return false
     const column = context.get('sidebarRight') as RightColumnOpener | undefined
     return column?.isExpanded?.() === true
   } catch {

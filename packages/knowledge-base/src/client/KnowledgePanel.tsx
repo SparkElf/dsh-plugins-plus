@@ -278,15 +278,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const [selection, setSelection] = useState<Selection>({ kind: 'home' })
 
   /**
-   * The page the reader was on before opening a document.
-   *
-   * Reading a file is a detour, not a destination. When the reader collapses the
-   * file window they expect to be back where they left off -- the permissions page,
-   * the trash, the index -- not returned to the home list. `selection` alone cannot
-   * answer this because it has already been replaced by the file entry.
-   */
-  const [lastNonFile, setLastNonFile] = useState<Selection>({ kind: 'home' })
-  /**
    * The open document's modification instant, reported by the preview.
    *
    * Held here rather than in the preview because the header draws it: the header is
@@ -343,8 +334,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * reports it rather than appearing to do nothing.
    */
   const openDocument = async (path: string): Promise<void> => {
-    // Remember where the reader came from before the document replaces the selection.
-    setLastNonFile(current => (selection.kind === 'file' ? current : selection))
     setSelection({ kind: 'file', path })
     // A markdown preview has an absolute-address claimant and needs no session. A
     // host-owned type (.pdf/.docx/.xlsx) gets a session-scoped address, so resolve a
@@ -1043,11 +1032,11 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   useEffect(() => {
     if (readerOnScreen) return
     closeSidebar(props.ctx)
-    // A reader who closes the file window leaves the document behind; send them back to
-    // the page they opened it from rather than to the home list. Only acts on a file
-    // selection, so ordinary rail clicks are untouched.
-    setSelection(current => (current.kind === 'file' ? lastNonFile : current))
-  }, [documentInSidebar, props.ctx, lastNonFile])
+    // A reader who closes the file window leaves the document behind; send them back
+    // to the knowledge home rather than to whatever list they opened it from. Only acts
+    // on a file selection, so ordinary rail clicks are untouched.
+    setSelection(current => (current.kind === 'file' ? (canSeeHome ? { kind: 'home' } : { kind: 'search' }) : current))
+  }, [documentInSidebar, columnExpanded, props.ctx, canSeeHome])
 
   if (state.kind === 'loading') {
     // Localised and animated: the hardcoded English sentence was the only loading
