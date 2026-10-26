@@ -459,7 +459,7 @@
 
 [data-kb-plaza-mine] .reviewCard {
   height: auto;
-  min-height: 280px;
+  min-height: 180px;
 }
 
 .mineTags {

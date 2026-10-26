@@ -993,13 +993,24 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // page never learns the column went away, keeps suppressing its content, and the frame
   // is left showing an empty middle column.
   const [columnExpanded, setColumnExpanded] = useState(true)
+  // Opening the file window is asynchronous: the host may still report the collapsed
+  // track for a poll or two while it reveals the column. Do not treat that transient as
+  // a reader close, or selecting a document folds the window immediately.
+  const [columnOpenedOnce, setColumnOpenedOnce] = useState(false)
   useEffect(() => {
     if (selection.kind !== 'file') return
-    const read = (): void => { setColumnExpanded(readColumnExpanded(props.ctx)) }
+    const read = (): void => {
+      const next = readColumnExpanded(props.ctx)
+      setColumnExpanded(next)
+      if (next) setColumnOpenedOnce(true)
+    }
     read()
     const timer = window.setInterval(read, 400)
     return () => { window.clearInterval(timer) }
   }, [selection.kind, props.ctx])
+  useEffect(() => {
+    if (!documentInSidebar) setColumnOpenedOnce(false)
+  }, [documentInSidebar])
   /** True while the reader is actually on screen holding this page's document. */
   const readerOnScreen = documentInSidebar && columnExpanded
 
@@ -1031,12 +1042,15 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // and unmounts the boundary.
   useEffect(() => {
     if (readerOnScreen) return
+    // A selected document has not finished opening yet; the host's collapsed track is
+    // not a user close. Wait until the column has been seen expanded at least once.
+    if (documentInSidebar && !columnOpenedOnce) return
     closeSidebar(props.ctx)
     // A reader who closes the file window leaves the document behind; send them back
     // to the knowledge home rather than to whatever list they opened it from. Only acts
     // on a file selection, so ordinary rail clicks are untouched.
     setSelection(current => (current.kind === 'file' ? (canSeeHome ? { kind: 'home' } : { kind: 'search' }) : current))
-  }, [documentInSidebar, columnExpanded, props.ctx, canSeeHome])
+  }, [documentInSidebar, columnExpanded, columnOpenedOnce, props.ctx, canSeeHome])
 
   if (state.kind === 'loading') {
     // Localised and animated: the hardcoded English sentence was the only loading
