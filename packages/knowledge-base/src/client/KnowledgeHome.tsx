@@ -98,6 +98,8 @@ interface CardItem {
 export interface KnowledgeHomeProps {
   /** Locale-bound copy resolver. */
   t: (key: string) => string
+  /** Real session key for the borrowed file explorer; absent uses its placeholder. */
+  sessionId?: string
   /** Locale tag, so dates match the reader's language. */
   locale?: string
   /** Disabled when the tree is not mounted, so the cards cannot promise a tree. */
@@ -899,6 +901,9 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         mode={dialog ?? 'new-doc'}
         onClose={() => { setDialog(undefined) }}
         defaultPath={defaultDestination(undefined, props.callerId)}
+        root={props.mountPoint}
+        callerId={props.callerId}
+        sessionId={props.sessionId}
         t={c}
         onDone={(message) => {
           setNotice(message)

@@ -31,7 +31,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => {
   // Listed explicitly rather than proxied: vitest's module mock is read through its own
   // ESM interop, so a Proxy's `get` is not consulted the way the component tree expects.
   const names = [
-    'Button', 'Input', 'Modal', 'Tag', 'SegmentedTabs', 'Menu', 'MenuItemButton',
+    'Button', 'Input', 'Modal', 'Tag', 'SegmentedTabs', 'Menu', 'MenuItemButton', 'FileTypeIcon',
     'IconCheckOutlineRegular', 'IconChevronDownOutlineRegular', 'IconChevronUpOutlineRegular',
     'IconDeliverDocRegular', 'IconFolderOpenOutlineRegular', 'IconListPenOutlineRegular',
     'IconPanelLeftOutlineRegular', 'IconPlusOutlineRegular', 'IconRightUpOutlineRegular',

@@ -51,7 +51,7 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FileTree } from 'dsh-better-sidebar/src/client/FileTree.tsx'
 import type { FileTreeSort } from 'dsh-better-sidebar/src/client/file-tree-sort.ts'
 import type { UploadItem } from 'dsh-better-sidebar/src/client/upload.ts'
@@ -60,7 +60,7 @@ import { resolveUploadDir } from './dropTargetPath.ts'
 import { VIEW_METADATA_FILENAMES } from '../viewMetadata.ts'
 import styles from './KnowledgeFileTree.module.css'
 import { batchRowsFor } from './referenceTargets.ts'
-import { KB_API, kbApiPath } from '../api.ts'
+import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import { extractionFailureReason } from './progressRules.ts'
 import { en, zh } from './locales.ts'
 
@@ -132,6 +132,16 @@ export interface KnowledgeFileTreeProps {
   onPathDeleted?: (path: string, isDir: boolean) => void
   /** Whether the owning surface is on screen. */
   visible?: boolean
+  /**
+   * Hide the explorer's root row. A destination picker draws its own root row so
+   * selecting the mount root is a click, not an expansion.
+   */
+  hideRoot?: boolean
+  /**
+   * Tree-relative path to paint as selected. Used by the upload destination picker;
+   * `''` is the mount root (the picker draws that row itself).
+   */
+  selectedPath?: string
   /**
    * Say the three buckets in the reader's language.
    *
@@ -296,8 +306,10 @@ function useRowDecoration(options: {
   root: string
   isFavorite: ((relPath: string) => boolean) | undefined
   label: string | undefined
+  selectedPath: string | undefined
+  mtimes: ReadonlyMap<string, number>
 }): void {
-  const { container, root, isFavorite, label } = options
+  const { container, root, isFavorite, label, selectedPath, mtimes } = options
 
   /**
    * Turn an absolute row path into the key favourites are stored under.
@@ -309,6 +321,7 @@ function useRowDecoration(options: {
    */
   const relPathOf = useCallback((absolute: string): string | undefined => {
     const base = root.endsWith('/') ? root.slice(0, -1) : root
+    if (absolute === base) return ''
     if (!absolute.startsWith(base + '/')) return undefined
     return absolute.slice(base.length + 1)
   }, [root])
@@ -317,8 +330,35 @@ function useRowDecoration(options: {
     const host = container.current
     if (host === null) return undefined
 
-    /** Insert or remove one row's star so it reflects the current favourites set. */
-    const paintRow = (row: Element, favorite: boolean): void => {
+    /** Paint the selected destination and insert/remove the favourite star. */
+    const paintRow = (row: Element, favorite: boolean, selected: boolean): void => {
+      if (selected) row.setAttribute('data-kb-selected', 'true')
+      else row.removeAttribute('data-kb-selected')
+
+      // The explorer host does not put mtime on every fs.trees row; fill it from
+      // KB_API.list (the listing already returns mtimeMs). A row the explorer
+      // already timed is left alone.
+      const relative = rowPathOf(row) === undefined ? undefined : relPathOf(rowPathOf(row) as string)
+      const mtime = relative === undefined ? undefined : mtimes.get(relative)
+      const timeSelector = '[data-kb-mtime]'
+      const existingTime = row.querySelector(timeSelector)
+      if (mtime === undefined) existingTime?.remove()
+      else if (row.querySelector('[class*="explorer"][class*="Time"]') === null) {
+        const text = new Date(mtime).toLocaleDateString(
+          typeof document === 'undefined' ? 'zh-CN' : document.documentElement.lang,
+          { month: '2-digit', day: '2-digit' },
+        )
+        if (existingTime === null) {
+          const time = document.createElement('span')
+          time.setAttribute('data-kb-mtime', '')
+          time.setAttribute('title', new Date(mtime).toLocaleString())
+          time.textContent = text
+          const ref = row.querySelector('[class*="explorerRef"]')
+          if (ref !== null) ref.before(time)
+          else row.appendChild(time)
+        } else if (existingTime.textContent !== text) existingTime.textContent = text
+      }
+
       const RE = '[data-kb-favorite]'
       const existing = row.querySelector(RE)
       if (!favorite) { existing?.remove(); return }
@@ -346,13 +386,13 @@ function useRowDecoration(options: {
 
     /** Decorate every row currently rendered. */
     const paint = (): void => {
-      if (isFavorite === undefined) return
       for (const row of host.querySelectorAll('[role="button"]')) {
         const absolute = rowPathOf(row)
         if (absolute === undefined) continue
         const relPath = relPathOf(absolute)
         if (relPath === undefined) continue
-        paintRow(row, isFavorite(relPath))
+        const favorite = relPath !== '' && isFavorite !== undefined && isFavorite(relPath)
+        paintRow(row, favorite, selectedPath !== undefined && relPath === selectedPath)
       }
     }
 
@@ -363,8 +403,132 @@ function useRowDecoration(options: {
     observer.observe(host, { childList: true, subtree: true })
 
     return () => { observer.disconnect() }
-  }, [container, isFavorite, label, relPathOf])
+  }, [container, isFavorite, label, relPathOf, selectedPath, mtimes])
 
+}
+
+/**
+ * Read `mtimeMs` for the rows the explorer is showing from the KB list route.
+ *
+ * `fs.trees` returns names and kinds but not every row's modification time; the
+ * knowledge listing route already returns it, and both surfaces must agree. Only the
+ * root and expanded levels are listed, which is exactly the set of rows on screen.
+ */
+function useRowTimes(options: {
+  root: string
+  expanded: readonly string[]
+  refreshTick: number
+}): ReadonlyMap<string, number> {
+  const { root, expanded, refreshTick } = options
+  const [times, setTimes] = useState<ReadonlyMap<string, number>>(() => new Map())
+  const expandedKey = expanded.join('\u0000')
+
+  useEffect(() => {
+    let cancelled = false
+    const base = root.endsWith('/') ? root.slice(0, -1) : root
+    const relOf = (absolute: string): string | undefined => {
+      if (absolute === base) return ''
+      return absolute.startsWith(base + '/') ? absolute.slice(base.length + 1) : undefined
+    }
+    const levels = ['', ...expandedKey.split('\u0000').map(relOf).filter((x): x is string => x !== undefined)]
+    void (async () => {
+      const next = new Map<string, number>()
+      await Promise.all(levels.map(async (level) => {
+        try {
+          const response = await fetch(kbApiPath(KB_API.list), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: level }),
+            cache: 'no-store',
+          })
+          if (!response.ok) return
+          const body = await readKnowledgeJson<{ entries?: Array<{ relPath: string; mtimeMs?: number }> }>(response)
+          for (const entry of body.entries ?? []) {
+            if (entry.mtimeMs === undefined) continue
+            next.set(entry.relPath, entry.mtimeMs)
+          }
+        } catch {
+          // A level that cannot be listed keeps the row's native time (if any).
+        }
+      }))
+      if (!cancelled) setTimes(next)
+    })()
+    return () => { cancelled = true }
+  }, [expandedKey, refreshTick, root])
+
+  return times
+}
+
+/**
+ * Add the knowledge actions to the explorer's native row menu.
+ *
+ * The installed explorer builds that menu internally and does not consume the
+ * `extraMenuItems` prop yet, so appending is done at the one place the menu is
+ * visible: after it opens. The clone keeps the menu's own row/typography classes;
+ * the handler closes the menu with Escape, exactly like choosing a native row.
+ *
+ * The contextmenu listener is a normal bubble-phase React handler that only records
+ * the row; it never prevents the explorer's own menu from opening.
+ */
+function useContextMenuExtras(options: {
+  root: string
+  label: string
+  onExtract: (relPath: string) => void
+}): (event: React.MouseEvent<HTMLDivElement>) => void {
+  const { root, label, onExtract } = options
+  const target = useRef<{ relPath: string; isDir: boolean } | null>(null)
+
+  const onContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>): void => {
+    const node = event.target instanceof Element ? event.target : null
+    const row = node?.closest('[role="button"]')
+    if (row === null || row === undefined) { target.current = null; return }
+    const absolute = rowPathOf(row)
+    if (absolute === undefined) { target.current = null; return }
+    target.current = {
+      relPath: relativeToRoot(root, absolute),
+      isDir: row.className.includes('_explorerDir'),
+    }
+  }, [root])
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const current = target.current
+      if (current === null || current.isDir) return
+      const menu = document.querySelector('[role="menu"]')
+      if (menu === null) return
+      if (menu.querySelector('[data-kb-menu-extract]') !== null) return
+      const items = [...menu.querySelectorAll('[role="menuitem"]')]
+      if (items.some(item => item.textContent?.trim() === label)) return
+      const viewport = menu.querySelector('[role="presentation"]') ?? menu
+      const sample = viewport.querySelector('[class*="itemWrap"]') as HTMLElement | null
+      if (sample === null) return
+      const wrapper = sample.cloneNode(true) as HTMLElement
+      wrapper.setAttribute('data-kb-menu-extract', '')
+      const button = wrapper.querySelector('button')
+      if (button === null) return
+      button.disabled = false
+      button.removeAttribute('disabled')
+      button.removeAttribute('aria-disabled')
+      const text = button.querySelector('[class*="itemLabel"]') ?? button.querySelector('span:last-child')
+      if (text !== null) text.textContent = label
+      else button.textContent = label
+      button.setAttribute('aria-label', label)
+      button.addEventListener('click', (event) => {
+        event.preventDefault(); event.stopPropagation()
+        const selected = target.current
+        target.current = null
+        if (selected !== null) onExtract(selected.relPath)
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      })
+      const danger = viewport.querySelector('[class*="danger"]')?.closest('[class*="itemWrap"]')
+      if (danger !== null && danger !== undefined) danger.before(wrapper)
+      else viewport.appendChild(wrapper)
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => { observer.disconnect() }
+  }, [label, onExtract])
+
+  return onContextMenu
 }
 
 /**
@@ -385,6 +549,33 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
     sessionId, root, expanded, revealed, onToggle, onOpenFile,
     onReferenceFile, onUploadRequest, busy, refreshTick,
   } = props
+  const copy = typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en
+
+  /** Run one extraction request for a VIEW-relative file path. */
+  const extractMarkdown = useCallback((viewRelPath: string): void => {
+    const relPath = resolveUploadDir(viewRelPath, live.current.callerId)
+    if (relPath === undefined) {
+      live.current.onExtractionFailed?.(
+        viewRelPath,
+        'the caller identity is not known yet; reload the page and try again',
+      )
+      return
+    }
+    live.current.onExtractionQueued?.(relPath)
+    void fetch(kbApiPath(KB_API.extractRetry), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ relPath, wait: true }),
+    }).then(async (response) => {
+      if (response.ok) return
+      const body = (await response.json().catch(() => undefined)) as
+        { error?: unknown; message?: unknown } | undefined
+      live.current.onExtractionFailed?.(relPath, extractionFailureReason(response.status, body))
+    }).catch((error: unknown) => {
+      const detail = error instanceof Error && error.message !== '' ? ': ' + error.message : ''
+      live.current.onExtractionFailed?.(relPath, extractionFailureReason(0, undefined) + detail)
+    })
+  }, [])
 
   // The explorer wants mutable arrays; the props are readonly so a caller cannot mutate
   // the reader's expansion state through the child. A stable identity per value keeps the
@@ -400,12 +591,16 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
    * `useRowDecoration` for what it decorates and why.
    */
   const container = useRef<HTMLDivElement | null>(null)
+  const mtimes = useRowTimes({ root, expanded, refreshTick })
   useRowDecoration({
     container,
     root,
     isFavorite: props.isFavorite,
     label: props.favoriteMarkLabel,
+    selectedPath: props.selectedPath,
+    mtimes,
   })
+  const onTreeContextMenu = useContextMenuExtras({ root, label: copy.menuExtractMarkdown, onExtract: extractMarkdown })
 
   /** Every exclusion pattern at once, in the one array identity the explorer keys on. */
   const exclude = useMemo(() => METADATA_NAMES.map(name => `**/${name}`), [])
@@ -440,10 +635,11 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
   }, [props.bucketLabels, departmentCodes, departmentNames])
 
   return (
-    <div ref={container} className={styles.treeFrame}>
+    <div ref={container} className={styles.treeFrame} onContextMenuCapture={onTreeContextMenu}>
     <FileTree
       sessionId={sessionId}
       cwd={root}
+      hideRoot={props.hideRoot}
       expanded={expandedList}
       revealed={revealedList}
       onToggle={onToggle}

@@ -326,7 +326,7 @@
   border-radius: var(--dsw-radius-sm);
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 16px;
+  font: var(--dsw-font-base-strong-16);
   line-height: 1;
   cursor: pointer;
 }
@@ -456,6 +456,56 @@
 
 .treeMuted {
   margin: 0;
+  padding: 4px 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+/*
+ * The upload destination tree borrows the explorer's rows (see
+ * KnowledgeFileTree). Only the mount-root row and the extraction notice are local;
+ * row height, indentation, folder glyphs, hover and selected fills come from the
+ * explorer's own styles.
+ */
+.tree {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.treeRootRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  text-align: start;
+  cursor: pointer;
+}
+
+.treeRootRow svg {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.treeRootRow:hover:not(:disabled),
+.treeRootRow[data-selected='true'] {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.treeRootRow:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
+.treeNotice {
+  margin: 4px 0 0;
   padding: 4px 8px;
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxxs-11);

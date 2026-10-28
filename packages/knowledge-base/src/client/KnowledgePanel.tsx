@@ -1805,6 +1805,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
               <KnowledgeHome
                 t={t}
                 locale={props.locale}
+                sessionId={explorerSessionId}
                 mountPoint={config.mountPoint}
                 focusNew={focusNew}
                 ctx={props.ctx}

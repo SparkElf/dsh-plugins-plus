@@ -27,7 +27,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => {
     return Component
   }
   const names = [
-    'Button', 'Input', 'Modal', 'Tag', 'SegmentedTabs', 'Menu', 'MenuItemButton', 'Tooltip',
+    'Button', 'Input', 'Modal', 'Tag', 'SegmentedTabs', 'Menu', 'MenuItemButton', 'FileTypeIcon', 'Tooltip',
     'IconCheckOutlineRegular', 'IconChevronDownOutlineRegular', 'IconChevronUpOutlineRegular',
     'IconDeliverDocRegular', 'IconFolderOpenOutlineRegular', 'IconListPenOutlineRegular',
     'IconPanelLeftOutlineRegular', 'IconPlusOutlineRegular', 'IconRightUpOutlineRegular',

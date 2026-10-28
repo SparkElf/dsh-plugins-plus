@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Button, FileTypeIcon, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgeCreateDialog.module.css'
+import { KnowledgeFileTree } from './KnowledgeFileTree.tsx'
 
 /** One directory level as the Host's listing route reports it. */
 interface ListingEntry {
@@ -328,53 +329,88 @@ function FolderNode(props: {
   )
 }
 
-/** Folder-only tree used by the second upload step. */
-function FolderTree(props: {
+/**
+ * Upload destination tree.
+ *
+ * It is the same `KnowledgeFileTree` the sidebar renders (which is the product's
+ * `FileTree`), not a second folder-only widget: rows keep the sidebar's 28px rhythm,
+ * 22px indent steps, folder glyphs, hover/selected fills, per-file mtime, and the
+ * explorer's context menu. Upload adds one interaction the sidebar does not need:
+ * toggling a folder also makes it the destination, painted through `selectedPath`.
+ *
+ * The mount root is a separate row because the explorer's root row is decorative
+ * (`RootRow` has no click handler); everything below it is the real tree.
+ */
+function UploadDestinationTree(props: {
+  root: string
   value: string
   onChange: (path: string) => void
+  callerId?: string
+  sessionId?: string
   disabled?: boolean
+  t: (key: string) => string
 }): ReactNode {
-  const { value, onChange, disabled } = props
-  const [rootChildren, setRootChildren] = useState<ListingEntry[] | null>(null)
-  const [loading, setLoading] = useState(true)
+  const { root, value, onChange, callerId, sessionId, disabled, t } = props
+  const [expanded, setExpanded] = useState<string[]>([])
+  const [favorites, setFavorites] = useState<ReadonlySet<string>>(() => new Set())
+  const [notice, setNotice] = useState<string | undefined>(undefined)
 
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    void listLevel('').then(rows => {
-      if (!cancelled) setRootChildren(rows)
-    }).catch(() => {
-      if (!cancelled) setRootChildren([])
-    }).finally(() => {
-      if (!cancelled) setLoading(false)
-    })
-    return () => { cancelled = true }
-  }, [])
+  const relativeOf = useCallback((absolute: string): string | undefined => {
+    const base = root.endsWith('/') ? root.slice(0, -1) : root
+    if (absolute === base) return ''
+    if (!absolute.startsWith(base + '/')) return undefined
+    return absolute.slice(base.length + 1)
+  }, [root])
+
+  const toggle = useCallback((absolute: string): void => {
+    setExpanded(current => current.includes(absolute)
+      ? current.filter(item => item !== absolute)
+      : [...current, absolute])
+    const relPath = relativeOf(absolute)
+    if (relPath !== undefined) { onChange(relPath); setNotice(undefined) }
+  }, [onChange, relativeOf])
 
   return (
-    <div className={styles.tree} role="tree" aria-label="选择文件夹">
-      <div className={styles.treeRow} data-selected={value === '' ? 'true' : 'false'}>
-        <button type="button" className={styles.treeName} disabled={disabled} onClick={() => { onChange('') }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
-          顶层
-        </button>
-      </div>
-      <ul className={styles.treeChildren}>
-        {(rootChildren ?? []).map(child => (
-          <FolderNode
-            key={child.relPath}
-            path={child.relPath}
-            name={child.name}
-            depth={0}
-            value={value}
-            onChange={onChange}
-            disabled={disabled}
-          />
-        ))}
-      </ul>
-      {loading && <p className={styles.treeMuted}>加载中…</p>}
+    <div className={styles.tree}>
+      <button
+        type="button"
+        className={styles.treeRootRow}
+        data-selected={value === '' ? 'true' : undefined}
+        disabled={disabled}
+        onClick={() => { onChange(''); setNotice(undefined) }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+        <span>{t('createAtRoot')}</span>
+      </button>
+      <KnowledgeFileTree
+        sessionId={sessionId ?? '@kb-explorer'}
+        root={root}
+        expanded={expanded}
+        revealed={[]}
+        onToggle={toggle}
+        onOpenFile={() => undefined}
+        onReferenceFile={() => undefined}
+        onUploadRequest={() => undefined}
+        busy={disabled === true}
+        refreshTick={0}
+        hideRoot
+        selectedPath={value}
+        callerId={callerId}
+        isFavorite={relPath => favorites.has(relPath)}
+        onToggleFavorite={(relPath, next) => {
+          setFavorites(current => {
+            const copy = new Set(current)
+            if (next) copy.add(relPath); else copy.delete(relPath)
+            return copy
+          })
+        }}
+        favoriteMarkLabel={t('actionFavorite')}
+        onExtractionQueued={(relPath) => { setNotice(t('menuExtractMarkdown') + ': ' + relPath) }}
+        onExtractionFailed={(_relPath, reason) => { setNotice(reason) }}
+      />
+      {notice !== undefined && <p className={styles.treeNotice} role="status">{notice}</p>}
     </div>
   )
 }
@@ -409,6 +445,12 @@ export interface KnowledgeCreateDialogProps {
   onClose: () => void
   /** The directory the dialog should start in, from {@link defaultDestination}. */
   defaultPath: string
+  /** Absolute mount root, for the upload tree (the same root the sidebar uses). */
+  root?: string
+  /** Caller identity, so personal extraction rows can be addressed authoritatively. */
+  callerId?: string
+  /** Real session key for the borrowed explorer; absent uses the KB placeholder. */
+  sessionId?: string
   /** Locale-bound copy resolver. */
   t: (key: string) => string
   /**
@@ -436,7 +478,7 @@ function formatBytes(bytes: number): string {
  * @returns The dialog, or null while closed.
  */
 export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
-  const { open, mode, onClose, defaultPath, t, onDone } = props
+  const { open, mode, onClose, defaultPath, root, callerId, sessionId, t, onDone } = props
 
   const [name, setName] = useState('')
   const [destination, setDestination] = useState(defaultPath)
@@ -648,13 +690,6 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
       )}
     >
       <div className={styles.dialog} onKeyDown={onKeyDown}>
-        {isUpload && (
-          <div className={styles.steps} aria-label="上传步骤">
-            <span className={styles.step} data-active={step === 1 ? 'true' : 'false'}>1 选择文件</span>
-            <span className={styles.stepLine} />
-            <span className={styles.step} data-active={step === 2 ? 'true' : 'false'}>2 选择位置</span>
-          </div>
-        )}
         {!isUpload && (
           <KnowledgeNameField
             value={name}
@@ -714,6 +749,7 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
                   <li key={item.relative} className={styles.uploadRow}>
                     <FileTypeIcon path={item.relative} size={18} />
                     <span className={styles.uploadName} title={item.relative}>{item.relative}</span>
+                    <span className={styles.fileTarget} title={joinRel(destination, item.relative)}>{joinRel(destination, item.relative)}</span>
                     <span className={styles.uploadSize}>{formatBytes(item.file.size)}</span>
                     <button
                       type="button"
@@ -734,7 +770,15 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
           <div className={styles.field}>
             {!isUpload && <span className={styles.fieldLabel}>{t('createDestinationPicker')}</span>}
             {isUpload
-              ? <FolderTree value={destination} onChange={setDestination} disabled={busy} />
+              ? <UploadDestinationTree
+                  root={root ?? '/workspace/kb'}
+                  value={destination}
+                  onChange={setDestination}
+                  callerId={callerId}
+                  sessionId={sessionId}
+                  disabled={busy}
+                  t={t}
+                />
               : (
                 <KnowledgeDestinationPicker
                   value={destination}
