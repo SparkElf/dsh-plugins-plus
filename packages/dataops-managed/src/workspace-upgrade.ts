@@ -267,20 +267,25 @@ const sleep = (ms: number) => new Promise<void>(resolve => { setTimeout(resolve,
  * @param upgrade - upgrade service.
  */
 export async function recoverWorkspaceUpgradeAfterBoot(upgrade: WorkspaceUpgrade): Promise<void> {
+  let lastState: Awaited<ReturnType<typeof readWorkspaceUpgradeState>> = null
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const state = await readWorkspaceUpgradeState(upgrade.statePath)
     if (state === null) return
+    lastState = state
     if (attempt > 0) await sleep(1500)
     try {
       const result = await upgrade.recover()
       // A session that failed to resume is still an attempted recovery; keeping the
       // file would only make the next boot send "继续" again without new information.
-      await upgrade.clearRecoveryState()
-      if (result.recovered + result.skipped > 0) return
+      // If every session was skipped, retry briefly in case session persistence was
+      // still loading; the final attempt clears the file so it cannot loop forever.
+      if (result.recovered > 0 || state.sessions.length === 0) {
+        await upgrade.clearRecoveryState()
+        return
+      }
     } catch (error) {
       console.warn('[dataops-managed] workspace upgrade recovery failed:', error)
     }
   }
-  // The file is intentionally left for the next boot when even the agents service was
-  // not ready; the next attempt is the one that can actually recover the sessions.
+  if (lastState !== null) await upgrade.clearRecoveryState()
 }
