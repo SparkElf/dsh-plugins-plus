@@ -20,6 +20,12 @@ const FONT_ROUTES = [
   { file: 'FangSongGB2312.ttf', path: '/office-viewer-fonts/FangSongGB2312.ttf' },
   { file: 'KaiTiGB2312.ttf', path: '/office-viewer-fonts/KaiTiGB2312.ttf' },
   { file: 'SimHei.ttf', path: '/office-viewer-fonts/SimHei.ttf' },
+  { file: 'Calibri.ttf', path: '/office-viewer-fonts/Calibri.ttf' },
+  { file: 'Calibri-Bold.ttf', path: '/office-viewer-fonts/Calibri-Bold.ttf' },
+  { file: 'Calibri-Italic.ttf', path: '/office-viewer-fonts/Calibri-Italic.ttf' },
+  { file: 'Calibri-BoldItalic.ttf', path: '/office-viewer-fonts/Calibri-BoldItalic.ttf' },
+  { file: 'Calibri-Light.ttf', path: '/office-viewer-fonts/Calibri-Light.ttf' },
+  { file: 'Calibri-LightItalic.ttf', path: '/office-viewer-fonts/Calibri-LightItalic.ttf' },
 ] as const
 
 /**

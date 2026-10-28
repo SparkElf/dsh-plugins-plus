@@ -1,4 +1,4 @@
-# Government document fonts
+# Government and Office fonts
 
 These font binaries are distributed by SparkElf under authorization for this package. They are not covered by the repository MIT license.
 
@@ -8,9 +8,19 @@ on the name itself: a Word report names `仿宋`, and a file whose family is onl
 is reported to the reader as an unavailable font even though its glyphs are the ones the document
 wants. The suffixed names are what the fonts originally carried.
 
+`Calibri*.ttf` are the Microsoft Office faces supplied from the licensed Windows host for
+workspace Office conversion. Their family names are already `Calibri` and `Calibri Light`; the
+converter therefore resolves them without a fontconfig alias.
+
 | File | Family name | Original family |
 |---|---|---|
 | `FZXiaoBiaoSong.ttf` | `方正小标宋简体` | `FZXiaoBiaoSong-B05S` |
 | `FangSongGB2312.ttf` | `仿宋` | `FangSong_GB2312` |
 | `KaiTiGB2312.ttf` | `楷体` | `KaiTi_GB2312` |
 | `SimHei.ttf` | `黑体` | `SimHei` |
+| `Calibri.ttf` | `Calibri` | `Calibri` |
+| `Calibri-Bold.ttf` | `Calibri` | `Calibri Bold` |
+| `Calibri-Italic.ttf` | `Calibri` | `Calibri Italic` |
+| `Calibri-BoldItalic.ttf` | `Calibri` | `Calibri Bold Italic` |
+| `Calibri-Light.ttf` | `Calibri Light` | `Calibri Light` |
+| `Calibri-LightItalic.ttf` | `Calibri Light` | `Calibri Light Italic` |

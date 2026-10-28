@@ -11,7 +11,7 @@ declare global {
   }
 }
 
-const FONT_ASSET_VERSION = '0.1.0'
+const FONT_ASSET_VERSION = '0.1.1'
 
 const FONT_FILES = [
   {
@@ -29,6 +29,30 @@ const FONT_FILES = [
   {
     file: 'SimHei.ttf',
     families: ['SimHei', '黑体'],
+  },
+  {
+    file: 'Calibri.ttf',
+    families: ['Calibri'],
+  },
+  {
+    file: 'Calibri-Bold.ttf',
+    families: ['Calibri'],
+  },
+  {
+    file: 'Calibri-Italic.ttf',
+    families: ['Calibri'],
+  },
+  {
+    file: 'Calibri-BoldItalic.ttf',
+    families: ['Calibri'],
+  },
+  {
+    file: 'Calibri-Light.ttf',
+    families: ['Calibri Light'],
+  },
+  {
+    file: 'Calibri-LightItalic.ttf',
+    families: ['Calibri Light'],
   },
 ] as const
 
