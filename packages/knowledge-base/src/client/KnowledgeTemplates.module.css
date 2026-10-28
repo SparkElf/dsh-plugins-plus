@@ -466,7 +466,7 @@
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
-  min-height: 218px;
+  min-height: 248px;
   padding: 10px;
   position: relative;
   overflow: hidden;
@@ -488,9 +488,9 @@
 
 .cover {
   position: relative;
+  flex: 1 1 auto;
   width: 100%;
-  aspect-ratio: 16 / 10;
-  flex: none;
+  min-height: 152px;
   overflow: hidden;
   border-radius: var(--dsw-radius-sm);
   border: 1px solid var(--dsw-alias-border-l1);
@@ -507,7 +507,7 @@
 
 .coverPage {
   position: absolute;
-  inset: 13% 16% -12% 16%;
+  inset: 12% 12% 0 12%;
   padding: 10px;
   border-radius: 3px 3px 0 0;
   background: rgba(255, 255, 255, .96);
@@ -590,12 +590,18 @@
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxxs-11);
   font-variant-numeric: tabular-nums;
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 38px;
+  z-index: 1;
 }
 
 .cardActions {
   left: 10px;
   right: 10px;
-  bottom: 38px;
+  bottom: 10px;
+  z-index: 2;
   justify-content: flex-end;
   background: linear-gradient(180deg, transparent, rgba(0, 0, 0, .12));
 }

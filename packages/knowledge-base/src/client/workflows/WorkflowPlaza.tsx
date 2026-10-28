@@ -453,6 +453,15 @@ function WorkflowDetailDialog({ item, copy, onClose }: {
   )
 }
 
+/** Format an API timestamp for a card footer; avoids showing raw ISO text. */
+function formatMineTime(value: string | undefined): string {
+  if (value === undefined || value === '') return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const pad = (part: number): string => String(part).padStart(2, '0')
+  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 /** The caller's own shared workflows, newest update first. */
 function MinePanel({ copy, items, error, busyId, onResubmit, onUnpublish }: {
   copy: WorkflowPlazaCopy
@@ -479,9 +488,10 @@ function MinePanel({ copy, items, error, busyId, onResubmit, onUnpublish }: {
           {items.map(item => {
             const status = mineStatus(item)
             return (
-              <li key={item.id} className={styles.reviewCard} data-kb-plaza-mine-card={item.id}>
-                <div className={styles.reviewHead}>
-                  <strong className={styles.reviewTitle}>{item.title}</strong>
+              <li key={item.id} className={styles.card} data-kb-plaza-mine-card={item.id}>
+                <div className={styles.cardTop}>
+                  <span className={styles.cardIcon} aria-hidden="true">{ICON_GLYPH.organize}</span>
+                  <span className={styles.cardTitle}>{item.title}</span>
                   <div className={styles.mineTags}>
                     <span className={styles.mineStatus} data-kb-plaza-mine-status={status}>
                       {statusLabel(status)}
@@ -491,44 +501,31 @@ function MinePanel({ copy, items, error, busyId, onResubmit, onUnpublish }: {
                     </span>
                   </div>
                 </div>
-                <div className={styles.reviewMeta}>
-                  {copy.mineUpdated}：{item.updatedAt ?? item.reviewedAt ?? item.createdAt ?? '—'}
-                </div>
-                <p className={styles.reviewDescription}>{item.description}</p>
+                <div className={styles.cardDesc}>{item.description}</div>
                 {status === 'rejected' && item.reviewNote !== undefined && item.reviewNote !== '' ? (
                   <p className={styles.failure} data-kb-plaza-mine-reason="">{copy.mineReviewNote}：{item.reviewNote}</p>
                 ) : null}
-                <div className={styles.mineFooter} data-kb-plaza-mine-footer="">
-                  {status === 'rejected' || status === 'unpublished' ? (
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      disabled={busyId === item.id}
-                      data-kb-plaza-mine-resubmit={item.id}
-                      onClick={() => { void onResubmit(item.id) }}
-                    >
-                      {copy.mineResubmit}
+                <div className={styles.cardFoot} data-kb-plaza-mine-footer="">
+                  <span className={styles.cardCron} title={item.cronHint ?? ''}>{item.cronHint ?? '—'}</span>
+                  <span className={styles.mineTime}>{copy.mineUpdated}：{formatMineTime(item.updatedAt ?? item.reviewedAt ?? item.createdAt)}</span>
+                  <div className={styles.actions}>
+                    {status === 'rejected' || status === 'unpublished' ? (
+                      <Button variant="primary" size="sm" disabled={busyId === item.id}
+                        data-kb-plaza-mine-resubmit={item.id} onClick={() => { void onResubmit(item.id) }}>
+                        {copy.mineResubmit}
+                      </Button>
+                    ) : null}
+                    {status === 'approved' ? (
+                      <Button variant="outline" size="sm" disabled={busyId === item.id}
+                        data-kb-plaza-mine-unpublish={item.id} onClick={() => { void onUnpublish(item.id) }}>
+                        {copy.mineUnpublish}
+                      </Button>
+                    ) : null}
+                    <Button variant="outline" size="sm" data-kb-plaza-mine-detail={item.id}
+                      onClick={() => { setDetailFor(item) }}>
+                      {copy.mineDetails}
                     </Button>
-                  ) : null}
-                  {status === 'approved' ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busyId === item.id}
-                      data-kb-plaza-mine-unpublish={item.id}
-                      onClick={() => { void onUnpublish(item.id) }}
-                    >
-                      {copy.mineUnpublish}
-                    </Button>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    data-kb-plaza-mine-detail={item.id}
-                    onClick={() => { setDetailFor(item) }}
-                  >
-                    {copy.mineDetails}
-                  </Button>
+                  </div>
                 </div>
               </li>
             )

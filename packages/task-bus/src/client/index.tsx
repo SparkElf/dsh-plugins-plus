@@ -21,7 +21,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
-export const inject = ['slots', 'uiWorkspace', 'sessions', 'sidebarRight']
+export const inject = ['slots', 'locale', 'uiWorkspace', 'sessions', 'sidebarRight']
 
 interface TaskItem {
   id: string
@@ -63,6 +63,7 @@ const colors = {
 }
 
 const TASK_BUS_MODAL_CLASS = 'task-bus-center-modal'
+const TASK_BUS_HISTORY_CLASS = 'task-bus-history-modal'
 const TASK_BUS_STYLE_ID = 'task-bus-center-modal-style'
 const TASK_BUS_MODAL_CSS = `
 .${TASK_BUS_MODAL_CLASS} {
@@ -77,7 +78,63 @@ const TASK_BUS_MODAL_CSS = `
     height: calc(100vh - 24px) !important;
   }
 }
+.${TASK_BUS_HISTORY_CLASS} {
+  width: min(960px, 92vw) !important;
+  max-width: calc(100vw - 32px) !important;
+  height: auto !important;
+  max-height: min(780px, calc(100vh - 48px)) !important;
+}
+@media (max-width: 700px) {
+  .${TASK_BUS_HISTORY_CLASS} {
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(100vh - 24px) !important;
+  }
+}
 `
+
+const HISTORY_NS = 'task-bus.history'
+const HISTORY_COPY = {
+  zh: {
+    title: '消息记录',
+    open: '消息记录',
+    close: '关闭',
+    searchPlaceholder: '搜索消息或发送人…',
+    searchLabel: '搜索消息记录',
+    clear: '清空搜索',
+    initial: '输入关键词搜索消息或发送人',
+    initialHint: '可按消息正文或发送人筛选，点结果跳到原消息。',
+    loading: '正在加载消息记录…',
+    error: '消息记录加载失败',
+    empty: '暂无消息记录',
+    noResults: '没有匹配的消息',
+    jump: '跳到该消息',
+    me: '我',
+    assistant: '助手',
+    dateLocale: 'zh-CN',
+  },
+  en: {
+    title: 'Message history',
+    open: 'Message history',
+    close: 'Close',
+    searchPlaceholder: 'Search messages or senders…',
+    searchLabel: 'Search message history',
+    clear: 'Clear search',
+    initial: 'Search messages or senders to begin',
+    initialHint: 'Filter by message text or sender, then click a result to jump to it.',
+    loading: 'Loading message history…',
+    error: 'Could not load message history',
+    empty: 'No message history',
+    noResults: 'No matching messages',
+    jump: 'Jump to message',
+    me: 'Me',
+    assistant: 'Assistant',
+    dateLocale: 'en-US',
+  },
+} as const
+
+type HistoryCopyKey = keyof typeof HISTORY_COPY.zh
+type HistoryTranslate = (key: HistoryCopyKey) => string
 
 const buttonStyle: CSSProperties = {
   border: '1px solid ' + colors.line,
@@ -881,21 +938,21 @@ const historyRole = (event: Record<string, unknown>): 'user' | 'assistant' => {
   return data?.role === 'user' || event.type === 'user/message' ? 'user' : 'assistant'
 }
 
-const historyAuthor = (event: Record<string, unknown>, role: 'user' | 'assistant'): string => {
+const historyAuthor = (event: Record<string, unknown>, role: 'user' | 'assistant', t: HistoryTranslate): string => {
   const data = event.data as Record<string, unknown> | undefined
   const source = data?.source as Record<string, unknown> | undefined
   const memberName = typeof source?.memberName === 'string' ? source.memberName.trim() : ''
   if (memberName !== '') return memberName
-  return role === 'user' ? '我' : '助手'
+  return role === 'user' ? t('me') : t('assistant')
 }
 
-const groupHistory = async (roomId: string): Promise<HistoryEntry[]> => {
+const groupHistory = async (roomId: string, t: HistoryTranslate): Promise<HistoryEntry[]> => {
   const entries: HistoryEntry[] = []
   let cursor: string | null = null
   for (let page = 0; page < 20; page += 1) {
     const suffix = cursor === null ? '' : '?cursor=' + encodeURIComponent(cursor)
     const response = await fetch('/dsh-group-chat/api/rooms/' + encodeURIComponent(roomId) + '/events' + suffix)
-    if (!response.ok) throw new Error('消息记录加载失败')
+    if (!response.ok) throw new Error(t('error'))
     const payload = await response.json() as { events?: Array<{ id?: string; event?: Record<string, unknown>; createdAt?: string }>; nextCursor?: string | null; hasMore?: boolean }
     for (const record of payload.events ?? []) {
       const event = record.event
@@ -904,7 +961,7 @@ const groupHistory = async (roomId: string): Promise<HistoryEntry[]> => {
       const role = historyRole(event)
       const text = historyText(data?.content)
       if (text === '') continue
-      entries.push({ key: record.id ?? String(event.seq ?? entries.length), role, author: historyAuthor(event, role), time: typeof event.time === 'number' ? event.time : undefined, text, jumpId: record.id })
+      entries.push({ key: record.id ?? String(event.seq ?? entries.length), role, author: historyAuthor(event, role, t), time: typeof event.time === 'number' ? event.time : undefined, text, jumpId: record.id })
     }
     if (payload.hasMore !== true || payload.nextCursor === null || payload.nextCursor === undefined) break
     cursor = payload.nextCursor
@@ -912,7 +969,7 @@ const groupHistory = async (roomId: string): Promise<HistoryEntry[]> => {
   return entries.sort((left, right) => (right.time ?? 0) - (left.time ?? 0))
 }
 
-const sessionHistory = async (sessionId: string, sessions: unknown): Promise<HistoryEntry[]> => {
+const sessionHistory = async (sessionId: string, sessions: unknown, t: HistoryTranslate): Promise<HistoryEntry[]> => {
   const service = sessions as {
     retain?: (id: string, options: { source: string }) => {
       ready?: Promise<unknown>
@@ -941,7 +998,7 @@ const sessionHistory = async (sessionId: string, sessions: unknown): Promise<His
         return {
           key: String(event.seq ?? entries.indexOf(entry)),
           role,
-          author: historyAuthor(event, role),
+          author: historyAuthor(event, role, t),
           time: typeof event.time === 'number' ? event.time : undefined,
           text: historyText(data?.content),
         }
@@ -1021,11 +1078,12 @@ const sessionFileAttachment = async (sessionId: string, sessions: unknown, name:
   }
 }
 
-const HistoryButton = ({ sessionId, sessions }: { sessionId: string; sessions: unknown }) => {
+const HistoryButton = ({ sessionId, sessions, t }: { sessionId: string; sessions: unknown; t: HistoryTranslate }) => {
   const [open, setOpen] = useState(false)
   const [entries, setEntries] = useState<HistoryEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [query, setQuery] = useState('')
   const isGroup = sessionId.startsWith('group-room-')
 
   useEffect(() => {
@@ -1033,13 +1091,21 @@ const HistoryButton = ({ sessionId, sessions }: { sessionId: string; sessions: u
     let alive = true
     setLoading(true)
     setError('')
-    const load = isGroup ? groupHistory(sessionId.slice('group-room-'.length)) : sessionHistory(sessionId, sessions)
+    setQuery('')
+    setEntries([])
+    const load = isGroup ? groupHistory(sessionId.slice('group-room-'.length), t) : sessionHistory(sessionId, sessions, t)
     void load.then((items) => { if (alive) setEntries(items) })
       .catch((cause) => { if (alive) setError(cause instanceof Error ? cause.message : String(cause)) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [open, isGroup, sessionId, sessions])
+  }, [open, isGroup, sessionId, sessions, t])
 
+  const needle = query.trim().toLocaleLowerCase()
+  const results = useMemo(() => {
+    if (needle === '') return []
+    return entries.filter((entry) =>
+      entry.text.toLocaleLowerCase().includes(needle) || entry.author.toLocaleLowerCase().includes(needle))
+  }, [entries, needle])
 
   const jump = (entry: HistoryEntry) => {
     setOpen(false)
@@ -1048,9 +1114,9 @@ const HistoryButton = ({ sessionId, sessions }: { sessionId: string; sessions: u
         ? null
         : document.querySelector<HTMLElement>('[data-group-chat-message="' + CSS.escape(entry.jumpId) + '"]')
       if (target === null) {
-        const needle = entry.text.slice(0, 80)
+        const text = entry.text.slice(0, 80)
         target = [...document.querySelectorAll<HTMLElement>('[data-group-chat-message], [data-slot="conversation.user.text.node"]')]
-          .find((element) => (element.innerText ?? '').includes(needle)) ?? null
+          .find((element) => (element.innerText ?? '').includes(text)) ?? null
       }
       if (target === null && (window as unknown as { find: (...args: unknown[]) => boolean }).find(entry.text.slice(0, 80), false, false, true, false, false, false)) {
         const selection = window.getSelection()
@@ -1066,36 +1132,86 @@ const HistoryButton = ({ sessionId, sessions }: { sessionId: string; sessions: u
     }, 80)
   }
 
+  const searchInputStyle: CSSProperties = {
+    width: '100%',
+    boxSizing: 'border-box',
+    height: 36,
+    padding: '0 34px 0 12px',
+    borderRadius: 8,
+    border: '1px solid ' + colors.line,
+    background: colors.panel,
+    color: colors.text,
+    fontSize: 13,
+    outline: 'none',
+  }
+
   return (
     <>
       <button
         type="button"
-        aria-label="消息记录"
-        title="消息记录"
+        aria-label={t('open')}
+        title={t('open')}
         data-session-id={sessionId}
         onClick={() => setOpen(true)}
         style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, border: 'none', borderRadius: 6, background: 'transparent', color: 'inherit', cursor: 'pointer' }}
       >
         <HistoryGlyph />
       </button>
-      <Modal open={open} onClose={() => setOpen(false)} title="消息记录" closeLabel="关闭">
-        <div style={{ width: 'min(760px, 82vw)', maxHeight: '62vh', overflowY: 'auto', display: 'grid', gap: 8, padding: '4px 0 8px' }}>
-          {loading ? <div style={{ padding: 24, textAlign: 'center', color: colors.muted, fontSize: 12 }}>正在加载消息记录…</div> : null}
-          {error !== '' ? <div style={{ padding: 12, color: colors.danger, fontSize: 12 }}>{error}</div> : null}
-          {!loading && error === '' && entries.length === 0 ? <div style={{ padding: 24, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无消息记录</div> : null}
-          {!loading && error === '' && entries.map((entry) => (
+      <Modal open={open} onClose={() => setOpen(false)} title={t('title')} closeLabel={t('close')} className={TASK_BUS_HISTORY_CLASS}>
+        <div style={{ width: '100%', maxHeight: 'min(68vh, 620px)', overflowY: 'auto', display: 'grid', gap: 10, padding: '4px 0 8px' }}>
+          <div style={{ position: 'relative', width: '100%' }}>
+            <input
+              type="text"
+              value={query}
+              autoFocus
+              spellCheck={false}
+              placeholder={t('searchPlaceholder')}
+              aria-label={t('searchLabel')}
+              onChange={(event) => { setQuery(event.target.value) }}
+              style={searchInputStyle}
+            />
+            {query !== '' ? (
+              <button
+                type="button"
+                aria-label={t('clear')}
+                title={t('clear')}
+                onClick={() => { setQuery('') }}
+                style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, border: 'none', borderRadius: 5, background: 'transparent', color: colors.muted, cursor: 'pointer' }}
+              >
+                <IconCloseOutlineRegular size={14} />
+              </button>
+            ) : null}
+          </div>
+
+          {loading ? <div style={{ padding: 28, textAlign: 'center', color: colors.muted, fontSize: 12 }}>{t('loading')}</div> : null}
+          {!loading && error !== '' ? <div role="alert" style={{ padding: 12, color: colors.danger, fontSize: 12 }}>{error}</div> : null}
+          {!loading && error === '' && needle === '' ? (
+            <div style={{ display: 'grid', justifyItems: 'center', gap: 8, padding: '36px 20px 40px', color: colors.muted, textAlign: 'center' }}>
+              <span style={{ display: 'inline-flex', width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18, background: colors.panelAlt, color: colors.muted }}>
+                <HistoryGlyph />
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>{t('initial')}</span>
+              <span style={{ fontSize: 12, lineHeight: 1.6 }}>{t('initialHint')}</span>
+            </div>
+          ) : null}
+          {!loading && error === '' && needle !== '' && results.length === 0 ? (
+            <div style={{ padding: 28, textAlign: 'center', color: colors.muted, fontSize: 12 }}>
+              {entries.length === 0 ? t('empty') : t('noResults')}
+            </div>
+          ) : null}
+          {!loading && error === '' && needle !== '' && results.map((entry) => (
             <button
               key={entry.key}
               type="button"
               onClick={() => jump(entry)}
-              style={{ display: 'grid', gap: 5, width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: '1px solid ' + colors.line, background: colors.panelAlt, color: colors.text, cursor: 'pointer' }}
+              style={{ display: 'grid', gap: 6, width: '100%', minWidth: 0, textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: '1px solid ' + colors.line, background: colors.panelAlt, color: colors.text, cursor: 'pointer' }}
             >
-              <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: colors.muted }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap', fontSize: 10, color: colors.muted }}>
                 <span style={{ fontWeight: 650, color: entry.role === 'user' ? '#2563eb' : colors.text }}>{entry.author}</span>
-                {entry.time === undefined ? null : <span>{new Date(entry.time).toLocaleString()}</span>}
-                <span style={{ marginLeft: 'auto' }}>跳到该消息</span>
+                {entry.time === undefined ? null : <span>{new Date(entry.time).toLocaleString(t('dateLocale'))}</span>}
+                <span style={{ marginLeft: 'auto' }}>{t('jump')}</span>
               </span>
-              <span style={{ fontSize: 12, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>{entry.text}</span>
+              <span style={{ display: 'block', minWidth: 0, fontSize: 13, lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{entry.text}</span>
             </button>
           ))}
         </div>
@@ -1105,6 +1221,14 @@ const HistoryButton = ({ sessionId, sessions }: { sessionId: string; sessions: u
 }
 
 export const apply = (ctx: Context) => {
+  const locale = (ctx as unknown as {
+    locale: {
+      register(namespace: string, dictionaries: { zh: typeof HISTORY_COPY.zh; en: typeof HISTORY_COPY.en }): () => void
+      bind(namespace: string): (key: HistoryCopyKey) => string
+    }
+  }).locale
+  ctx.effect(() => locale.register(HISTORY_NS, { zh: HISTORY_COPY.zh, en: HISTORY_COPY.en }), 'task-bus: history copy')
+  const t = locale.bind(HISTORY_NS)
   const surface = ctx as unknown as {
     slots: {
       inject(name: string, factory: () => () => void): () => void
@@ -1177,6 +1301,6 @@ export const apply = (ctx: Context) => {
     name: 'conversation.session.header.utilities',
     id: 'task-bus.history',
     order: -4,
-    inject: ((sessionId: string) => ({ sessionId, sessions: (ctx as unknown as { sessions: unknown }).sessions })) as never,
+    inject: ((sessionId: string) => ({ sessionId, sessions: (ctx as unknown as { sessions: unknown }).sessions, t })) as never,
   } as never, HistoryButton as never)), 'task-bus: message history')
 }

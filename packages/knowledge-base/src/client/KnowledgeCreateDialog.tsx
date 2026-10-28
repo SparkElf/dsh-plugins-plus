@@ -28,6 +28,8 @@ import { Button, FileTypeIcon, Input, Modal } from '@deepseek-ai/dsh-client-ui-p
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgeCreateDialog.module.css'
 import { KnowledgeFileTree } from './KnowledgeFileTree.tsx'
+import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
+import type { FileTreeSort } from 'dsh-better-sidebar/src/client/file-tree-sort.ts'
 
 /** One directory level as the Host's listing route reports it. */
 interface ListingEntry {
@@ -347,12 +349,27 @@ function UploadDestinationTree(props: {
   onChange: (path: string) => void
   callerId?: string
   sessionId?: string
+  locale?: string
+  bucketLabels?: Readonly<Record<string, string>>
+  departmentPath?: { codes: readonly string[]; names: readonly string[] }
+  sort?: FileTreeSort
+  isFavorite?: (relPath: string) => boolean
+  onToggleFavorite?: (relPath: string, next: boolean) => void
+  onShare?: (relPath: string, isDir: boolean) => void
+  onClipboard?: (entry: TreeClipboard) => void
+  hasClipboard?: boolean
+  onPasteInto?: (directory: string) => void
   disabled?: boolean
   t: (key: string) => string
 }): ReactNode {
-  const { root, value, onChange, callerId, sessionId, disabled, t } = props
+  const {
+    root, value, onChange, callerId, sessionId, locale, bucketLabels, departmentPath, sort,
+    isFavorite, onToggleFavorite, onShare, onClipboard, hasClipboard, onPasteInto, disabled, t,
+  } = props
   const [expanded, setExpanded] = useState<string[]>([])
   const [favorites, setFavorites] = useState<ReadonlySet<string>>(() => new Set())
+  const [localClipboard, setLocalClipboard] = useState<TreeClipboard | null>(null)
+  const [treeRefresh, setTreeRefresh] = useState(0)
   const [notice, setNotice] = useState<string | undefined>(undefined)
 
   const relativeOf = useCallback((absolute: string): string | undefined => {
@@ -370,23 +387,33 @@ function UploadDestinationTree(props: {
     if (relPath !== undefined) { onChange(relPath); setNotice(undefined) }
   }, [onChange, relativeOf])
 
+  const pasteLocal = useCallback(async (directory: string): Promise<void> => {
+    const clip = localClipboard
+    if (clip === null || clip.entries.length === 0) return
+    for (const entry of clip.entries) {
+      const response = await fetch(kbApiPath(clip.cut ? KB_API.move : KB_API.copy), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ from: entry.relPath, to: directory }),
+        cache: 'no-store',
+      })
+      if (!response.ok) { setNotice((await response.json().catch(() => ({})) as { error?: string }).error ?? 'HTTP ' + String(response.status)); return }
+    }
+    if (clip.cut) setLocalClipboard(null)
+    setTreeRefresh(t => t + 1)
+    setNotice(t('settingsSaved'))
+    onPasteInto?.(directory)
+  }, [localClipboard, onPasteInto, t])
+
   return (
     <div className={styles.tree}>
-      <button
-        type="button"
-        className={styles.treeRootRow}
-        data-selected={value === '' ? 'true' : undefined}
-        disabled={disabled}
-        onClick={() => { onChange(''); setNotice(undefined) }}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-        </svg>
-        <span>{t('createAtRoot')}</span>
-      </button>
       <KnowledgeFileTree
         sessionId={sessionId ?? '@kb-explorer'}
         root={root}
+        locale={locale}
+        bucketLabels={bucketLabels}
+        departmentPath={departmentPath}
+        sort={sort}
         expanded={expanded}
         revealed={[]}
         onToggle={toggle}
@@ -394,12 +421,13 @@ function UploadDestinationTree(props: {
         onReferenceFile={() => undefined}
         onUploadRequest={() => undefined}
         busy={disabled === true}
-        refreshTick={0}
+        refreshTick={treeRefresh}
         hideRoot
         selectedPath={value}
         callerId={callerId}
-        isFavorite={relPath => favorites.has(relPath)}
+        isFavorite={relPath => (isFavorite ?? (path => favorites.has(path)))(relPath)}
         onToggleFavorite={(relPath, next) => {
+          if (onToggleFavorite !== undefined) { onToggleFavorite(relPath, next); return }
           setFavorites(current => {
             const copy = new Set(current)
             if (next) copy.add(relPath); else copy.delete(relPath)
@@ -407,6 +435,10 @@ function UploadDestinationTree(props: {
           })
         }}
         favoriteMarkLabel={t('actionFavorite')}
+        onShare={onShare}
+        onClipboard={(entry) => { setLocalClipboard(entry); onClipboard?.(entry) }}
+        hasClipboard={localClipboard !== null || hasClipboard === true}
+        onPasteInto={(directory) => { if (localClipboard !== null) { void pasteLocal(directory) } else { onPasteInto?.(directory) } }}
         onExtractionQueued={(relPath) => { setNotice(t('menuExtractMarkdown') + ': ' + relPath) }}
         onExtractionFailed={(_relPath, reason) => { setNotice(reason) }}
       />
@@ -451,6 +483,20 @@ export interface KnowledgeCreateDialogProps {
   callerId?: string
   /** Real session key for the borrowed explorer; absent uses the KB placeholder. */
   sessionId?: string
+  /** Locale tag for tree dates and labels. */
+  locale?: string
+  /** The same bucket labels the sidebar tree takes. */
+  bucketLabels?: Readonly<Record<string, string>>
+  /** The same department code/name chain the sidebar tree takes. */
+  departmentPath?: { codes: readonly string[]; names: readonly string[] }
+  /** The same explorer ordering the sidebar tree takes. */
+  sort?: FileTreeSort
+  isFavorite?: (relPath: string) => boolean
+  onToggleFavorite?: (relPath: string, next: boolean) => void
+  onShare?: (relPath: string, isDir: boolean) => void
+  onClipboard?: (entry: TreeClipboard) => void
+  hasClipboard?: boolean
+  onPasteInto?: (directory: string) => void
   /** Locale-bound copy resolver. */
   t: (key: string) => string
   /**
@@ -478,7 +524,11 @@ function formatBytes(bytes: number): string {
  * @returns The dialog, or null while closed.
  */
 export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
-  const { open, mode, onClose, defaultPath, root, callerId, sessionId, t, onDone } = props
+  const {
+    open, mode, onClose, defaultPath, root, callerId, sessionId, locale, bucketLabels,
+    departmentPath, sort, isFavorite, onToggleFavorite, onShare, onClipboard, hasClipboard,
+    onPasteInto, t, onDone,
+  } = props
 
   const [name, setName] = useState('')
   const [destination, setDestination] = useState(defaultPath)
@@ -670,7 +720,7 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
         <div className={styles.footer}>
           <Button variant="ghost" disabled={busy} onClick={onClose}>{t('cancel')}</Button>
           {isUpload && step === 2 && (
-            <Button variant="ghost" disabled={busy} onClick={() => { setStep(1) }}>上一步</Button>
+            <Button variant="ghost" disabled={busy} onClick={() => { setStep(1) }}>{t('createStepBack')}</Button>
           )}
           <Button
             variant="primary"
@@ -734,12 +784,12 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
                 <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
                 <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
               </svg>
-              <span className={styles.dropzoneTitle}>拖拽文件到这里，或点击选择</span>
+              <span className={styles.dropzoneTitle}>{t('createDropTitle')}</span>
             </div>
             <div className={styles.uploadQueue}>
             {pending.length === 0 ? null : (
               <div className={styles.uploadSummary}>
-                <span>{`已选择 ${pending.length} 个文件`}</span>
+                <span>{t('createSelectedCount').replace('{n}', String(pending.length))}</span>
                 {progress === undefined ? null : <span>{`${progress.done}/${progress.total}`}</span>}
               </div>
             )}
@@ -754,7 +804,7 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
                     <button
                       type="button"
                       className={styles.removeFile}
-                      aria-label={`移除 ${item.relative}`}
+                      aria-label={t('createRemoveFile').replace('{name}', item.relative)}
                       disabled={busy}
                       onClick={() => { removePending(item.relative) }}
                     >×</button>
@@ -776,6 +826,16 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
                   onChange={setDestination}
                   callerId={callerId}
                   sessionId={sessionId}
+                  locale={locale}
+                  bucketLabels={bucketLabels}
+                  departmentPath={departmentPath}
+                  sort={sort}
+                  isFavorite={isFavorite}
+                  onToggleFavorite={onToggleFavorite}
+                  onShare={onShare}
+                  onClipboard={onClipboard}
+                  hasClipboard={hasClipboard}
+                  onPasteInto={onPasteInto}
                   disabled={busy}
                   t={t}
                 />

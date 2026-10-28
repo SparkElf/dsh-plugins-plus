@@ -489,15 +489,15 @@
    wraps the title, and a fixed-height footer even when the status offers no action. */
 [data-kb-plaza-mine] .reviewList {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
   grid-auto-rows: max-content;
   align-content: start;
   align-items: stretch;
+  gap: 12px;
 }
 
 [data-kb-plaza-mine] .reviewCard {
-  height: auto;
-  min-height: 180px;
+  min-height: 0;
 }
 
 .mineTags {
@@ -520,4 +520,23 @@
 
 .mineFooter button {
   min-width: 84px;
+}
+
+/* Mine cards use the plaza's own card geometry; only the footer meta is new. */
+.mineTime {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-kb-plaza-mine] .cardFoot {
+  flex-wrap: wrap;
+}
+
+[data-kb-plaza-mine] .cardCron {
+  flex: 1 1 100%;
 }

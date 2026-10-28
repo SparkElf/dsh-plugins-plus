@@ -100,6 +100,8 @@ export interface KnowledgeHomeProps {
   t: (key: string) => string
   /** Real session key for the borrowed file explorer; absent uses its placeholder. */
   sessionId?: string
+  /** The same explorer ordering the sidebar tree takes. */
+  sort?: import('dsh-better-sidebar/src/client/file-tree-sort.ts').FileTreeSort
   /** Locale tag, so dates match the reader's language. */
   locale?: string
   /** Disabled when the tree is not mounted, so the cards cannot promise a tree. */
@@ -620,6 +622,28 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
     }, [props.mountPoint, props.refreshTick])
 
   useEffect(() => { void read() }, [read])
+  /**
+   * Paste the Home table's clipboard into one directory.
+   *
+   * The upload dialog shares this clipboard with the table; a cut consumes it after a
+   * successful move, while a copy stays available for a second destination.
+   */
+  const pasteClipboard = useCallback(async (directory: string): Promise<void> => {
+    const clip = clipboard
+    if (clip === null || clip.entries.length === 0) return
+    for (const entry of clip.entries) {
+      const response = await fetch(kbApiPath(clip.cut ? KB_API.move : KB_API.copy), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ from: entry.relPath, to: directory }),
+        cache: 'no-store',
+      })
+      if (!response.ok) break
+    }
+    if (clip.cut) setClipboard(null)
+    props.onTreeChanged?.()
+    await read()
+  }, [clipboard, props, read])
 
   /**
    * Delete one row to the trash, then re-read the table.
@@ -904,6 +928,16 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         root={props.mountPoint}
         callerId={props.callerId}
         sessionId={props.sessionId}
+        locale={props.locale}
+        bucketLabels={props.bucketLabels}
+        departmentPath={props.departmentPath}
+        sort={props.sort}
+        isFavorite={props.isFavorite}
+        onToggleFavorite={props.onFavorite}
+        onShare={(relPath) => { setShareTarget({ relPath, name: relPath.slice(relPath.lastIndexOf('/') + 1), isDir: false }) }}
+        onClipboard={setClipboard}
+        hasClipboard={clipboard !== null}
+        onPasteInto={(directory) => { void pasteClipboard(directory) }}
         t={c}
         onDone={(message) => {
           setNotice(message)

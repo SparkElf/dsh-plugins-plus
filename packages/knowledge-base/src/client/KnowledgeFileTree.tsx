@@ -142,6 +142,8 @@ export interface KnowledgeFileTreeProps {
    * `''` is the mount root (the picker draws that row itself).
    */
   selectedPath?: string
+  /** Locale tag for row dates; absent uses the document language. */
+  locale?: string
   /**
    * Say the three buckets in the reader's language.
    *
@@ -308,8 +310,9 @@ function useRowDecoration(options: {
   label: string | undefined
   selectedPath: string | undefined
   mtimes: ReadonlyMap<string, number>
+  locale: string | undefined
 }): void {
-  const { container, root, isFavorite, label, selectedPath, mtimes } = options
+  const { container, root, isFavorite, label, selectedPath, mtimes, locale } = options
 
   /**
    * Turn an absolute row path into the key favourites are stored under.
@@ -345,7 +348,7 @@ function useRowDecoration(options: {
       if (mtime === undefined) existingTime?.remove()
       else if (row.querySelector('[class*="explorer"][class*="Time"]') === null) {
         const text = new Date(mtime).toLocaleDateString(
-          typeof document === 'undefined' ? 'zh-CN' : document.documentElement.lang,
+          locale ?? (typeof document === 'undefined' ? 'zh-CN' : document.documentElement.lang),
           { month: '2-digit', day: '2-digit' },
         )
         if (existingTime === null) {
@@ -403,7 +406,7 @@ function useRowDecoration(options: {
     observer.observe(host, { childList: true, subtree: true })
 
     return () => { observer.disconnect() }
-  }, [container, isFavorite, label, relPathOf, selectedPath, mtimes])
+  }, [container, isFavorite, label, locale, relPathOf, selectedPath, mtimes])
 
 }
 
@@ -470,12 +473,18 @@ function useRowTimes(options: {
  * The contextmenu listener is a normal bubble-phase React handler that only records
  * the row; it never prevents the explorer's own menu from opening.
  */
+export interface KnowledgeTreeMenuAction {
+  id: string
+  label: string
+  when: (target: { relPath: string; isDir: boolean }) => boolean
+  run: (target: { relPath: string; isDir: boolean }) => void
+}
+
 function useContextMenuExtras(options: {
   root: string
-  label: string
-  onExtract: (relPath: string) => void
+  actions: readonly KnowledgeTreeMenuAction[]
 }): (event: React.MouseEvent<HTMLDivElement>) => void {
-  const { root, label, onExtract } = options
+  const { root, actions } = options
   const target = useRef<{ relPath: string; isDir: boolean } | null>(null)
 
   const onContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>): void => {
@@ -493,40 +502,46 @@ function useContextMenuExtras(options: {
   useEffect(() => {
     const observer = new MutationObserver(() => {
       const current = target.current
-      if (current === null || current.isDir) return
+      if (current === null) return
       const menu = document.querySelector('[role="menu"]')
       if (menu === null) return
-      if (menu.querySelector('[data-kb-menu-extract]') !== null) return
-      const items = [...menu.querySelectorAll('[role="menuitem"]')]
-      if (items.some(item => item.textContent?.trim() === label)) return
-      const viewport = menu.querySelector('[role="presentation"]') ?? menu
-      const sample = viewport.querySelector('[class*="itemWrap"]') as HTMLElement | null
-      if (sample === null) return
-      const wrapper = sample.cloneNode(true) as HTMLElement
-      wrapper.setAttribute('data-kb-menu-extract', '')
-      const button = wrapper.querySelector('button')
-      if (button === null) return
-      button.disabled = false
-      button.removeAttribute('disabled')
-      button.removeAttribute('aria-disabled')
-      const text = button.querySelector('[class*="itemLabel"]') ?? button.querySelector('span:last-child')
-      if (text !== null) text.textContent = label
-      else button.textContent = label
-      button.setAttribute('aria-label', label)
-      button.addEventListener('click', (event) => {
-        event.preventDefault(); event.stopPropagation()
-        const selected = target.current
-        target.current = null
-        if (selected !== null) onExtract(selected.relPath)
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-      })
-      const danger = viewport.querySelector('[class*="danger"]')?.closest('[class*="itemWrap"]')
-      if (danger !== null && danger !== undefined) danger.before(wrapper)
-      else viewport.appendChild(wrapper)
+      const present = [...menu.querySelectorAll('[role="menuitem"]')]
+        .map(item => item.textContent?.trim())
+      for (const action of actions) {
+        if (!action.when(current)) continue
+        if (present.includes(action.label)) continue
+        if (menu.querySelector(`[data-kb-menu-action="${action.id}"]`) !== null) continue
+        const viewport = menu.querySelector('[role="presentation"]') ?? menu
+        const sample = viewport.querySelector('[class*="itemWrap"]') as HTMLElement | null
+        if (sample === null) continue
+        const wrapper = sample.cloneNode(true) as HTMLElement
+        wrapper.setAttribute('data-kb-menu-action', action.id)
+        const button = wrapper.querySelector('button')
+        if (button === null) continue
+        button.disabled = false
+        button.removeAttribute('disabled')
+        button.removeAttribute('aria-disabled')
+        const text = button.querySelector('[class*="itemLabel"]') ?? button.querySelector('span:last-child')
+        if (text !== null) text.textContent = action.label
+        else button.textContent = action.label
+        button.setAttribute('aria-label', action.label)
+        button.addEventListener('click', (event) => {
+          event.preventDefault(); event.stopPropagation()
+          const chosen = target.current
+          target.current = null
+          if (chosen !== null) action.run(chosen)
+          // Leave the menu open: an Escape at document level would also close the
+          // upload Modal, and removing the portal DOM leaves the explorer's open-menu
+          // state stuck. The next right-click (or an outside click) replaces it.
+        })
+        const danger = viewport.querySelector('[class*="danger"]')?.closest('[class*="itemWrap"]')
+        if (danger !== null && danger !== undefined) danger.before(wrapper)
+        else viewport.appendChild(wrapper)
+      }
     })
     observer.observe(document.body, { childList: true, subtree: true })
     return () => { observer.disconnect() }
-  }, [label, onExtract])
+  }, [actions])
 
   return onContextMenu
 }
@@ -549,7 +564,7 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
     sessionId, root, expanded, revealed, onToggle, onOpenFile,
     onReferenceFile, onUploadRequest, busy, refreshTick,
   } = props
-  const copy = typeof document !== 'undefined' && document.documentElement.lang.startsWith('zh') ? zh : en
+  const copy = (props.locale ?? (typeof document === 'undefined' ? '' : document.documentElement.lang)).startsWith('zh') ? zh : en
 
   /** Run one extraction request for a VIEW-relative file path. */
   const extractMarkdown = useCallback((viewRelPath: string): void => {
@@ -599,8 +614,59 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
     label: props.favoriteMarkLabel,
     selectedPath: props.selectedPath,
     mtimes,
+    locale: props.locale,
   })
-  const onTreeContextMenu = useContextMenuExtras({ root, label: copy.menuExtractMarkdown, onExtract: extractMarkdown })
+  const menuActions = useMemo<KnowledgeTreeMenuAction[]>(() => {
+    const relative = (target: { relPath: string; isDir: boolean }): string => target.relPath
+    return [
+      {
+        id: 'favorite',
+        label: copy.actionFavorite,
+        when: target => !target.isDir && props.onToggleFavorite !== undefined,
+        run: target => { props.onToggleFavorite?.(relative(target), props.isFavorite?.(relative(target)) !== true) },
+      },
+      {
+        id: 'extract-markdown',
+        label: copy.menuExtractMarkdown,
+        when: target => !target.isDir,
+        run: target => { extractMarkdown(relative(target)) },
+      },
+      {
+        id: 'share',
+        label: copy.actionShare,
+        when: () => props.onShare !== undefined,
+        run: target => { props.onShare?.(relative(target), target.isDir) },
+      },
+      {
+        id: 'cut',
+        label: copy.actionCut,
+        when: () => props.onClipboard !== undefined,
+        run: target => {
+          const path = relative(target)
+          props.onClipboard?.({ entries: [{ relPath: path, name: path.slice(path.lastIndexOf('/') + 1) }], cut: true })
+        },
+      },
+      {
+        id: 'copy',
+        label: copy.actionCopy,
+        when: () => props.onClipboard !== undefined,
+        run: target => {
+          const path = relative(target)
+          props.onClipboard?.({ entries: [{ relPath: path, name: path.slice(path.lastIndexOf('/') + 1) }], cut: false })
+        },
+      },
+      {
+        id: 'paste',
+        label: copy.actionPaste,
+        when: () => props.onPasteInto !== undefined && props.hasClipboard === true,
+        run: target => {
+          const path = relative(target)
+          props.onPasteInto?.(target.isDir ? path : (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''))
+        },
+      },
+    ]
+  }, [copy, extractMarkdown, props])
+  const onTreeContextMenu = useContextMenuExtras({ root, actions: menuActions })
 
   /** Every exclusion pattern at once, in the one array identity the explorer keys on. */
   const exclude = useMemo(() => METADATA_NAMES.map(name => `**/${name}`), [])

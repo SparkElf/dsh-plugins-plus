@@ -1462,6 +1462,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     // change the shared layout the view is built from. Only these
                     // three paths carry a label; everything below is a document the
                     // reader named.
+                    locale={props.locale}
                     bucketLabels={{
                       global: t('bucketGlobal'),
                       department: t('bucketDepartment'),
@@ -1807,6 +1808,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 locale={props.locale}
                 sessionId={explorerSessionId}
                 mountPoint={config.mountPoint}
+                sort={{ key: sort.key === 'mtime' || sort.key === 'size' ? 'name' : sort.key, dirsFirst: true }}
                 focusNew={focusNew}
                 ctx={props.ctx}
                 actualRoot={config.actualRoot}
