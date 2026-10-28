@@ -28,11 +28,12 @@ import {
   currentWorkspaceLimits,
   setWorkspaceLimits,
 } from './workspace-limits.ts'
+import { WorkspaceUpgrade, WorkspaceUpgradeError, recoverWorkspaceUpgradeAfterBoot } from './workspace-upgrade.ts'
 
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
 /** Host services required by managed JWT and MCP ownership. */
-export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval']
+export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval', 'agents']
 
 export const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
 
@@ -65,6 +66,9 @@ export const TOOL_TIMEOUT_PATH = '/integrations/dataops/tool-timeout'
 
 /** Same-origin route reporting what the last DataOps answer said about the credential. */
 export const AUTH_STATE_PATH = '/integrations/dataops/auth-state'
+
+/** Same-origin route the DSH page uses to detect and start a workspace image upgrade. */
+export const WORKSPACE_UPGRADE_PATH = '/integrations/dataops/workspace-upgrade'
 
 /** The ends a tool-call timeout may take, in whole seconds. */
 export const TOOL_TIMEOUT_MIN_SECONDS = 1
@@ -445,6 +449,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => registerAiManagementTools(ctx, reviewApi), 'dataops-managed: skill and review tools')
   const workspaceLimits = new WorkspaceLimits(ctx, { baseUrl, credentialRef: config.credentialRef })
   setWorkspaceLimits(workspaceLimits)
+  const workspaceUpgrade = new WorkspaceUpgrade(ctx, { baseUrl, credentialRef: config.credentialRef })
 
   /**
    * Adopt the publisher's models once the workspace has a session.
@@ -1020,6 +1025,46 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'dataops-managed: tool timeout route')
+
+  /**
+   * Workspace image upgrade: DataOps owns the image comparison and restart; this
+   * plugin adds the DSH-side running-session snapshot and post-restart recovery.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: WORKSPACE_UPGRADE_PATH,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      try {
+        if (request.method === 'GET') {
+          const preview = await workspaceUpgrade.preview()
+          writeJson(response, 200, {
+            imageStatus: preview.imageStatus,
+            configuredImage: preview.configuredImage,
+            activeSessions: preview.activeSessions,
+          })
+          return
+        }
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' })
+          response.end()
+          return
+        }
+        const state = await workspaceUpgrade.upgrade()
+        writeJson(response, 202, {
+          accepted: true,
+          upgradeId: state.upgradeId,
+          sessions: state.sessions.length,
+        })
+      } catch (error) {
+        const status = error instanceof WorkspaceUpgradeError ? error.status : 502
+        writeJson(response, status, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: workspace upgrade route')
+
+  // Recovery is deliberately fire-and-forget: route registration and JWT intake must
+  // not wait for DSH session persistence, and the retry loop reads the persistent file.
+  void recoverWorkspaceUpgradeAfterBoot(workspaceUpgrade)
 
   /**
    * What the last DataOps answer said about this workspace's credential.

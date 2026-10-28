@@ -88,6 +88,7 @@ describe('apply', () => {
       '/integrations/dataops/skill-plaza',
       '/integrations/dataops/tool-timeout',
       '/integrations/dataops/workspace-limits',
+      '/integrations/dataops/workspace-upgrade',
     ])
   })
 
@@ -110,6 +111,7 @@ describe('apply', () => {
       '/integrations/dataops/skill-plaza',
       '/integrations/dataops/tool-timeout',
       '/integrations/dataops/workspace-limits',
+      '/integrations/dataops/workspace-upgrade',
     ].sort())
   })
 

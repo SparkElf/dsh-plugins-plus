@@ -10,6 +10,7 @@ import { installWanxiangBranding } from './install-branding.tsx'
 import { ReloginPrompt, type ReloginPromptProps } from './ReloginPrompt.tsx'
 import { PermissionCenterSection } from './PermissionCenterSection.tsx'
 import { PermissionCenterIcon } from './PermissionCenterIcon.tsx'
+import { WorkspaceUpgradePrompt } from './WorkspaceUpgradePrompt.tsx'
 import { WorkflowPlazaBell } from './NotificationBell.tsx'
 import { canSeeManagedSettings, subscribeManagedSettingsVisibility } from './settings-gate.ts'
 import { REVIEW_CONTEXT_PATH, reviewDemoMode } from './review-client.ts'
@@ -118,6 +119,17 @@ export function apply(ctx: ClientContext): void {
     order: 90,
     inject: () => ({ t: bindReloginCopy(ctx) }),
   }, ReloginPrompt))
+  /**
+   * The workspace image upgrade notice. It lives in the shell overlay so it can sit
+   * above the page without taking a sidebar or conversation seat; the component renders
+   * nothing until DataOps reports a newer image.
+   */
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'dataops-workspace-upgrade',
+    order: 20,
+    inject: () => ({ t }),
+  }, WorkspaceUpgradePrompt as never))
 
   /**
    * The permission centre, a sidebar entry plus the page it opens.
