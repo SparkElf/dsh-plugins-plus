@@ -490,7 +490,7 @@
 [data-kb-plaza-mine] .reviewList {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
-  grid-auto-rows: max-content;
+  grid-auto-rows: 1fr;
   align-content: start;
   align-items: stretch;
   gap: 12px;
@@ -498,6 +498,11 @@
 
 [data-kb-plaza-mine] .reviewCard {
   min-height: 0;
+}
+
+[data-kb-plaza-mine] .card {
+  align-self: stretch;
+  height: auto;
 }
 
 .mineTags {
