@@ -7,11 +7,9 @@
  * signed in any more. This prompt names that state once, with the one action that clears it.
  *
  * It reports and nothing more. It does not retry, expire, or re-authenticate — the portal owns
- * the login form and is the only thing that can issue a session. It also cannot navigate the
- * operator there: the portal is a different origin, so this frame cannot read or drive its
- * window, and the gateway does not forward the browser's origin to the workspace. Guessing a
- * URL from inside here would open the wrong page on some deployments, so the dialog tells the
- * operator which window to switch to instead of pretending it can take them.
+ * the login form and is the only thing that can issue a session. Its action navigates the parent
+ * portal when the frame's ancestor origin is known, and opens the portal separately when the
+ * browser blocks top-level navigation from the frame.
  *
  * @module ReloginPrompt
  */
@@ -101,10 +99,26 @@ export function ReloginPrompt(props: ReloginPromptProps) {
       footer={(
         <>
           <Button onClick={dismiss}>{t('reloginDismiss')}</Button>
-          {/* Reloading is the one action this frame can actually take: it re-runs the workspace
-              boot and re-syncs the JWT, so a session restored in the portal tab takes effect here
-              without the operator hunting for a refresh button. */}
-          <Button variant="primary" onClick={() => { window.location.reload() }}>
+          {/* The portal is the only issuer of a new session. Navigate its origin directly;
+              cross-origin frames may refuse top-level navigation, so open it separately. */}
+          <Button variant="primary" onClick={() => {
+            const portalOrigin = window.location.ancestorOrigins?.[0]
+              ?? (document.referrer === '' ? undefined : new URL(document.referrer).origin)
+            if (portalOrigin === undefined || portalOrigin === window.location.origin) {
+              window.location.reload()
+              return
+            }
+            const portalUrl = `${portalOrigin}/`
+            try {
+              if (window.top !== null && window.top !== window) {
+                window.top.location.href = portalUrl
+                return
+              }
+            } catch {
+              // Cross-origin top navigation can be blocked; opening the portal is the fallback.
+            }
+            window.open(portalUrl, '_blank', 'noopener')
+          }}>
             {t('reloginAction')}
           </Button>
         </>

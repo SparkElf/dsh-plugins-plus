@@ -3,7 +3,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { currentAuthState } from './auth-state.ts'
+import { currentAuthState, resetAuthState } from './auth-state.ts'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -268,8 +268,11 @@ export function adoptRequestJwt(
   if (token === null) return Promise.resolve()
   return (async () => {
     const current = await ctx.credentials.resolve(accessRef)
-    if (current?.value === token) return
+    if (current?.value === token) { resetAuthState(); return }
     await ctx.credentials.set(accessRef, token)
+    // A new portal session replaces the credential above. The old observation belonged to the
+    // previous credential and must not keep the sign-in prompt on screen.
+    resetAuthState()
   })().catch((error: unknown) => {
     // A credential write that fails must not fail the request that carried it: the caller asked
     // for the page, not for this housekeeping, and the next request will try again.
@@ -502,6 +505,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         return
       }
       await ctx.credentials.set(accessRef, token)
+      resetAuthState()
       await ensureMcp()
       await adoptNow()
       response.writeHead(204, { 'cache-control': 'no-store' })
@@ -1083,6 +1087,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         response.end()
         return
       }
+      await adoptRequestJwt(ctx, accessRef, request)
       writeJson(response, 200, { state: currentAuthState() })
     },
   }), 'dataops-managed: auth state route')
