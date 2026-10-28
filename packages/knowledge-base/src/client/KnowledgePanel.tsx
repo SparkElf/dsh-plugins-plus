@@ -1321,6 +1321,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   onRenamed={() => { setRefreshTick(t => t + 1) }}
                   expandAll
                   unpinOnly
+                  pinnedPaths={pins.relPaths}
                   isPinned={pins.has}
                   onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
                   onOpen={(path) => { openDocument(path) }}
@@ -1806,6 +1807,8 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 locale={props.locale}
                 mountPoint={config.mountPoint}
                 focusNew={focusNew}
+                ctx={props.ctx}
+                actualRoot={config.actualRoot}
                 // The same two label inputs the tree takes, so the Location column and
                 // the tree name a folder identically.
                 bucketLabels={{

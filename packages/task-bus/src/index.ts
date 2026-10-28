@@ -6,12 +6,14 @@
  * principal and exposes the same surface to the agent as tools.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { basename, isAbsolute, join } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'task-bus'
-export const inject = ['webServer', 'tools', 'sessionController', 'credentials']
+export const inject = ['webServer', 'tools', 'sessionController', 'credentials', 'attachments']
 
 export const TASK_BUS_ROUTE = '/dsh-task-bus/api'
 const TASK_CENTER_PATH = '/api/task-center'
@@ -159,6 +161,29 @@ export const apply = (ctx: Context) => {
         }
         if (request.method === 'GET' && route === 'overview') {
           writeJson(response, 200, absoluteApprovalLinks(await client('/overview')))
+          return
+        }
+        if (request.method === 'GET' && route === 'attachment-materialize') {
+          const attachmentId = url.searchParams.get('attachmentId') ?? ''
+          const name = url.searchParams.get('name') ?? 'attachment'
+          const bytes = Number(url.searchParams.get('bytes') ?? '0')
+          if (!attachmentId.startsWith('sha256:') || !Number.isSafeInteger(bytes) || bytes <= 0) {
+            throw new Error('attachment-materialize requires a sha256 attachmentId and byte count')
+          }
+          const attachments = (ctx as unknown as {
+            attachments?: { readFileStream(ref: unknown): AsyncIterable<Uint8Array> }
+          }).attachments
+          if (attachments === undefined) throw new Error('attachment store is unavailable')
+          const chunks: Uint8Array[] = []
+          for await (const chunk of attachments.readFileStream({ attachmentId, name, bytes })) chunks.push(chunk)
+          const safeName = basename(name).replace(/[^\p{L}\p{N}._-]+/gu, '_') || 'attachment'
+          const requestedCwd = url.searchParams.get('cwd')?.trim() ?? ''
+          const root = requestedCwd !== '' && isAbsolute(requestedCwd) ? requestedCwd : process.cwd()
+          const directory = join(root, '.dsh-attachment-preview')
+          await mkdir(directory, { recursive: true })
+          const relativePath = '.dsh-attachment-preview/' + attachmentId.slice('sha256:'.length, 'sha256:'.length + 12) + '-' + safeName
+          await writeFile(join(root, relativePath), Buffer.concat(chunks))
+          writeJson(response, 200, { path: relativePath, absolutePath: join(root, relativePath), name: safeName })
           return
         }
         if (request.method === 'GET' && route === 'count') {

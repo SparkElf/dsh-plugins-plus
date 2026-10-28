@@ -27,7 +27,7 @@
  * @module @sparkelf/dsh-group-chat/client/MessageSide
  */
 
-import { createElement, useSyncExternalStore, type ReactNode } from 'react'
+import { createElement, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
 import { Avatar } from './Avatar.tsx'
 import type { RoomMember } from './api.ts'
 import { previewOf, quoteOf, type MessageLike, type QuotedMessage, type QuoteStore } from './quote.ts'
@@ -254,7 +254,6 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
   const messageId = typeof sourceMessageId === 'string' && sourceMessageId.length > 0
     ? sourceMessageId
     : typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined
-
   // A message outside a room has no roster to attribute it from and no room to reply into, so it
   // stays exactly as the official renderer drew it. A quote can still be present on a message
   // whose room id went missing; the bar is shown rather than dropped, because losing it would

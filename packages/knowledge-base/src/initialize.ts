@@ -69,6 +69,8 @@ export interface InitIo {
   createDocument: (relPath: string, content: string) => Promise<void>
   /** The tutorial body to publish. */
   tutorialHtml: () => string
+  /** Personal mode: create only the root, with no buckets or tutorial. */
+  ensureRoot?: () => Promise<void>
 }
 
 /** One line of the run log; the caller decides where it goes. */
@@ -119,6 +121,7 @@ function isAlreadyThere(error: unknown): boolean {
 export function createInitializer(
   io: InitIo,
   log: (line: InitLogLine) => void,
+  options: { personal?: boolean } = {},
 ): Initializer {
   /** The run in flight, if any. Shared so concurrent callers cannot start a second. */
   let inFlight: Promise<InitReport> | undefined
@@ -138,6 +141,25 @@ export function createInitializer(
     const buckets: InitReport['buckets'] = []
     let tutorial: TutorialOutcome = 'failed'
     let fatal: string | undefined
+
+    if (options.personal === true) {
+      // A personal KB is an empty root, not the team tree. No global/department/
+      // personal buckets and no tutorial: the reader's first document creates its
+      // own folders.
+      try {
+        if (!(await io.isStorageReady())) {
+          return { buckets, tutorial: 'skipped', error: 'storage is not ready' }
+        }
+        if (io.ensureRoot === undefined) {
+          return { buckets, tutorial: 'skipped', error: 'personal initializer has no root creator' }
+        }
+        await io.ensureRoot()
+        succeeded = true
+        return { buckets, tutorial: 'skipped' }
+      } catch (error: unknown) {
+        return { buckets, tutorial: 'skipped', error: error instanceof Error ? error.message : String(error) }
+      }
+    }
 
     for (const bucket of KNOWLEDGE_BUCKETS) {
       let outcome: BucketOutcome

@@ -5811,7 +5811,7 @@ describe('the template library is a card dialog with maintenance', () => {
     // The form is one document picker and four metadata fields. Nothing more: the
     // task's "template = a document + metadata, do not invent a data model".
     expect(source).toMatch(/type="file"/u)
-    expect(source).toMatch(/accept="\.md,\.markdown,\.txt,\.docx,\.pdf"/u)
+    expect(source).toMatch(/accept="\.md,\.markdown,\.txt,\.pdf,\.doc,\.docx,\.xls,\.xlsx,\.ppt,\.pptx,\.rtf,\.odt,\.ods,\.odp"/u)
     expect(source).toMatch(/setField\('title'/u)
     expect(source).toMatch(/setField\('description'/u)
     expect(source).toMatch(/setField\('category'/u)

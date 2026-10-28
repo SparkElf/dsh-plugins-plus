@@ -46,6 +46,8 @@ export interface KnowledgeConfig {
    * This is the directory a container mounts.
    */
   viewRoot: string
+  /** Local deployments: configured storage base (default `~/kb`). */
+  storageRoot?: string
   /** Absolute path where the view tree is mounted inside the container. */
   mountPoint: string
   /** NFS export host, when the deployment uses the NFS transport. */

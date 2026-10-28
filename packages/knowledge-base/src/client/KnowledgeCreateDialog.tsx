@@ -23,8 +23,8 @@
  * @module @sparkelf/dsh-knowledge-base/client
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Button, FileTypeIcon, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgeCreateDialog.module.css'
 
@@ -253,6 +253,132 @@ export function KnowledgeNameField(props: KnowledgeNameFieldProps) {
   )
 }
 
+
+/** Render one folder row and, when opened, its child folders. */
+function FolderNode(props: {
+  path: string
+  name: string
+  depth: number
+  value: string
+  onChange: (path: string) => void
+  disabled?: boolean
+}): ReactNode {
+  const { path, name, depth, value, onChange, disabled } = props
+  const [open, setOpen] = useState(false)
+  const [children, setChildren] = useState<ListingEntry[] | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!open || children !== null || loading) return
+    let cancelled = false
+    setLoading(true)
+    void listLevel(path).then(rows => {
+      if (!cancelled) setChildren(rows)
+    }).catch(() => {
+      if (!cancelled) setChildren([])
+    }).finally(() => {
+      if (!cancelled) setLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [children, loading, open, path])
+
+  return (
+    <li>
+      <div className={styles.treeRow} style={{ paddingInlineStart: `${8 + depth * 18}px` }} data-selected={value === path ? 'true' : 'false'}>
+        <button
+          type="button"
+          className={styles.treeToggle}
+          aria-label={open ? '收起文件夹' : '展开文件夹'}
+          disabled={disabled}
+          onClick={() => { setOpen(current => !current) }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: open ? 'rotate(90deg)' : undefined }}>
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={styles.treeName}
+          disabled={disabled}
+          onClick={() => { onChange(path) }}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          {name}
+        </button>
+      </div>
+      {open && children !== null && children.length > 0 && (
+        <ul className={styles.treeChildren}>
+          {children.map(child => (
+            <FolderNode
+              key={child.relPath}
+              path={child.relPath}
+              name={child.name}
+              depth={depth + 1}
+              value={value}
+              onChange={onChange}
+              disabled={disabled}
+            />
+          ))}
+        </ul>
+      )}
+      {open && loading && <p className={styles.treeMuted} style={{ paddingInlineStart: `${26 + depth * 18}px` }}>加载中…</p>}
+    </li>
+  )
+}
+
+/** Folder-only tree used by the second upload step. */
+function FolderTree(props: {
+  value: string
+  onChange: (path: string) => void
+  disabled?: boolean
+}): ReactNode {
+  const { value, onChange, disabled } = props
+  const [rootChildren, setRootChildren] = useState<ListingEntry[] | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    void listLevel('').then(rows => {
+      if (!cancelled) setRootChildren(rows)
+    }).catch(() => {
+      if (!cancelled) setRootChildren([])
+    }).finally(() => {
+      if (!cancelled) setLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  return (
+    <div className={styles.tree} role="tree" aria-label="选择文件夹">
+      <div className={styles.treeRow} data-selected={value === '' ? 'true' : 'false'}>
+        <button type="button" className={styles.treeName} disabled={disabled} onClick={() => { onChange('') }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          顶层
+        </button>
+      </div>
+      <ul className={styles.treeChildren}>
+        {(rootChildren ?? []).map(child => (
+          <FolderNode
+            key={child.relPath}
+            path={child.relPath}
+            name={child.name}
+            depth={0}
+            value={value}
+            onChange={onChange}
+            disabled={disabled}
+          />
+        ))}
+      </ul>
+      {loading && <p className={styles.treeMuted}>加载中…</p>}
+    </div>
+  )
+}
+
 // ── the dialog itself ───────────────────────────────────────────────────────────
 
 /**
@@ -297,6 +423,13 @@ function joinRel(directory: string, name: string): string {
   return directory === '' ? name : directory + '/' + name
 }
 
+/** Human-readable file size for the upload queue. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 /**
  * The create/upload dialog.
  * @param props - the flow, its starting directory, and the outcome channel.
@@ -313,6 +446,12 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
   const [progress, setProgress] = useState<{ done: number; total: number } | undefined>(undefined)
   /** A refusal from the Host, shown in the dialog's own words. */
   const [serverError, setServerError] = useState<string | undefined>(undefined)
+  /** Whether a file drag is over the drop zone. */
+  const [dragOver, setDragOver] = useState(false)
+  /** Upload is a two-step flow: choose files, then choose the folder in the tree. */
+  const [step, setStep] = useState<1 | 2>(1)
+  /** The native picker behind the drop zone; the zone is the visible control. */
+  const inputRef = useRef<HTMLInputElement>(null)
 
   const isUpload = mode === 'upload-file' || mode === 'upload-folder'
   const isFolder = mode === 'new-folder'
@@ -327,6 +466,8 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
     setBusy(false)
     setProgress(undefined)
     setServerError(undefined)
+    setDragOver(false)
+    setStep(1)
   }, [open, defaultPath, mode])
 
   /** The name as it will be stored: a document gains `.md` when it has no extension. */
@@ -375,7 +516,7 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
     setServerError(undefined)
     setProgress({ done: 0, total: pending.length })
     let done = 0
-    const failed: string[] = []
+    const failed: PendingUpload[] = []
     for (const item of pending) {
       try {
         const content = await item.file.text()
@@ -386,9 +527,9 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
           cache: 'no-store',
         })
         if (response.ok) done += 1
-        else failed.push(item.relative)
+        else failed.push(item)
       } catch {
-        failed.push(item.relative)
+        failed.push(item)
       }
       // Every completion moves the line, which is what makes a long upload legible.
       setProgress({ done: done + failed.length, total: pending.length })
@@ -397,17 +538,22 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
     setBusy(false)
     if (failed.length === 0) {
       onDone(t('uploadDone').replace('{n}', String(done)))
-    } else {
-      // The count and the names: "3 of 5 failed" alone leaves no way to tell which
-      // ones to retry.
-      onDone(
-        t('uploadPartial')
-          .replace('{ok}', String(done))
-          .replace('{failed}', String(failed.length))
-          .replace('{names}', failed.slice(0, 3).join('、')),
-      )
+      onClose()
+      return
     }
-    onClose()
+    // Keep the dialog open with only the failures in the queue. Successful files are
+    // already written; retrying must not upload them a second time.
+    setPending(failed)
+    setServerError(
+      t('uploadPartial')
+        .replace('{ok}', String(done))
+        .replace('{failed}', String(failed.length))
+        .replace('{names}', failed.slice(0, 3).map(item => item.relative).join('、')),
+    )
+    onDone(t('uploadPartial')
+      .replace('{ok}', String(done))
+      .replace('{failed}', String(failed.length))
+      .replace('{names}', failed.slice(0, 3).map(item => item.relative).join('、')))
   }, [destination, onClose, onDone, pending, t])
 
   /** Run whichever flow this dialog is in. */
@@ -415,12 +561,16 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
     if (busy) return
     if (isUpload) {
       if (pending.length === 0) return
+      if (step === 1) {
+        setStep(2)
+        return
+      }
       void submitUpload()
       return
     }
     if (nameError !== undefined) return
     void submitCreate()
-  }, [busy, isUpload, nameError, pending.length, submitCreate, submitUpload])
+  }, [busy, isUpload, nameError, pending.length, step, submitCreate, submitUpload])
 
   /** Enter submits, except while a field is refusing the value. */
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>): void => {
@@ -445,14 +595,25 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
     })))
   }, [])
 
+  /** Accept files dropped on the zone, keeping the same relative-path contract. */
+  const dropFiles = useCallback((event: React.DragEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    setDragOver(false)
+    const chosen = [...(event.dataTransfer.files ?? [])]
+    if (chosen.length === 0) return
+    setPending(chosen.map(file => ({
+      file,
+      relative: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+    })))
+  }, [])
+
+  const removePending = useCallback((relative: string): void => {
+    setPending(current => current.filter(item => item.relative !== relative))
+  }, [])
+
   const title = isUpload
     ? (mode === 'upload-folder' ? t('homeUploadTitle') : t('cardItemUploadFile'))
     : (isFolder ? t('cardItemNewFolder') : t('cardItemNewDoc'))
-
-  /** Why the primary button cannot run yet, in the reader's words. */
-  const blocker = isUpload
-    ? (pending.length === 0 ? t('createPickFiles') : undefined)
-    : (nameError !== undefined ? undefined : undefined)
 
   const disabled = busy || (isUpload ? pending.length === 0 : nameError !== undefined)
 
@@ -462,21 +623,38 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
       onClose={onClose}
       title={title}
       closeLabel={t('cancel')}
-      description={isUpload ? t('createUploadHint') : t('createDialogHint')}
+      className={styles.modal}
       footer={(
-        <>
+        <div className={styles.footer}>
           <Button variant="ghost" disabled={busy} onClick={onClose}>{t('cancel')}</Button>
-          <Button variant="primary" disabled={disabled} onClick={submit}>
+          {isUpload && step === 2 && (
+            <Button variant="ghost" disabled={busy} onClick={() => { setStep(1) }}>上一步</Button>
+          )}
+          <Button
+            variant="primary"
+            disabled={isUpload && step === 1 ? pending.length === 0 : disabled}
+            onClick={() => {
+              if (isUpload && step === 1) { setStep(2); return }
+              submit()
+            }}
+          >
             {busy
               ? (progress === undefined
                 ? t('cardBusyCreating')
                 : t('createProgress').replace('{done}', String(progress.done)).replace('{total}', String(progress.total)))
-              : (isUpload ? t('createUpload') : t('createSubmit'))}
+              : (isUpload ? (step === 1 ? '下一步' : `${t('createUpload')} (${pending.length})`) : t('createSubmit'))}
           </Button>
-        </>
+        </div>
       )}
     >
       <div className={styles.dialog} onKeyDown={onKeyDown}>
+        {isUpload && (
+          <div className={styles.steps} aria-label="上传步骤">
+            <span className={styles.step} data-active={step === 1 ? 'true' : 'false'}>1 选择文件</span>
+            <span className={styles.stepLine} />
+            <span className={styles.step} data-active={step === 2 ? 'true' : 'false'}>2 选择位置</span>
+          </div>
+        )}
         {!isUpload && (
           <KnowledgeNameField
             value={name}
@@ -488,50 +666,85 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
           />
         )}
 
-        {isUpload && (
-          <div className={styles.field}>
-            <span className={styles.fieldLabel}>{t('createFiles')}</span>
+        {isUpload && step === 1 && (
+          <div className={styles.uploadLayout} data-empty={pending.length === 0 ? 'true' : 'false'}>
             <input
+              ref={inputRef}
               type="file"
               multiple
-              className={styles.fileInput}
+              className={styles.visuallyHiddenInput}
               disabled={busy}
+              tabIndex={-1}
               {...(mode === 'upload-folder' ? { webkitdirectory: '' } : {})}
               onChange={chooseFiles}
             />
-            {pending.length === 0
-              ? <span className={styles.fieldHint}>{t('createPickFiles')}</span>
-              : (
-                // Every file's own landing path, so a folder upload's shape is visible
-                // before the reader commits.
-                <ul className={styles.fileList}>
-                  {pending.slice(0, 8).map(item => (
-                    <li key={item.relative} className={styles.fileRow}>
-                      <span className={styles.fileName}>{item.relative}</span>
-                      <code className={styles.fileTarget}>{'/' + joinRel(destination, item.relative)}</code>
-                    </li>
-                  ))}
-                  {pending.length > 8 && (
-                    <li className={styles.fileRow}>
-                      <span className={styles.fileName}>
-                        {t('createMoreFiles').replace('{n}', String(pending.length - 8))}
-                      </span>
-                    </li>
-                  )}
-                </ul>
-              )}
+            <div
+              className={styles.dropzone}
+              data-active={dragOver ? 'true' : 'false'}
+              role="button"
+              tabIndex={0}
+              aria-label={t('createPickFiles')}
+              onClick={() => { if (!busy) inputRef.current?.click() }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  if (!busy) inputRef.current?.click()
+                }
+              }}
+              onDragOver={(event) => { event.preventDefault(); setDragOver(true) }}
+              onDragLeave={() => { setDragOver(false) }}
+              onDrop={dropFiles}
+            >
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
+                <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
+              </svg>
+              <span className={styles.dropzoneTitle}>拖拽文件到这里，或点击选择</span>
+            </div>
+            <div className={styles.uploadQueue}>
+            {pending.length === 0 ? null : (
+              <div className={styles.uploadSummary}>
+                <span>{`已选择 ${pending.length} 个文件`}</span>
+                {progress === undefined ? null : <span>{`${progress.done}/${progress.total}`}</span>}
+              </div>
+            )}
+            {pending.length === 0 ? null : (
+              <ul className={styles.uploadList}>
+                {pending.map(item => (
+                  <li key={item.relative} className={styles.uploadRow}>
+                    <FileTypeIcon path={item.relative} size={18} />
+                    <span className={styles.uploadName} title={item.relative}>{item.relative}</span>
+                    <span className={styles.uploadSize}>{formatBytes(item.file.size)}</span>
+                    <button
+                      type="button"
+                      className={styles.removeFile}
+                      aria-label={`移除 ${item.relative}`}
+                      disabled={busy}
+                      onClick={() => { removePending(item.relative) }}
+                    >×</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            </div>
           </div>
         )}
 
-        <div className={styles.field}>
-          <span className={styles.fieldLabel}>{t('createDestinationPicker')}</span>
-          <KnowledgeDestinationPicker
-            value={destination}
-            onChange={setDestination}
-            t={t}
-            disabled={busy}
-          />
-        </div>
+        {(!isUpload || step === 2) && (
+          <div className={styles.field}>
+            {!isUpload && <span className={styles.fieldLabel}>{t('createDestinationPicker')}</span>}
+            {isUpload
+              ? <FolderTree value={destination} onChange={setDestination} disabled={busy} />
+              : (
+                <KnowledgeDestinationPicker
+                  value={destination}
+                  onChange={setDestination}
+                  t={t}
+                  disabled={busy}
+                />
+              )}
+          </div>
+        )}
 
         {/* The composed target, restated in full: the two controls above are the
             inputs to it, and this is the answer. */}
@@ -539,7 +752,6 @@ export function KnowledgeCreateDialog(props: KnowledgeCreateDialogProps) {
           <p className={styles.summary}>{t('createWillCreate').replace('{path}', '/' + target)}</p>
         )}
 
-        {blocker !== undefined && <p className={styles.fieldHint}>{blocker}</p>}
         {serverError !== undefined && <p className={styles.fieldError} role="alert">{serverError}</p>}
       </div>
     </Modal>

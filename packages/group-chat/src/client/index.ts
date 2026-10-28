@@ -221,6 +221,34 @@ export const inject = ['slots', 'locale', 'uiWorkspace', 'workspaces', 'sidebarR
  * @param ctx - DSH client context with locale and slot registries.
  */
 export function apply(ctx: ClientContext): void {
+  const context = ctx as unknown as {
+    sidebarRight?: { openTab(kind: string, options: { params: { url: string } }): void }
+    get?: (name: string) => unknown
+  }
+  const sidebarRight = (context.sidebarRight ?? context.get?.('sidebarRight')) as
+    { openResource?(address: string): void } | undefined
+  const openRoomFile = (attachment: { attachmentId: string; name: string; bytes: number }, roomId: string): void => {
+    const query = 'attachmentId=' + encodeURIComponent(attachment.attachmentId)
+      + '&name=' + encodeURIComponent(attachment.name)
+      + '&bytes=' + encodeURIComponent(String(attachment.bytes))
+    void (async () => {
+      const materialized = await fetch('/dsh-group-chat/api/attachment-materialize?' + query)
+      if (!materialized.ok) throw new Error('附件预览准备失败')
+      const target = await materialized.json() as { path?: string }
+      if (typeof target.path !== 'string') throw new Error('附件预览路径缺失')
+      const sessionId = 'group-room-' + roomId
+      const address = 'dsh-resource://file/session/' + encodeURIComponent(sessionId)
+        + '/' + target.path.split('/').map((part) => encodeURIComponent(part)).join('/')
+      if (sidebarRight !== undefined && sidebarRight.openResource !== undefined) {
+        sidebarRight.openResource(address)
+        return
+      }
+      const fallback = new URL('/dsh-group-chat/api/attachment-preview?' + query, window.location.origin).toString()
+      window.open(fallback, '_blank', 'noopener,noreferrer')
+    })().catch((error) => {
+      console.error('[group-chat] file preview failed', error)
+    })
+  }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'group-chat: copy')
   const t = ctx.locale.bind(NS) as (key: GroupChatKey) => string
   // A second binding rather than a merged dictionary: the preset copy belongs to the platform's
@@ -461,6 +489,56 @@ export function apply(ctx: ClientContext): void {
       onPick: () => { openTabFromGuide(MEMBERS_TAB_KIND) },
     })) as never,
   }, MembersGuideEntry)), 'group-chat: members guide box')
+
+  // A file card lives inside the official Chat renderer, including occurrences that are
+  // emitted before the room wrapper claims a cell. Delegate from the document so every file
+  // card in a room opens the same right-Sidebar preview, regardless of which cell drew it.
+  ctx.effect(() => {
+    const onFileClick = (event: MouseEvent): void => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const card = target.closest('[data-message-attachments] > *')
+      const roomId = store.getState().activeRoomId
+      if (!(card instanceof HTMLElement) || roomId === undefined) return
+      const name = (card.getAttribute('title') ?? card.innerText.split('\n')[0] ?? '').trim()
+      if (name === '') return
+      void (async () => {
+        try {
+          let cursor: string | null = null
+          let found: { attachmentId: string; name: string; bytes: number } | undefined
+          for (let page = 0; page < 20 && found === undefined; page += 1) {
+            const suffix = cursor === null ? '' : '?cursor=' + encodeURIComponent(cursor)
+            const response = await fetch('/dsh-group-chat/api/rooms/' + encodeURIComponent(roomId) + '/events' + suffix)
+            if (!response.ok) return
+            const payload = await response.json() as { events?: Array<{ event?: Record<string, unknown> }>; nextCursor?: string | null; hasMore?: boolean }
+            for (const record of payload.events ?? []) {
+              const data = record.event?.data as Record<string, unknown> | undefined
+              const content = data?.content
+              if (!Array.isArray(content)) continue
+              for (const block of content) {
+                if (block === null || typeof block !== 'object') continue
+                const item = block as Record<string, unknown>
+                const attachment = item.attachment as Record<string, unknown> | undefined
+                if (item.type === 'file' && attachment?.name === name
+                  && typeof attachment.attachmentId === 'string' && typeof attachment.bytes === 'number') {
+                  found = { attachmentId: attachment.attachmentId, name, bytes: attachment.bytes }
+                  break
+                }
+              }
+              if (found !== undefined) break
+            }
+            if (payload.hasMore !== true || payload.nextCursor === null || payload.nextCursor === undefined) break
+            cursor = payload.nextCursor
+          }
+          if (found !== undefined) openRoomFile(found, roomId)
+        } catch (error) {
+          console.error('[group-chat] file preview lookup failed', error)
+        }
+      })()
+    }
+    document.addEventListener('click', onFileClick, true)
+    return () => { document.removeEventListener('click', onFileClick, true) }
+  }, 'group-chat: file preview delegation')
 
   // A room is a Session. Its messages are ordinary `user/message` events on that Session's log,
   // so the shell's own Conversation already renders them — bubbles, markdown, tool calls,

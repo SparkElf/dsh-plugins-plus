@@ -21,7 +21,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
-export const inject = ['slots', 'uiWorkspace']
+export const inject = ['slots', 'uiWorkspace', 'sessions', 'sidebarRight']
 
 interface TaskItem {
   id: string
@@ -854,68 +854,253 @@ const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) =>
   )
 }
 
-const ROOM_SESSION_PREFIX = 'group-room-'
 
-/** Composer-side entry point: one click starts a generic task from the current Session. */
-const TaskComposerDock = ({ sessionId }: { sessionId: string }) => {
-  const [open, setOpen] = useState(false)
-  const [title, setTitle] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
-  if (!sessionId) return null
-  const isGroup = sessionId.startsWith(ROOM_SESSION_PREFIX)
-  const sourceType = isGroup ? 'group' : 'session'
-  const sourceId = isGroup ? sessionId.slice(ROOM_SESSION_PREFIX.length) : sessionId
-  const create = async () => {
-    const value = title.trim()
-    if (!value) return
-    setBusy(true)
-    setMessage('')
-    try {
-      const response = await fetch(ROUTE + '/generic', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          title: value,
-          sourceType,
-          sourceId,
-          sourceLabel: isGroup ? '群聊任务' : '会话任务',
-        }),
-      })
-      const payload = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(payload.error ?? '创建任务失败')
-      setTitle('')
-      setOpen(false)
-      setMessage('已创建')
-      window.setTimeout(() => setMessage(''), 3000)
-    } catch (cause) {
-      setMessage(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setBusy(false)
+
+interface HistoryEntry {
+  key: string
+  role: 'user' | 'assistant'
+  author: string
+  time: number | undefined
+  text: string
+  jumpId?: string
+}
+
+const HISTORY_CONTENT_TYPES = new Set(['user/message', 'assistant/message'])
+
+const historyText = (content: unknown): string => {
+  if (!Array.isArray(content)) return ''
+  return content.map((block) => {
+    if (block === null || typeof block !== 'object') return ''
+    const record = block as Record<string, unknown>
+    return record.type === 'text' && typeof record.text === 'string' ? record.text : ''
+  }).filter(Boolean).join('\n').trim()
+}
+
+const historyRole = (event: Record<string, unknown>): 'user' | 'assistant' => {
+  const data = event.data as Record<string, unknown> | undefined
+  return data?.role === 'user' || event.type === 'user/message' ? 'user' : 'assistant'
+}
+
+const historyAuthor = (event: Record<string, unknown>, role: 'user' | 'assistant'): string => {
+  const data = event.data as Record<string, unknown> | undefined
+  const source = data?.source as Record<string, unknown> | undefined
+  const memberName = typeof source?.memberName === 'string' ? source.memberName.trim() : ''
+  if (memberName !== '') return memberName
+  return role === 'user' ? '我' : '助手'
+}
+
+const groupHistory = async (roomId: string): Promise<HistoryEntry[]> => {
+  const entries: HistoryEntry[] = []
+  let cursor: string | null = null
+  for (let page = 0; page < 20; page += 1) {
+    const suffix = cursor === null ? '' : '?cursor=' + encodeURIComponent(cursor)
+    const response = await fetch('/dsh-group-chat/api/rooms/' + encodeURIComponent(roomId) + '/events' + suffix)
+    if (!response.ok) throw new Error('消息记录加载失败')
+    const payload = await response.json() as { events?: Array<{ id?: string; event?: Record<string, unknown>; createdAt?: string }>; nextCursor?: string | null; hasMore?: boolean }
+    for (const record of payload.events ?? []) {
+      const event = record.event
+      if (event === undefined || typeof event.type !== 'string' || !HISTORY_CONTENT_TYPES.has(event.type)) continue
+      const data = event.data as Record<string, unknown> | undefined
+      const role = historyRole(event)
+      const text = historyText(data?.content)
+      if (text === '') continue
+      entries.push({ key: record.id ?? String(event.seq ?? entries.length), role, author: historyAuthor(event, role), time: typeof event.time === 'number' ? event.time : undefined, text, jumpId: record.id })
+    }
+    if (payload.hasMore !== true || payload.nextCursor === null || payload.nextCursor === undefined) break
+    cursor = payload.nextCursor
+  }
+  return entries.sort((left, right) => (right.time ?? 0) - (left.time ?? 0))
+}
+
+const sessionHistory = async (sessionId: string, sessions: unknown): Promise<HistoryEntry[]> => {
+  const service = sessions as {
+    retain?: (id: string, options: { source: string }) => {
+      ready?: Promise<unknown>
+      binding?: {
+        eventSource?: { getSnapshot(): { entries?: Array<{ type?: string; event?: Record<string, unknown> }> } }
+        session?: { loadOlder?: () => Promise<void> }
+      }
+      release?: () => void
     }
   }
+  if (service.retain === undefined) return []
+  const reference = service.retain(sessionId, { source: 'gateway' })
+  try {
+    await reference.ready
+    const binding = reference.binding
+    if (binding === undefined) return []
+    await binding.session?.loadOlder?.().catch(() => undefined)
+    const entries = binding.eventSource?.getSnapshot().entries ?? []
+    return entries
+      .filter((entry): entry is { type: 'event'; event: Record<string, unknown> } => entry.type === 'event' && entry.event !== undefined)
+      .filter((entry) => typeof entry.event.type === 'string' && HISTORY_CONTENT_TYPES.has(entry.event.type))
+      .map((entry) => {
+        const event = entry.event
+        const data = event.data as Record<string, unknown> | undefined
+        const role = historyRole(event)
+        return {
+          key: String(event.seq ?? entries.indexOf(entry)),
+          role,
+          author: historyAuthor(event, role),
+          time: typeof event.time === 'number' ? event.time : undefined,
+          text: historyText(data?.content),
+        }
+      })
+      .filter((entry) => entry.text !== '')
+      .sort((left, right) => (right.time ?? 0) - (left.time ?? 0))
+  } finally {
+    reference.release?.()
+  }
+}
+
+const HistoryGlyph = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" strokeWidth="1.5">
+    <path d="M2.4 6.8A5.6 5.6 0 1 1 2.4 9.2" stroke="currentColor" strokeLinecap="round" />
+    <path d="M2.2 3.4v3.4h3.4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M8 5.4V8l1.9 1.2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+)
+
+
+interface FileAttachmentRef {
+  attachmentId: string
+  name: string
+  bytes: number
+}
+
+const fileAttachmentIn = (content: unknown, name: string): FileAttachmentRef | undefined => {
+  if (!Array.isArray(content)) return undefined
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type !== 'file') continue
+    const attachment = record.attachment as Record<string, unknown> | undefined
+    if (attachment?.name === name && typeof attachment.attachmentId === 'string' && typeof attachment.bytes === 'number') {
+      return { attachmentId: attachment.attachmentId, name, bytes: attachment.bytes }
+    }
+  }
+  return undefined
+}
+
+const sessionFileAttachment = async (sessionId: string, sessions: unknown, name: string): Promise<FileAttachmentRef | undefined> => {
+  const service = sessions as {
+    retain?: (id: string, options: { source: string }) => {
+      ready?: Promise<unknown>
+      binding?: {
+        eventSource?: { getSnapshot(): { entries?: Array<{ type?: string; event?: Record<string, unknown> }> } }
+        session?: { loadOlder?: () => Promise<void> }
+      }
+      release?: () => void
+    }
+  }
+  if (service.retain === undefined) return undefined
+  const reference = service.retain(sessionId, { source: 'gateway' })
+  try {
+    await reference.ready
+    const binding = reference.binding
+    if (binding === undefined) return undefined
+    const find = (): FileAttachmentRef | undefined => {
+      const entries = binding.eventSource?.getSnapshot().entries ?? []
+      for (const entry of entries) {
+        if (entry.type !== 'event' || entry.event === undefined) continue
+        if (entry.event.type !== 'user/message') continue
+        const data = entry.event.data as Record<string, unknown> | undefined
+        const found = fileAttachmentIn(data?.content, name)
+        if (found !== undefined) return found
+      }
+      return undefined
+    }
+    let found = find()
+    for (let page = 0; page < 5 && found === undefined; page += 1) {
+      await binding.session?.loadOlder?.().catch(() => undefined)
+      found = find()
+    }
+    return found
+  } finally {
+    reference.release?.()
+  }
+}
+
+const HistoryButton = ({ sessionId, sessions }: { sessionId: string; sessions: unknown }) => {
+  const [open, setOpen] = useState(false)
+  const [entries, setEntries] = useState<HistoryEntry[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const isGroup = sessionId.startsWith('group-room-')
+
+  useEffect(() => {
+    if (!open) return
+    let alive = true
+    setLoading(true)
+    setError('')
+    const load = isGroup ? groupHistory(sessionId.slice('group-room-'.length)) : sessionHistory(sessionId, sessions)
+    void load.then((items) => { if (alive) setEntries(items) })
+      .catch((cause) => { if (alive) setError(cause instanceof Error ? cause.message : String(cause)) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [open, isGroup, sessionId, sessions])
+
+
+  const jump = (entry: HistoryEntry) => {
+    setOpen(false)
+    window.setTimeout(() => {
+      let target: HTMLElement | null = entry.jumpId === undefined
+        ? null
+        : document.querySelector<HTMLElement>('[data-group-chat-message="' + CSS.escape(entry.jumpId) + '"]')
+      if (target === null) {
+        const needle = entry.text.slice(0, 80)
+        target = [...document.querySelectorAll<HTMLElement>('[data-group-chat-message], [data-slot="conversation.user.text.node"]')]
+          .find((element) => (element.innerText ?? '').includes(needle)) ?? null
+      }
+      if (target === null && (window as unknown as { find: (...args: unknown[]) => boolean }).find(entry.text.slice(0, 80), false, false, true, false, false, false)) {
+        const selection = window.getSelection()
+        const node = selection?.anchorNode
+        target = node instanceof HTMLElement ? node : node?.parentElement ?? null
+      }
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      if (target !== null) {
+        target.style.outline = '2px solid #2563eb'
+        target.style.outlineOffset = '4px'
+        window.setTimeout(() => { target!.style.outline = ''; target!.style.outlineOffset = '' }, 1800)
+      }
+    }, 80)
+  }
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', flexWrap: 'wrap' }}>
-      {open ? (
-        <>
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder={isGroup ? '群聊任务标题' : '会话任务标题'}
-            autoFocus
-            style={{ ...buttonStyle, cursor: 'text', minWidth: 180, flex: 1 }}
-            onKeyDown={(event) => { if (event.key === 'Enter') void create() }}
-          />
-          <Button size="sm" variant="primary" disabled={busy || title.trim() === ''} onClick={() => void create()}>
-            {busy ? '创建中…' : '创建任务'}
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>取消</Button>
-        </>
-      ) : (
-        <Button size="sm" variant="outline" onClick={() => setOpen(true)}>建任务</Button>
-      )}
-      {message ? <span style={{ fontSize: 10, color: message === '已创建' ? colors.success : colors.danger }}>{message}</span> : null}
-    </div>
+    <>
+      <button
+        type="button"
+        aria-label="消息记录"
+        title="消息记录"
+        data-session-id={sessionId}
+        onClick={() => setOpen(true)}
+        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, border: 'none', borderRadius: 6, background: 'transparent', color: 'inherit', cursor: 'pointer' }}
+      >
+        <HistoryGlyph />
+      </button>
+      <Modal open={open} onClose={() => setOpen(false)} title="消息记录" closeLabel="关闭">
+        <div style={{ width: 'min(760px, 82vw)', maxHeight: '62vh', overflowY: 'auto', display: 'grid', gap: 8, padding: '4px 0 8px' }}>
+          {loading ? <div style={{ padding: 24, textAlign: 'center', color: colors.muted, fontSize: 12 }}>正在加载消息记录…</div> : null}
+          {error !== '' ? <div style={{ padding: 12, color: colors.danger, fontSize: 12 }}>{error}</div> : null}
+          {!loading && error === '' && entries.length === 0 ? <div style={{ padding: 24, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无消息记录</div> : null}
+          {!loading && error === '' && entries.map((entry) => (
+            <button
+              key={entry.key}
+              type="button"
+              onClick={() => jump(entry)}
+              style={{ display: 'grid', gap: 5, width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: '1px solid ' + colors.line, background: colors.panelAlt, color: colors.text, cursor: 'pointer' }}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: colors.muted }}>
+                <span style={{ fontWeight: 650, color: entry.role === 'user' ? '#2563eb' : colors.text }}>{entry.author}</span>
+                {entry.time === undefined ? null : <span>{new Date(entry.time).toLocaleString()}</span>}
+                <span style={{ marginLeft: 'auto' }}>跳到该消息</span>
+              </span>
+              <span style={{ fontSize: 12, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>{entry.text}</span>
+            </button>
+          ))}
+        </div>
+      </Modal>
+    </>
   )
 }
 
@@ -927,15 +1112,71 @@ export const apply = (ctx: Context) => {
     }
     uiWorkspace: { openSession(sessionId: string): void }
   }
+  const surfaceWithServices = surface as unknown as {
+    sidebarRight?: { openResource?(address: string): void }
+    get?: (name: string) => unknown
+  }
+  const sidebarRight = (surfaceWithServices.sidebarRight ?? surfaceWithServices.get?.('sidebarRight')) as
+    { openResource?(address: string): void } | undefined
+  // Native file cards are spans owned by the official Chat renderer, so delegate from the
+  // document. The active Session header carries its id; group rooms have their own handler.
+  ctx.effect(() => {
+    const onFileClick = (event: MouseEvent): void => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const card = target.closest('[data-message-attachments] > *')
+      if (!(card instanceof HTMLElement)) return
+      const header = document.querySelector<HTMLElement>('button[aria-label="消息记录"][data-session-id]')
+      const sessionId = header?.getAttribute('data-session-id') ?? ''
+      if (sessionId === '' || sessionId.startsWith('group-room-')) return
+      const name = (card.getAttribute('title') ?? card.innerText.split('\n')[0] ?? '').trim()
+      if (name === '') return
+      void (async () => {
+        const attachment = await sessionFileAttachment(sessionId, (ctx as unknown as { sessions: unknown }).sessions, name)
+        if (attachment === undefined) return
+        const sessionState = (ctx as unknown as {
+          sessions?: { list?: { getSnapshot(): { byId?: Record<string, { cwd?: string }> } } }
+        }).sessions?.list?.getSnapshot()
+        const cwd = sessionState?.byId?.[sessionId]?.cwd ?? ''
+        const query = 'attachmentId=' + encodeURIComponent(attachment.attachmentId)
+          + '&name=' + encodeURIComponent(attachment.name)
+          + '&bytes=' + encodeURIComponent(String(attachment.bytes))
+          + (cwd === '' ? '' : '&cwd=' + encodeURIComponent(cwd))
+        const response = await fetch(ROUTE + '/attachment-materialize?' + query)
+        if (!response.ok) throw new Error('附件预览准备失败')
+        const materialized = await response.json() as { path?: string }
+        if (typeof materialized.path !== 'string') throw new Error('附件预览路径缺失')
+        const address = 'dsh-resource://file/session/' + encodeURIComponent(sessionId)
+          + '/' + materialized.path.split('/').map((part) => encodeURIComponent(part)).join('/')
+        const right = (ctx as unknown as { sidebarRight?: { openResource?(address: string): void } }).sidebarRight
+        if (right?.openResource !== undefined) right.openResource(address)
+        else window.open(new URL('/dsh-task-bus/api/attachment-materialize?' + query, window.location.origin).toString(), '_blank', 'noopener,noreferrer')
+      })().catch((cause) => { console.error('[task-bus] file preview failed', cause) })
+    }
+    document.addEventListener('click', onFileClick, true)
+    return () => { document.removeEventListener('click', onFileClick, true) }
+  }, 'task-bus: native file card preview')
   const Surface = () => <TaskCenterButton openSession={(sessionId) => surface.uiWorkspace.openSession(sessionId)} />
   ctx.effect(() => surface.slots.inject('shell.overlay', () => surface.slots.register(
     { name: 'shell.overlay', id: 'task-bus.center' },
     Surface,
   )), 'task-bus: Task Center overlay')
 
-  ctx.effect(() => surface.slots.inject('conversation.input.dock', () => surface.slots.register({
-    name: 'conversation.input.dock',
-    id: 'task-bus.create',
-    inject: ((sessionId: string) => ({ sessionId })) as never,
-  } as never, TaskComposerDock)), 'task-bus: composer create task')
+  // The native header's file-manager jump is the slot this product wants for session history.
+  // Hide that one button rather than replacing the whole header seat; every other native
+  // control keeps its position and behavior.
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.id = 'task-bus-history-replaces-file-manager'
+    style.textContent = 'button[aria-label="用 文件管理器 打开"] { display: none !important; }\n[data-message-attachments] > * { cursor: pointer; }'
+    document.head.appendChild(style)
+    return () => { style.remove() }
+  }, 'task-bus: replace file manager header button')
+
+  ctx.effect(() => surface.slots.inject('conversation.session.header.utilities', () => surface.slots.register({
+    name: 'conversation.session.header.utilities',
+    id: 'task-bus.history',
+    order: -4,
+    inject: ((sessionId: string) => ({ sessionId, sessions: (ctx as unknown as { sessions: unknown }).sessions })) as never,
+  } as never, HistoryButton as never)), 'task-bus: message history')
 }

@@ -275,6 +275,8 @@ export interface KnowledgeConfigView {
   host: string
   /** Absolute path of the authoritative tree on the storage host. */
   actualRoot: string
+  /** Local deployments: configured storage path (default `~/kb`). */
+  storageRoot?: string
   /** Absolute path of the caller's view tree on the storage host. */
   viewRoot: string
   /** Path where the view tree is mounted inside the container. */

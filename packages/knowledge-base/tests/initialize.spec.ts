@@ -41,6 +41,7 @@ function fakeTree(): InitIo & {
     documents,
     removeDirectory: name => directories.delete(name),
     setRootUnreachable: value => { rootUnreachable = value },
+    isStorageReady: async () => !rootUnreachable,
     createDirectory: async relPath => {
       if (rootUnreachable) throw new Error('ENOENT: the share is not mounted')
       if (directories.has(relPath)) throw alreadyExists(relPath)
@@ -81,6 +82,22 @@ describe('first-run provisioning', () => {
       { item: 'bucket:personal', outcome: 'created' },
       { item: 'tutorial', outcome: 'written' },
     ])
+  })
+
+  it('personal mode creates only the root and never seeds buckets or the tutorial', async () => {
+    const io = fakeTree()
+    let rootCreates = 0
+    io.ensureRoot = async () => { rootCreates += 1 }
+    const { log } = collector()
+    const init = createInitializer(io, log, { personal: true })
+
+    const report = await init.ensure()
+
+    expect(rootCreates).toBe(1)
+    expect(io.directories.size).toBe(0)
+    expect(io.documents.size).toBe(0)
+    expect(report.buckets).toEqual([])
+    expect(report.tutorial).toBe('skipped')
   })
 
   it('is idempotent: a second run creates nothing and leaves the tutorial alone', async () => {

@@ -33,6 +33,7 @@ import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgeHome.module.css'
 import panelStyles from './KnowledgePanel.module.css'
 import { KnowledgeTemplates } from './KnowledgeTemplates.tsx'
+import { KnowledgeNewDocumentDialog } from './KnowledgeNewDocumentDialog.tsx'
 import { KnowledgeCreateDialog, defaultDestination, type CreateMode } from './KnowledgeCreateDialog.tsx'
 import { isFileDrag, planDrop, readDroppedFiles } from './useFileDrop.ts'
 import {
@@ -103,6 +104,10 @@ export interface KnowledgeHomeProps {
   mountPoint: string
   /** Open one document in the preview. */
   onOpen: (path: string) => void
+  /** The client context, used to open a Session from the new-document chooser. */
+  ctx?: unknown
+  /** Authoritative storage root, used when a template is materialized for the agent. */
+  actualRoot?: string
   /**
    * The caller's DataOps id, when the status route reported one.
    *
@@ -427,6 +432,8 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
    * trigger for one dialog that asks both questions at once.
    */
   const [dialog, setDialog] = useState<CreateMode | undefined>(undefined)
+  /** The new-document type chooser, separate from the conventional folder/upload forms. */
+  const [newDocumentOpen, setNewDocumentOpen] = useState(false)
   /**
    * What the last menu action did, so the reader sees an outcome.
    *
@@ -657,8 +664,62 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
       setTemplatesOpen(true)
       return
     }
+    if (kind === 'new-doc') {
+      setNewDocumentOpen(true)
+      return
+    }
     setDialog(kind)
   }, [])
+
+  /**
+   * Open a conversation for the chosen artefact type.
+   *
+   * The composer's prompt is the product's draft contract, not a submitted turn:
+   * the reader can add the subject before sending. The caret is parked after
+   * 「一份」 so the next keystroke fills in what the document is about.
+   */
+  const startCreation = useCallback((prompt: string, caretOffset: number): void => {
+    setNewDocumentOpen(false)
+    const context = props.ctx as { get?: (name: string) => unknown } | undefined
+    const uiWorkspace = context?.get?.('uiWorkspace') as
+      | { startSession?: (workspaceId?: unknown, options?: { prompt?: string; clearPreviousDraft?: boolean }) => void }
+      | undefined
+    if (uiWorkspace?.startSession === undefined) {
+      setNotice('当前工作区无法打开新会话，请从左侧新建会话。')
+      return
+    }
+    uiWorkspace.startSession(undefined, { prompt, clearPreviousDraft: true })
+    // `startSession` navigates asynchronously and mounts a Lexical composer in the
+    // next frames. Poll briefly; if the host changes that surface the text is still
+    // prefilled and only the caret hint is lost.
+    const deadline = Date.now() + 4_000
+    const place = (): void => {
+      const input = document.querySelector<HTMLElement>('[data-composer-input="true"]')
+      if (input !== null && (input.textContent ?? '').includes(prompt)) {
+        input.focus()
+        const selection = window.getSelection()
+        const range = document.createRange()
+        let remaining = caretOffset
+        let placed = false
+        const walker = document.createTreeWalker(input, NodeFilter.SHOW_TEXT)
+        for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+          const length = node.textContent?.length ?? 0
+          if (remaining <= length) {
+            range.setStart(node, remaining)
+            range.collapse(true)
+            selection?.removeAllRanges()
+            selection?.addRange(range)
+            placed = true
+            break
+          }
+          remaining -= length
+        }
+        if (placed) return
+      }
+      if (Date.now() < deadline) window.setTimeout(place, 80)
+    }
+    window.setTimeout(place, 80)
+  }, [props.ctx])
 
   // "Recently opened" is the only set the tree can answer: its one time field is
   // the modification instant. The other three need an owner or a star per file,
@@ -793,7 +854,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
               type="button"
               className={styles.card}
               data-card={card.id}
-              aria-expanded={dialog !== undefined && card.items.some(item => item.kind === dialog)}
+              aria-expanded={card.id === 'new' ? newDocumentOpen : (dialog !== undefined && card.items.some(item => item.kind === dialog))}
               aria-haspopup={card.id === 'template' ? 'dialog' : undefined}
               // Autofocus only the blank-page card, and only when the caller asked:
               // moving focus without being asked would steal it from the rail.
@@ -818,6 +879,17 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
           </div>
         ))}
       </div>
+
+      <KnowledgeNewDocumentDialog
+        open={newDocumentOpen}
+        onClose={() => { setNewDocumentOpen(false) }}
+        onCreate={startCreation}
+        onNewFolder={() => {
+          setNewDocumentOpen(false)
+          setDialog('new-folder')
+        }}
+        t={c}
+      />
 
       {/* One dialog for all three actions. It asks the two questions the dropdown
           could not: what is it called, and where does it go. Escape, the mask and
@@ -844,9 +916,11 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
           onClose={() => { setTemplatesOpen(false) }}
           mountPoint={props.mountPoint}
           callerId={props.callerId}
-          // A template "use" writes a real document, so it opens like one: the same
-          // path a click on the file itself takes.
+          actualRoot={props.actualRoot}
+          // A template "use" opens a conversation with the materialized template as
+          // a real file reference; preview opens that same file in the sidebar.
           onOpen={(path) => { props.onOpen(path) }}
+          onStartSession={(prompt) => { startCreation(prompt, prompt.length) }}
         />
       )}
 

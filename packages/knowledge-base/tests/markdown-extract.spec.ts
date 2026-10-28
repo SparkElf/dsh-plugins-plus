@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { isAlreadyMarkdown } from '../src/extract.ts'
+import { EXTRACTABLE_EXTENSIONS, isAlreadyMarkdown, isExtractable } from '../src/extract.ts'
 
 describe('a Markdown document needs no extractor', () => {
   it('recognises the Markdown extensions', () => {
@@ -62,5 +62,17 @@ describe('a Markdown document needs no extractor', () => {
     expect(panel).toContain("t('progressAlreadyMarkdown')")
     const locales = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
     expect(locales.match(/progressAlreadyMarkdown:/gu)?.length, 'en 和 zh 各一份').toBe(2)
+  })
+
+  it('accepts legacy Office formats through the same extraction path', () => {
+    // `.doc`/`.xls`/`.ppt` are binary containers, not "unsupported". The
+    // extractor routes them through LibreOffice and, on a lossy text filter,
+    // through a modern-container conversion.
+    for (const ext of ['.doc', '.xls', '.ppt', '.rtf', '.odt', '.ods', '.odp']) {
+      expect(EXTRACTABLE_EXTENSIONS, ext).toContain(ext)
+      expect(isExtractable('legacy' + ext), ext).toBe(true)
+    }
+    expect(isExtractable('legacy.doc')).toBe(true)
+    expect(isExtractable('legacy.DOC')).toBe(true)
   })
 })

@@ -26,6 +26,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
+  FileTypeIcon,
   Input,
   Modal,
   SegmentedTabs,
@@ -38,10 +39,6 @@ import {
   type KnowledgeTemplateSaveInput,
   type KnowledgeTemplateView,
 } from '../api.ts'
-import {
-  KnowledgeDestinationPicker,
-  defaultDestination,
-} from './KnowledgeCreateDialog.tsx'
 import styles from './KnowledgeTemplates.module.css'
 
 /** How long the template read may take before the surface gives up. */
@@ -68,6 +65,62 @@ const EMPTY_DRAFT: TemplateDraft = {
   title: '', description: '', category: '', tags: '', fileName: '', content: '',
 }
 
+/** A stored template plus the built-in rows the library ships with. */
+type TemplateItem = KnowledgeTemplateView & {
+  /** Built-ins are bundled, read-only, and never enter the user's template store. */
+  readonly builtin?: boolean
+  /** Built-in document text, copied through the normal upload route when used. */
+  readonly content?: string
+  /** Optional engagement count shown on the cover card. */
+  readonly usage?: number
+}
+
+const builtinContent = (title: string, body: string): string => `# ${title}\n\n${body}\n`
+const BUILTIN_TEMPLATES: readonly TemplateItem[] = [
+  {
+    id: 'builtin:meeting-notes', title: '会议纪要', description: '结论、待办、责任人和时间点，一页收口。',
+    category: '协作', tags: ['会议', '待办'], fileName: '会议纪要.md', extension: 'md',
+    bytes: 0, updatedAt: '2026-01-01T00:00:00.000Z', relPath: '', builtin: true,
+    usage: 16100,
+    content: builtinContent('会议纪要', '## 会议信息\n- 时间：\n- 参与人：\n\n## 结论\n\n## 待办\n| 事项 | 负责人 | 截止时间 |\n| --- | --- | --- |\n'),
+  },
+  {
+    id: 'builtin:weekly-report', title: '项目周报', description: '本周进展、风险、下周计划，适合例会同步。',
+    category: '汇报', tags: ['周报', '项目'], fileName: '项目周报.md', extension: 'md',
+    bytes: 0, updatedAt: '2026-01-01T00:00:00.000Z', relPath: '', builtin: true,
+    usage: 1391,
+    content: builtinContent('项目周报', '## 本周进展\n\n## 风险与阻塞\n\n## 下周计划\n'),
+  },
+  {
+    id: 'builtin:project-plan', title: '项目方案', description: '背景、目标、范围、里程碑和资源需求。',
+    category: '方案', tags: ['立项', '方案'], fileName: '项目方案.md', extension: 'md',
+    bytes: 0, updatedAt: '2026-01-01T00:00:00.000Z', relPath: '', builtin: true,
+    usage: 2881,
+    content: builtinContent('项目方案', '## 背景\n\n## 目标\n\n## 范围\n\n## 里程碑\n\n## 资源需求\n'),
+  },
+  {
+    id: 'builtin:research-report', title: '调研报告', description: '问题、方法、发现、建议，带证据链。',
+    category: '研究', tags: ['调研', '分析'], fileName: '调研报告.md', extension: 'md',
+    bytes: 0, updatedAt: '2026-01-01T00:00:00.000Z', relPath: '', builtin: true,
+    usage: 3196,
+    content: builtinContent('调研报告', '## 调研问题\n\n## 方法\n\n## 关键发现\n\n## 建议\n'),
+  },
+  {
+    id: 'builtin:retrospective', title: '复盘总结', description: '做对了什么、哪里不足、下一步怎么改。',
+    category: '复盘', tags: ['复盘', '改进'], fileName: '复盘总结.md', extension: 'md',
+    bytes: 0, updatedAt: '2026-01-01T00:00:00.000Z', relPath: '', builtin: true,
+    usage: 2087,
+    content: builtinContent('复盘总结', '## 目标回顾\n\n## 做对了什么\n\n## 不足\n\n## 改进行动\n'),
+  },
+  {
+    id: 'builtin:governance', title: '数据治理规范', description: '口径、质量、权限和留档要求的统一模板。',
+    category: '治理', tags: ['数据治理', '规范'], fileName: '数据治理规范.md', extension: 'md',
+    bytes: 0, updatedAt: '2026-01-01T00:00:00.000Z', relPath: '', builtin: true,
+    usage: 1011000,
+    content: builtinContent('数据治理规范', '## 适用范围\n\n## 口径定义\n\n## 质量要求\n\n## 权限与留档\n'),
+  },
+].map(template => ({ ...template, bytes: template.content?.length ?? 0 }))
+
 /** Props for the template library. */
 export interface KnowledgeTemplatesProps {
   /** Locale-bound copy resolver. */
@@ -78,8 +131,12 @@ export interface KnowledgeTemplatesProps {
   mountPoint?: string
   /** The caller's id, so the destination default prefers their own folder. */
   callerId?: string
+  /** Authoritative storage root, where a materialized template is readable by the agent. */
+  actualRoot?: string
   /** Open a document once it has been created from a template. */
   onOpen?: (relPath: string) => void
+  /** Start a conversation that references the materialized template file. */
+  onStartSession?: (prompt: string) => void
 }
 
 /** A byte count in the reader's units. */
@@ -87,6 +144,13 @@ function sizeText(bytes: number): string {
   if (bytes < 1024) return String(bytes) + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+/** Engagement text for a built-in template card. */
+function formatUsage(usage: number | undefined): string {
+  if (usage === undefined || usage <= 0) return '尚未使用'
+  if (usage >= 10_000) return (usage / 10_000).toFixed(1).replace(/\.0$/u, '') + ' 万人已使用'
+  return usage.toLocaleString('zh-CN') + ' 人已使用'
 }
 
 /**
@@ -147,7 +211,15 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
   const c = props.t
   const [tab, setTab] = useState<TemplateTab>('library')
   const [state, setState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
-  const [rows, setRows] = useState<KnowledgeTemplateView[]>([])
+  const [rows, setRows] = useState<TemplateItem[]>([])
+  const [quickFilter, setQuickFilter] = useState<'all' | 'favorite' | 'recent'>('all')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [favorites, setFavorites] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('kb-template-favorites') ?? '[]') as string[]) } catch { return new Set() }
+  })
+  const [recent, setRecent] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('kb-template-recent') ?? '[]') as string[] } catch { return [] }
+  })
   const [readError, setReadError] = useState<string | undefined>(undefined)
   const [term, setTerm] = useState('')
 
@@ -155,14 +227,14 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
   const [draft, setDraft] = useState<TemplateDraft | undefined>(undefined)
   /** The template awaiting a remove confirmation. */
   const [confirming, setConfirming] = useState<KnowledgeTemplateView | undefined>(undefined)
-  /** The destination a "use" copies into. */
-  const [destination, setDestination] = useState(defaultDestination(undefined, props.callerId))
   /** A busy flag covering save, remove and use. */
   const [busy, setBusy] = useState(false)
   /** A sentence reporting the last outcome, or a refusal. */
   const [notice, setNotice] = useState<string | undefined>(undefined)
   /** The template being copied, so its own card can show progress. */
   const [usingId, setUsingId] = useState<string | undefined>(undefined)
+  /** The template whose content is shown in the preview dialog. */
+  const [previewing, setPreviewing] = useState<{ template: TemplateItem; content: string } | undefined>(undefined)
 
   /** Set on unmount so a read that lands later cannot write to a dead component. */
   const live = useRef(true)
@@ -197,15 +269,42 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
     return () => { live.current = false }
   }, [reload])
 
-  /** The rows the search filter leaves. */
+  /** Built-ins plus stored rows, before search and quick filters. */
+  const allTemplates = useMemo<readonly TemplateItem[]>(() => [...BUILTIN_TEMPLATES, ...rows], [rows])
+
+  /** The rows the search and quick filters leave. */
   const visible = useMemo(() => {
     const needle = term.trim().toLowerCase()
-    if (needle === '') return rows
-    return rows.filter((row) => {
+    const filtered = allTemplates.filter((row) => {
+      if (quickFilter === 'favorite' && !favorites.has(row.id)) return false
+      if (quickFilter === 'recent' && !recent.includes(row.id)) return false
+      if (categoryFilter !== '' && row.category !== categoryFilter) return false
+      if (needle === '') return true
       const haystack = [row.title, row.description, row.category, ...row.tags].join(' ').toLowerCase()
       return haystack.includes(needle)
     })
-  }, [rows, term])
+    if (quickFilter !== 'all') return filtered
+    return [...filtered].sort((left, right) => {
+      const favoriteDelta = Number(favorites.has(right.id)) - Number(favorites.has(left.id))
+      if (favoriteDelta !== 0) return favoriteDelta
+      return recent.indexOf(right.id) - recent.indexOf(left.id)
+    })
+  }, [allTemplates, categoryFilter, favorites, quickFilter, recent, term])
+
+  const categories = useMemo(
+    () => [...new Set(allTemplates.map(template => template.category).filter(category => category !== ''))],
+    [allTemplates],
+  )
+
+  const toggleFavorite = useCallback((id: string): void => {
+    setFavorites(current => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      localStorage.setItem('kb-template-favorites', JSON.stringify([...next]))
+      return next
+    })
+  }, [])
 
   /** Open the form for a new template. */
   const startAdd = useCallback((): void => {
@@ -329,52 +428,119 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
   }, [busy, c, confirming, reload])
 
   /**
-   * Copy one template's document into the chosen directory and open it.
+   * Materialize a built-in template into the fixed template directory.
    *
-   * Two existing routes, in order: read the stored document, then upload it under the
-   * destination with the same file name. A name that is already taken is refused by
-   * the upload route rather than overwritten, so this reports the collision instead of
-   * silently replacing someone's document.
+   * Stored templates already live there; a built-in exists only in this bundle, so
+   * the conversation would have no file to read unless it is written once, on use.
    */
-  const useTemplate = useCallback((template: KnowledgeTemplateView): void => {
+  const materializeTemplate = useCallback(async (template: TemplateItem): Promise<string | undefined> => {
+    if (template.builtin !== true) return template.relPath
+    if (template.content === undefined) return undefined
+    const slug = template.id.replace(/^builtin:/u, 'builtin-').replace(/[^a-z0-9-]+/giu, '-')
+    // The content hash keeps a revised built-in from colliding with an older copy
+    // that was materialized by a previous build.
+    let hash = 0
+    for (let index = 0; index < template.content.length; index += 1) {
+      hash = (hash * 31 + template.content.charCodeAt(index)) >>> 0
+    }
+    const relPath = '.kb-templates/_builtin/' + slug + '-' + hash.toString(16) + '.md'
+    const response = await fetch(kbApiPath(KB_API.upload), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ relPath, content: template.content }),
+      cache: 'no-store',
+    })
+    if (response.ok) return relPath
+    // `.kb-templates` is intentionally hidden from the browse view, so the read
+    // route cannot verify it. A 409 means this build already wrote the same
+    // content-addressed file; that is a success for the fixed template path.
+    if (response.status === 409) return relPath
+    return undefined
+  }, [])
+
+  /** Which artefact the template describes, for the conversation prompt. */
+  const templateKind = (template: TemplateItem): '文档' | '表格' | 'PPT' => {
+    const extension = template.extension.toLowerCase()
+    if (['xls', 'xlsx', 'csv', 'ods'].includes(extension)) return '表格'
+    if (['ppt', 'pptx', 'odp'].includes(extension)) return 'PPT'
+    return '文档'
+  }
+
+  /** Open a preview of the stored or materialized template document. */
+  const previewTemplate = useCallback((template: TemplateItem): void => {
+    setBusy(true)
+    setUsingId(template.id)
+    void (async () => {
+      try {
+        const relPath = await materializeTemplate(template)
+        if (relPath === undefined) {
+          setNotice(c('templateUseFailed'))
+          return
+        }
+        let content = template.content
+        if (content === undefined) {
+          const response = await fetch(kbApiPath(KB_API.read), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: relPath }),
+            cache: 'no-store',
+          })
+          if (!response.ok) {
+            setNotice(c('templateUseFailed'))
+            return
+          }
+          const body = await readKnowledgeJson<{ content?: string }>(response)
+          content = typeof body.content === 'string' ? body.content : undefined
+        }
+        if (content === undefined) {
+          setNotice(c('templateUseFailed'))
+          return
+        }
+        setPreviewing({ template, content })
+      } finally {
+        setBusy(false)
+        setUsingId(undefined)
+      }
+    })()
+  }, [c, materializeTemplate])
+
+  /**
+   * Start a conversation from a template.
+   *
+   * The template is a real file the agent can read; the prompt names its absolute
+   * path rather than pasting the template body into the composer. That keeps the
+   * conversation able to re-read the original, and follows the product rule that
+   * files are referenced, not duplicated.
+   */
+  const useTemplate = useCallback((template: TemplateItem): void => {
     if (busy) return
     setBusy(true)
     setUsingId(template.id)
     setNotice(undefined)
     void (async () => {
       try {
-        const readResponse = await fetch(kbApiPath(KB_API.read), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path: template.relPath }),
-          cache: 'no-store',
-        })
-        if (!readResponse.ok) {
+        const relPath = await materializeTemplate(template)
+        if (relPath === undefined) {
           setNotice(c('templateUseFailed'))
           return
         }
-        const read = await readKnowledgeJson<{ content?: string }>(readResponse)
-        if (typeof read.content !== 'string') {
+        if (props.onStartSession === undefined) {
           setNotice(c('templateUseFailed'))
           return
         }
-        const target = destination === '' ? template.fileName : destination + '/' + template.fileName
-        const writeResponse = await fetch(kbApiPath(KB_API.upload), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ relPath: target, content: read.content }),
-          cache: 'no-store',
+        const root = props.actualRoot !== undefined && props.actualRoot !== ''
+          ? props.actualRoot
+          : props.mountPoint
+        const absolute = root === undefined || root === ''
+          ? '/' + relPath
+          : root.replace(/\/+$/u, '') + '/' + relPath
+        const prompt = `帮我根据模板《${template.title}》创建一份${templateKind(template)}。\n模板文件：${absolute}\n请先读取模板文件，按模板结构生成新文档。`
+        setRecent(current => {
+          const next = [template.id, ...current.filter(id => id !== template.id)].slice(0, 8)
+          localStorage.setItem('kb-template-recent', JSON.stringify(next))
+          return next
         })
-        const body = (await writeResponse.json().catch(() => ({}))) as { error?: string }
-        if (!writeResponse.ok) {
-          // A taken name is the common refusal, and it is worth naming as such: the
-          // reader's next step (rename it or pick another folder) is different from a
-          // permission failure.
-          setNotice(body.error ?? c('templateUseFailed'))
-          return
-        }
-        setNotice(c('templateUsed').replace('{path}', target))
-        props.onOpen?.(target)
+        props.onStartSession(prompt)
         props.onClose()
       } catch {
         setNotice(c('templateUseFailed'))
@@ -383,7 +549,7 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
         setUsingId(undefined)
       }
     })()
-  }, [busy, c, destination, props])
+  }, [busy, c, materializeTemplate, props])
 
   /** Update one field of the open draft. */
   const setField = useCallback(<K extends keyof TemplateDraft>(key: K, value: TemplateDraft[K]): void => {
@@ -396,9 +562,11 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
       onClose={props.onClose}
       title={c('templateTitle')}
       closeLabel={c('templateClose')}
-      description={c('templateSubtitle')}
+      className={styles.modal}
       footer={(
-        <Button variant="ghost" onClick={props.onClose}>{c('templateClose')}</Button>
+        <div className={styles.footer}>
+          <Button variant="ghost" onClick={props.onClose}>{c('templateClose')}</Button>
+        </div>
       )}
     >
       <div className={styles.dialog}>
@@ -422,22 +590,48 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
           />
         </div>
 
+        <div className={styles.filterRow}>
+          <div className={styles.quickFilters} role="group" aria-label="模板筛选">
+            {([
+              ['all', '全部模板'],
+              ['favorite', '收藏'],
+              ['recent', '最近使用'],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={styles.quickFilter}
+                data-active={quickFilter === value ? 'true' : 'false'}
+                onClick={() => { setQuickFilter(value) }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <span className={styles.filterDivider} aria-hidden="true" />
+          <div className={styles.categoryFilters} role="group" aria-label="模板分类">
+            <button
+              type="button"
+              className={styles.categoryChip}
+              data-active={categoryFilter === '' ? 'true' : 'false'}
+              onClick={() => { setCategoryFilter('') }}
+            >全部分类</button>
+            {categories.map(category => (
+              <button
+                key={category}
+                type="button"
+                className={styles.categoryChip}
+                data-active={categoryFilter === category ? 'true' : 'false'}
+                onClick={() => { setCategoryFilter(category) }}
+              >{category}</button>
+            ))}
+          </div>
+        </div>
+
         {notice !== undefined && <p className={styles.notice} role="status">{notice}</p>}
 
         {tab === 'library' && (
           <div className={styles.library}>
-            {/* Where a "use" lands, shown before any card is pressed: the choice is
-                part of using a template, not an afterthought after clicking one. */}
-            <div className={styles.destination}>
-              <span className={styles.destinationLabel}>{c('templateUseInto')}</span>
-              <KnowledgeDestinationPicker
-                value={destination}
-                onChange={setDestination}
-                t={c}
-                disabled={busy}
-              />
-            </div>
-
             {state === 'loading' && <p className={styles.muted}>{c('templateLoading')}</p>}
             {state === 'unavailable' && (
               <p className={styles.muted}>
@@ -446,37 +640,59 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
                   : c('templateUnavailableReason').replace('{reason}', readError)}
               </p>
             )}
-            {state === 'ready' && visible.length === 0 && (
-              <p className={styles.muted}>{term.trim() === '' ? c('templateEmpty') : c('templateNoMatch')}</p>
+            {visible.length === 0 && state !== 'loading' && (
+              <p className={styles.muted}>{term.trim() === '' && quickFilter === 'all' ? c('templateEmpty') : c('templateNoMatch')}</p>
             )}
-            {state === 'ready' && visible.length > 0 && (
+            {visible.length > 0 && (
               <ul className={styles.grid}>
                 {visible.map(template => (
-                  <li key={template.id} className={styles.card}>
+                  <li key={template.id} className={styles.card} data-builtin={template.builtin === true ? 'true' : 'false'}>
                     <div className={styles.cardHead}>
+                      <FileTypeIcon path={template.fileName} size={16} />
                       <span className={styles.cardTitle}>{template.title}</span>
-                      <Tag>{template.extension === '' ? c('templateFileBadge') : template.extension}</Tag>
+                      <button
+                        type="button"
+                        className={styles.favorite}
+                        aria-label={favorites.has(template.id) ? '取消收藏' : '收藏模板'}
+                        aria-pressed={favorites.has(template.id)}
+                        onClick={() => { toggleFavorite(template.id) }}
+                      >
+                        {favorites.has(template.id) ? '★' : '☆'}
+                      </button>
                     </div>
-                    {template.description !== '' && (
-                      <p className={styles.cardBody}>{template.description}</p>
-                    )}
-                    <div className={styles.cardTags}>
-                      {template.category !== '' && <Tag tone="neutral">{template.category}</Tag>}
-                      {template.tags.slice(0, 4).map(tag => <Tag key={tag}>{tag}</Tag>)}
+                    <div className={styles.cover} data-template-kind={templateKind(template)}>
+                      <div className={styles.coverPage}>
+                        {templateKind(template) === '表格' ? (
+                          <div className={styles.sheetGrid} aria-hidden="true">
+                            {Array.from({ length: 12 }, (_, index) => <i key={index} />)}
+                          </div>
+                        ) : templateKind(template) === 'PPT' ? (
+                          <div className={styles.slidePage} aria-hidden="true">
+                            <b />
+                            <i />
+                            <i />
+                          </div>
+                        ) : (
+                          <div className={styles.documentPage} aria-hidden="true">
+                            <b />
+                            <i className={styles.lineWide} />
+                            <i />
+                            <i className={styles.lineShort} />
+                            <i />
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <div className={styles.cardFoot}>
-                      <span className={styles.cardMeta}>
-                        {sizeText(template.bytes)}
-                        {' · '}
-                        {template.updatedAt.slice(0, 10)}
-                      </span>
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => { useTemplate(template) }}
-                      >
-                        {usingId === template.id ? c('templateUsing') : c('templatePick')}
+                      <span>{formatUsage(template.usage)}</span>
+                      <span>{template.builtin === true ? '系统模板' : '团队模板'}</span>
+                    </div>
+                    <div className={styles.cardActions}>
+                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => { previewTemplate(template) }}>
+                        预览
+                      </Button>
+                      <Button variant="primary" size="sm" disabled={busy} onClick={() => { useTemplate(template) }}>
+                        {usingId === template.id ? c('templateUsing') : '使用'}
                       </Button>
                     </div>
                   </li>
@@ -559,7 +775,7 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
                   <span className={styles.fieldLabel}>{c('templateDocument')}</span>
                   <input
                     type="file"
-                    accept=".md,.markdown,.txt,.docx,.pdf"
+                    accept=".md,.markdown,.txt,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.rtf,.odt,.ods,.odp"
                     className={styles.fileInput}
                     onChange={chooseFile}
                   />
@@ -583,6 +799,31 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
         )}
       </div>
 
+      <Modal
+        open={previewing !== undefined}
+        onClose={() => { setPreviewing(undefined) }}
+        title={previewing?.template.title ?? ''}
+        closeLabel={c('templateClose')}
+        className={styles.previewModal}
+        footer={(
+          <div className={styles.footer}>
+            <Button variant="ghost" onClick={() => { setPreviewing(undefined) }}>{c('templateClose')}</Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                if (previewing !== undefined) {
+                  const template = previewing.template
+                  setPreviewing(undefined)
+                  useTemplate(template)
+                }
+              }}
+            >使用</Button>
+          </div>
+        )}
+      >
+        <pre className={styles.previewContent}>{previewing?.content}</pre>
+      </Modal>
+
       {/* Removing is destructive and irreversible from this surface, so it asks. */}
       <Modal
         open={confirming !== undefined}
@@ -591,10 +832,10 @@ export function KnowledgeTemplates(props: KnowledgeTemplatesProps) {
         closeLabel={c('cancel')}
         description={c('templateRemoveBody').replace('{name}', confirming?.title ?? '')}
         footer={(
-          <>
+          <div className={styles.footer}>
             <Button variant="ghost" onClick={() => { setConfirming(undefined) }}>{c('cancel')}</Button>
             <Button variant="primary" disabled={busy} onClick={removeConfirmed}>{c('templateRemove')}</Button>
-          </>
+          </div>
         )}
       >
         <span />

@@ -54,6 +54,7 @@ async function postJson<T>(method: string, body: Record<string, unknown> = {}): 
 interface StorageDraft {
   mode: 'local' | 'remote'
   protocol: 'nfs' | 'sshfs'
+  storageRoot: string
   nfsServer: string
   sshHost: string
   sshUser: string
@@ -66,6 +67,7 @@ interface StorageDraft {
 const EMPTY_DRAFT: StorageDraft = {
   mode: 'local',
   protocol: 'nfs',
+  storageRoot: '~/kb',
   nfsServer: '',
   sshHost: '',
   sshUser: '',
@@ -87,6 +89,7 @@ function draftOf(config: KnowledgeConfigView, status: KnowledgeStatusView): Stor
   return {
     mode: status.storageMode === 'remote' ? 'remote' : 'local',
     protocol: status.storageProtocol ?? config.storageProtocol ?? 'nfs',
+    storageRoot: config.storageRoot ?? '~/kb',
     nfsServer: config.nfsServer ?? '',
     sshHost: ssh?.host ?? '',
     sshUser: ssh?.user ?? '',
@@ -235,6 +238,7 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
       await postJson<KnowledgeConfigWriteResult>(KB_API.configSet, {
         storageMode: draft.mode,
         storageProtocol: draft.protocol,
+        storageRoot: draft.storageRoot,
         nfsServer: draft.nfsServer,
         sshHost: draft.sshHost,
         sshUser: draft.sshUser,
@@ -356,6 +360,23 @@ function Loaded({ t }: { t: KnowledgeSettingsInjected['t'] }) {
               <span>{t('storageModeRemote')}</span>
             </label>
           </div>
+
+          {draft.mode === 'local' && (
+            <>
+              <h3 className={styles.groupTitle}>{t('storageRoot')}</h3>
+              <div className={styles.field}>
+                <input
+                  className={styles.input}
+                  type="text"
+                  value={draft.storageRoot}
+                  placeholder="~/kb"
+                  aria-label={t('storageRoot')}
+                  onChange={event => { setDraft(d => ({ ...d, storageRoot: event.target.value })); setSaveState({ kind: 'idle' }) }}
+                />
+              </div>
+              <p className={styles.detail}>{t('storageRootHint')}</p>
+            </>
+          )}
 
           {draft.mode === 'remote' && (<>
             {/* The transport decides which fields matter, so it is asked for before them. */}

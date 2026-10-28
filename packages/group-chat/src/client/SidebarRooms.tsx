@@ -72,12 +72,12 @@ export interface SidebarRoomsInjected {
 /**
  * Height bounds for the region, in pixels.
  *
- * The floor keeps a room row and the header visible; the ceiling keeps the region from
- * crowding out the workspace list above it, which is the same reason the stylesheet capped it
- * at `46vh` before this was adjustable. The host clamps to the same pair, so a stored value
+ * The floor is one room row plus the header; the ceiling keeps the region from crowding
+ * out the workspace list above it, which is the same reason the stylesheet capped it at
+ * `46vh` before this was adjustable. The host clamps to the same pair, so a stored value
  * cannot arrive outside the range the region can draw.
  */
-const HEIGHT_MIN = 120
+const HEIGHT_MIN = 80
 const HEIGHT_MAX = 1200
 
 /** Clamps a requested height into the range the region can draw. */

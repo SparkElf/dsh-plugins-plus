@@ -160,6 +160,13 @@ export interface KnowledgeListingProps {
    */
   expandAll?: boolean
   /**
+   * Restrict the rows to these pinned paths and their ancestors.
+   *
+   * The pinned band is a list of pins, not a second copy of the whole tree: without
+   * this the band rendered every top-level entry and called all of them pinned.
+   */
+  pinnedPaths?: readonly string[]
+  /**
    * The action offered when the tree genuinely holds no documents.
    *
    * Distinct from a filter that matched nothing: an empty tree wants a way to make
@@ -678,14 +685,22 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
    * in-place narrowing: reading file bodies is what the rail's own search is for.
    */
   const needle = normaliseNeedle(props.filter ?? '')
+  const pinnedSet = useMemo(() => new Set(props.pinnedPaths ?? []), [props.pinnedPaths])
+  /** Keep a row when it is pinned or contains a pinned descendant. */
+  const restrictPinned = useCallback((rows: Entry[]): Entry[] => {
+    if (props.pinnedPaths === undefined) return rows
+    return rows.filter(entry => pinnedSet.has(entry.relPath)
+      || [...pinnedSet].some(path => path.startsWith(entry.relPath + '/')))
+  }, [pinnedSet, props.pinnedPaths])
+  const pinnedEntries = useMemo(() => restrictPinned(entries), [entries, restrictPinned])
   // The walk lives in `listingFilter.ts` so its rules can be tested without mounting this
   // component; what stays here is only the memo wiring.
   const visible = useMemo(
     // The rule set lives in the explorer package (`listing-filter.ts`) so the tree and this
     // listing cannot drift apart; what differs between the two is only how a row's children
     // are found, which is the callback below.
-    () => filterLevel(entries, (entry: Entry) => (entry.isDir ? children[entry.relPath] : undefined), needle),
-    [entries, children, needle],
+    () => filterLevel(pinnedEntries, (entry: Entry) => (entry.isDir ? restrictPinned(children[entry.relPath] ?? []) : undefined), needle),
+    [pinnedEntries, children, needle, restrictPinned],
   )
 
   // The product's shared centered panel state, not a bare grey sentence.

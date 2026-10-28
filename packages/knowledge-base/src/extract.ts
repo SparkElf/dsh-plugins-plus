@@ -424,6 +424,40 @@ async function viaLibreOffice(fullPath: string, ext: string, scratch: string): P
   }
 }
 
+/** Legacy formats LibreOffice can convert into a format a Python reader understands. */
+const LEGACY_CONVERSION_TARGETS: Readonly<Record<string, string>> = {
+  '.doc': '.docx',
+  '.xls': '.xlsx',
+  '.ppt': '.pptx',
+  '.rtf': '.docx',
+  '.odt': '.docx',
+  '.ods': '.xlsx',
+  '.odp': '.pptx',
+}
+
+/**
+ * Convert a legacy binary to its modern container, then read it with the
+ * matching Python reader.
+ *
+ * The plain-text filter in {@link viaLibreOffice} is lossy for complex Word,
+ * Excel and PowerPoint files. This fallback preserves the source structure
+ * instead of flattening it to a single text stream.
+ */
+async function viaLibreOfficeConversion(fullPath: string, ext: string, scratch: string): Promise<string | undefined> {
+  const target = LEGACY_CONVERSION_TARGETS[ext]
+  if (target === undefined) return undefined
+  const converted = await run('soffice', [
+    '--headless', '--norestore', '--invisible',
+    '--convert-to', target.slice(1),
+    '--outdir', scratch, fullPath,
+  ])
+  if (converted.code !== 0) return undefined
+  const entries = await readdir(scratch).catch(() => [] as string[])
+  const produced = entries.find(name => name.toLowerCase().endsWith(target))
+  if (produced === undefined) return undefined
+  return viaPython(join(scratch, produced), target)
+}
+
 /** Read the modern formats directly, without a service round trip. */
 async function viaPython(fullPath: string, ext: string): Promise<string | undefined> {
   const script = PYTHON_READERS[ext]
@@ -441,6 +475,29 @@ async function viaPython(fullPath: string, ext: string): Promise<string | undefi
  * separate so a missing library only disables its own format.
  */
 const PYTHON_READERS: Readonly<Record<string, string>> = {
+  '.doc': `import sys, re
+b = open(sys.argv[1], 'rb').read()
+# Word 97-2003 stores its text as UTF-16LE in the WordDocument stream. A
+# small number of WPS-generated files cannot be opened by older LibreOffice
+# builds, so this read-only fallback keeps their text searchable.
+def good(ch):
+    return ('\\u4e00' <= ch <= '\\u9fff') or (ch.isascii() and ch.isprintable()) or ch in '，。；：、！？（）《》“”‘’—…%．,.;:()!?-/'
+text = b.decode('utf-16le', errors='ignore')
+text = ''.join(ch if ch in '\\r\\n\\t' or good(ch) else ' ' for ch in text)
+text = re.sub(r'[ \\t]{3,}', ' ', text).replace('\\r', '\\n')
+# The stream starts with OLE metadata before the first real run of Chinese
+# prose; anchor there so no binary debris is emitted as a heading.
+anchor = re.search(r'[\\u4e00-\\u9fff]{6,}', text)
+if anchor:
+    text = text[anchor.start():]
+lines = [line.strip() for line in text.splitlines()]
+# OLE metadata and binary debris survive the UTF-16 decode as short lines
+# with a low ratio of printable CJK/ASCII characters. Keep only prose lines.
+lines = [line for line in lines
+         if len(re.findall(r'[\\u4e00-\\u9fff]', line)) >= 4
+         and sum(good(ch) for ch in line) / max(len(line), 1) >= 0.75
+         and not re.search(r'Root Entry|SummaryInformation|WordDocument|WPS|KSO|ICV|Normal|Windows 用户|Microsoft|Times New Roman|Calibri|宋体|仿宋', line)]
+print('\\n'.join(lines))`,
   '.docx': `import sys, docx
 d = docx.Document(sys.argv[1])
 out = []
@@ -570,6 +627,18 @@ export async function extractDocument(fullPath: string, relPath: string, options
       const text = await viaLibreOffice(fullPath, ext, scratch)
       if (text !== undefined) return { markdown: withHeader(title, tidy(text), 'libreoffice'), via: 'libreoffice' }
       attempts.push('libreoffice')
+      // `.doc`/`.xls`/`.ppt` do not always survive the plain-text filter (old
+      // Word documents, charts and embedded tables are common failures). Convert
+      // to the modern container and let the direct Python readers keep structure.
+      const converted = await viaLibreOfficeConversion(fullPath, ext, scratch)
+      if (converted !== undefined) return { markdown: withHeader(title, tidy(converted), 'libreoffice'), via: 'libreoffice' }
+      attempts.push('libreoffice-convert')
+      // Older LibreOffice versions (and some WPS-written `.doc` files) fail to
+      // load the binary container at all. The UTF-16LE WordDocument stream is
+      // still readable and keeps the document searchable instead of invisible.
+      const legacyDirect = await viaPython(fullPath, ext)
+      if (legacyDirect !== undefined) return { markdown: withHeader(title, tidy(legacyDirect), 'python'), via: 'python' }
+      attempts.push('python-legacy')
     } finally {
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined)
     }

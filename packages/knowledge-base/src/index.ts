@@ -114,6 +114,8 @@ import {
   type ResolvedPath,
   type ViewDelta,
 } from './views.ts'
+import { readLocalStorageSettings, writeLocalStorageRoot } from './localStorageSettings.ts'
+import { resolveStorageRoot, storageActualRoot } from './localStoragePath.ts'
 import {
   TUTORIAL_FILE_NAME,
   createInitializer,
@@ -246,6 +248,8 @@ export interface Config {
   actualRoot: string
   /** Absolute path of the per-user view tree on the storage host. */
   viewRoot: string
+  /** Local deployments: authoritative storage base, default `~/kb`. */
+  storageRoot: string
   /** Comma-separated export spec of clients allowed to mount the NFS export. */
   permitted: string
   /** Host serving the export, as an address or `address:/path` pseudo root. */
@@ -355,6 +359,9 @@ export const Config: z<Config> = z.object({
   mountPoint: z.string().default('/workspace/kb'),
   actualRoot: z.string().default('/nas/kb/actual'),
   viewRoot: z.string().default('/nas/kb/views'),
+  // Local deployments keep the authoritative copy here. Team deployments keep
+  // using actualRoot/viewRoot; this field is ignored for them.
+  storageRoot: z.string().default('~/kb'),
   permitted: z.string().default('*'),
     // Host serving the export. The mount step builds `address:/` from it, because `fsid=0`
     // in the export makes the share the NFSv4 pseudo root: clients mount the server root
@@ -647,6 +654,31 @@ function personalPathRefusal(config: Config, relPath: string): LocalPathRefusal 
  * @param config - resolved plugin config.
  * @returns The layout the page renders.
  */
+/** The authoritative root for a local deployment. */
+export function localStorageRoot(config: Config): string {
+  if (isTeamDeployment(config)) return config.actualRoot
+  const configured = (config.storageRoot ?? '').trim()
+  // A pre-setting local profile stored documents at its custom mountPoint. Keep
+  // reading that tree until the operator explicitly chooses a different path.
+  if (configured === '' || configured === '~/kb') {
+    // A pre-setting personal profile may already point actualRoot at its real
+    // directory; that is more authoritative than the container-style mountPoint.
+    if ((config.actualRoot ?? '').trim() !== '' && (config.actualRoot ?? '').trim() !== '/nas/kb/actual') {
+      return resolveStorageRoot(config.actualRoot)
+    }
+    if ((config.mountPoint ?? '').trim() !== '' && (config.mountPoint ?? '').trim() !== '/workspace/kb') {
+      return resolveStorageRoot(config.mountPoint)
+    }
+  }
+  return storageActualRoot(resolveStorageRoot(configured === '' ? '~/kb' : configured))
+}
+
+/** Overlay the profile-local storage-root setting on a config. */
+export function withLocalStorageRoot(config: Config, storageRoot: string | undefined): Config {
+  if (storageRoot === undefined || config.storageMode !== 'local') return config
+  return { ...config, storageRoot }
+}
+
 export function localConfig(
   config: Config,
   /**
@@ -664,10 +696,21 @@ export function localConfig(
   ssh: KnowledgeSshView
   retrieval: import('./embeddings.ts').VectorRetrievalConfig
 } {
+  const localRoot = localStorageRoot(config)
   return {
-    mountPoint: config.mountPoint,
-    actualRoot: config.actualRoot,
-    viewRoot: config.viewRoot,
+    mountPoint: isTeamDeployment(config)
+      ? config.mountPoint
+      : (config.mountPoint ?? '').trim() === '' || (config.mountPoint ?? '').trim() === '/workspace/kb'
+        ? localRoot
+        : config.mountPoint,
+    actualRoot: isTeamDeployment(config) ? config.actualRoot : localRoot,
+    viewRoot: isTeamDeployment(config)
+      ? config.viewRoot
+      : (config.viewRoot ?? '').trim() !== '' && config.viewRoot !== '/nas/kb/views'
+        ? config.viewRoot
+        // Personal audit/pin state is internal, not a document folder in the KB tree.
+        : join(dirname(localRoot), '.kb-state'),
+    storageRoot: config.storageRoot ?? '~/kb',
     nfsServer: config.nfsServer,
     host: !isTeamDeployment(config) ? '' : safeHost(config.baseUrl),
     backendConfigured: isTeamDeployment(config),
@@ -706,7 +749,7 @@ function safeHost(baseUrl: string): string {
  * @returns The visible file count, or null when the mount is absent.
  */
 export async function localStatus(config: Config): Promise<KnowledgeStatus> {
-  const mounted = await countFiles(config.mountPoint)
+  const mounted = await countFiles(localConfig(config).mountPoint)
   return {
     visibleFiles: mounted,
     lastSyncAt: null,
@@ -756,9 +799,10 @@ export interface SyncReportFields {
  * @returns The state, in order of increasing severity.
  */
 export async function classifyMount(config: Config): Promise<KnowledgeMountState> {
-  if (config.mountPoint.trim() === '') return 'absent'
+  const mountPoint = localConfig(config).mountPoint
+  if (mountPoint.trim() === '') return 'absent'
   try {
-    const info = await stat(config.mountPoint)
+    const info = await stat(mountPoint)
     // Exists and is a directory: the tree is readable, whether it came from a mount
     // or from a pointer this plugin built.
     if (info.isDirectory()) return 'mounted'
@@ -770,7 +814,7 @@ export async function classifyMount(config: Config): Promise<KnowledgeMountState
     // parent is missing too -- or the share is fine and this plugin has yet to build
     // its pointer inside it. The parent tells the two apart.
     try {
-      return (await stat(dirname(config.mountPoint))).isDirectory() ? 'pointer-missing' : 'absent'
+      return (await stat(dirname(mountPoint))).isDirectory() ? 'pointer-missing' : 'absent'
     } catch {
       return 'absent'
     }
@@ -3044,7 +3088,18 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       // Reusing that classifier rather than inventing an `access()` probe keeps one
       // definition of "the share is there": a second implementation here would be free
       // to disagree with the status route that already reports this state to the reader.
-      isStorageReady: async () => (await classifyMount(config)) !== 'absent',
+      isStorageReady: async () => {
+        if (!isTeamDeployment(config)) {
+          // The local authoritative directory is created on first write; its parent
+          // only has to exist so a first run is not mistaken for a missing mount.
+          try {
+            return (await stat(dirname(localStorageRoot(config)))).isDirectory()
+          } catch {
+            return false
+          }
+        }
+        return (await classifyMount(config)) !== 'absent'
+      },
       createDirectory: async relPath => {
         await createKnowledgeEntry(config, relPath, { directory: true })
       },
@@ -3052,6 +3107,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         await createKnowledgeEntry(config, relPath, { directory: false, content })
       },
       tutorialHtml: () => readFileSync(tutorialTemplatePath(), 'utf8'),
+      ensureRoot: async () => { await mkdir(localStorageRoot(config), { recursive: true }) },
     },
     line => {
       // One line per item, so a deployment that comes up without its buckets says which
@@ -3060,6 +3116,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       if (line.outcome === 'failed') host.logger?.warn?.(message)
       else host.logger?.info?.(message)
     },
+    { personal: !isTeamDeployment(config) },
   )
   /**
    * Background extraction, one worker for this deployment.
@@ -3464,7 +3521,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // report a save that did not happen.
             const allowed = new Set([
               'storageMode', 'storageProtocol', 'nfsServer',
-              'sshHost', 'sshUser', 'sshPort', 'sshRemotePath', 'sshMountOptions', 'sshKeyRef', 'retrieval',
+              'sshHost', 'sshUser', 'sshPort', 'sshRemotePath', 'sshMountOptions', 'sshKeyRef', 'retrieval', 'storageRoot',
             ])
             const refused: { field: string; reason: string }[] = []
             for (const field of Object.keys(body)) {
@@ -3482,7 +3539,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             }
             const storageFields = new Set([
               'storageMode', 'storageProtocol', 'nfsServer',
-              'sshHost', 'sshUser', 'sshPort', 'sshRemotePath', 'sshMountOptions', 'sshKeyRef',
+              'sshHost', 'sshUser', 'sshPort', 'sshRemotePath', 'sshMountOptions', 'sshKeyRef', 'storageRoot',
             ])
             if (!storageManage && Object.keys(body).some(field => storageFields.has(field))) {
               return writeJson(res, 403, {
@@ -3504,19 +3561,37 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                 refused.push({ field, reason: 'not a recognized value' })
               }
             }
-            const saved = await writeStorageSettings(config.mountPoint, patch)
+            // `storageRoot` belongs to the profile-local file. Keep it out of the
+            // deployment storage record, which is stored under the path it replaces.
+            const requestedRoot = typeof body.storageRoot === 'string' ? body.storageRoot.trim() : undefined
+            delete (patch as { storageRoot?: string }).storageRoot
+            let savedRoot: string | undefined
+            if (requestedRoot !== undefined) {
+              try {
+                savedRoot = await writeLocalStorageRoot(requestedRoot)
+              } catch (error) {
+                return writeJson(res, 400, {
+                  error: describeError(error).message,
+                  refused: [{ field: 'storageRoot', reason: 'invalid storage path' }],
+                })
+              }
+            }
+            const saved = Object.keys(patch).length === 0
+              ? await readStorageSettings(config.mountPoint)
+              : await writeStorageSettings(config.mountPoint, patch)
             // The wall this route cannot climb: mountPoint/actualRoot/viewRoot are bind
             // mounts created with the container, so a shape change is recorded now and takes
-            // effect when the workspace restarts. Saying so is the difference between a
-            // saved setting and a control that looks broken.
-            const live = withStoredStorage(deploymentConfig, saved)
+            // effect when the workspace restarts. `storageRoot` is a local path and applies
+            // immediately. Saying so is the difference between a saved setting and a control
+            // that looks broken.
+            const live = withLocalStorageRoot(withStoredStorage(deploymentConfig, saved), savedRoot ?? (await readLocalStorageSettings()).storageRoot)
             const restartRequired = live.storageMode !== config.storageMode
               || live.storageProtocol !== config.storageProtocol
               || live.nfsServer !== config.nfsServer
               || live.sshHost !== config.sshHost
               || live.sshRemotePath !== config.sshRemotePath
             return writeJson(res, 200, {
-              saved: Object.keys(saved),
+              saved: [...Object.keys(saved), ...(savedRoot === undefined ? [] : ['storageRoot'])],
               restartRequired,
               config: localConfig(live),
               ...(refused.length === 0 ? {} : { refused }),
@@ -3528,7 +3603,10 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // one exception: whether the credential resolves is what decides if the mount
             // step can run, and only the credential store can answer it. The panel's saved
             // choices (including the vector group) must read back immediately.
-            const liveConfig = withStoredStorage(config, await readStorageSettings(config.mountPoint))
+            const liveConfig = withLocalStorageRoot(
+              withStoredStorage(config, await readStorageSettings(config.mountPoint)),
+              (await readLocalStorageSettings()).storageRoot,
+            )
             const sshKeyConfigured = await ctx.credentials
               .resolve(credentialRef(liveConfig.sshKeyRef))
               .then(resolved => resolved !== undefined && resolved.value.trim() !== '')

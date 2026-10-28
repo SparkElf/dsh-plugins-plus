@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-knowledge-base",
-  "version": "0.1.14",
+  "version": "0.1.20",
   "description": "DataOps-backed knowledge base for DeepSeek Harness: a left-sidebar destination, Settings configuration, and index tooling over a mounted NAS view.",
   "type": "module",
   "main": "./lib/index.js",

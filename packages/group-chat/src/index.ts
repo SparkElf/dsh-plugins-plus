@@ -625,7 +625,7 @@ export interface GroupChatPreferences {
 }
 
 /** The height bounds the region enforces, exported so the client and host agree on them. */
-export const SIDEBAR_HEIGHT_MIN = 120
+export const SIDEBAR_HEIGHT_MIN = 80
 export const SIDEBAR_HEIGHT_MAX = 1200
 
 /** Reads the preferences file, treating every failure as "nothing saved yet". */
@@ -1303,10 +1303,61 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
     path: GROUP_CHAT_ROUTE,
     handler: async (req: unknown, res: unknown) => {
       const request = req as { url?: string; method?: string; on?: unknown }
-      const response = res as { writeHead(status: number, headers?: Record<string, string>): void; end(body?: string): void }
+      const response = res as { writeHead(status: number, headers?: Record<string, string>): void; end(body?: string | Uint8Array): void }
       const url = new URL(request.url ?? '/', 'http://dsh.internal')
       const route = url.pathname.slice(GROUP_CHAT_ROUTE.length).replace(/^\/+/u, '')
       try {
+        if (request.method === 'GET' && route === 'attachment-materialize') {
+          const attachmentId = url.searchParams.get('attachmentId') ?? ''
+          const name = url.searchParams.get('name') ?? 'attachment'
+          const bytes = Number(url.searchParams.get('bytes') ?? '0')
+          if (!attachmentId.startsWith('sha256:') || !Number.isSafeInteger(bytes) || bytes <= 0) {
+            throw new RouteRefusal('attachment-materialize requires a sha256 attachmentId and byte count', 400)
+          }
+          const attachments = hostService<{ readFileStream(ref: unknown): AsyncIterable<Uint8Array> }>(ctx, 'attachments')
+          if (attachments === undefined) throw new RouteRefusal('attachment store is unavailable', 501)
+          const chunks: Uint8Array[] = []
+          for await (const chunk of attachments.readFileStream({ attachmentId, name, bytes })) chunks.push(chunk)
+          const safeName = basename(name).replace(/[^\p{L}\p{N}._-]+/gu, '_') || 'attachment'
+          const directory = join(resolveWorkspaceRoot(), '.dsh-attachment-preview')
+          await mkdir(directory, { recursive: true })
+          const relativePath = '.dsh-attachment-preview/' + attachmentId.slice('sha256:'.length, 'sha256:'.length + 12) + '-' + safeName
+          await writeFile(join(resolveWorkspaceRoot(), relativePath), Buffer.concat(chunks))
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ path: relativePath, name: safeName }))
+          return
+        }
+        if (request.method === 'GET' && route === 'attachment-preview') {
+          const attachmentId = url.searchParams.get('attachmentId') ?? ''
+          const name = url.searchParams.get('name') ?? 'attachment'
+          const bytes = Number(url.searchParams.get('bytes') ?? '0')
+          if (!attachmentId.startsWith('sha256:') || !Number.isSafeInteger(bytes) || bytes <= 0) {
+            throw new RouteRefusal('attachment-preview requires a sha256 attachmentId and byte count', 400)
+          }
+          const attachments = hostService<{ readFileStream(ref: unknown): AsyncIterable<Uint8Array> }>(ctx, 'attachments')
+          if (attachments === undefined) throw new RouteRefusal('attachment store is unavailable', 501)
+          const chunks: Uint8Array[] = []
+          for await (const chunk of attachments.readFileStream({ attachmentId, name, bytes })) chunks.push(chunk)
+          const body = Buffer.concat(chunks)
+          const extension = name.toLowerCase().split('.').pop() ?? ''
+          const contentType = extension === 'png' ? 'image/png'
+            : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg'
+              : extension === 'gif' ? 'image/gif'
+                : extension === 'webp' ? 'image/webp'
+                  : extension === 'pdf' ? 'application/pdf'
+                    : extension === 'md' ? 'text/markdown; charset=utf-8'
+                      : extension === 'json' ? 'application/json; charset=utf-8'
+                        : extension === 'txt' || extension === 'log' ? 'text/plain; charset=utf-8'
+                          : 'application/octet-stream'
+          response.writeHead(200, {
+            'content-type': contentType,
+            'content-length': String(body.length),
+            'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(name)}`,
+            'cache-control': 'private, no-store',
+          })
+          response.end(body)
+          return
+        }
         const payload = await readJsonBody(request)
         const body = await handleRoomRequest(
           route, request.method ?? 'GET', payload, url, backend, runtimes, closeRoom, ctx,

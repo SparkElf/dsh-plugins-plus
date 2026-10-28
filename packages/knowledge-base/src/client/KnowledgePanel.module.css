@@ -297,6 +297,10 @@
   flex: none;
   display: flex;
   flex-direction: column;
+  /* A pin list is a shortcut, not a second tree: cap it so a long list scrolls
+     inside the band instead of pushing the knowledge tree down the rail. */
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 /* The tree band takes the remaining height, so its scroll region is the one that
