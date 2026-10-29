@@ -93,7 +93,6 @@ import { useFavorites } from './useFavorites.ts'
 import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
 import { usePinnedPaths } from './usePinnedPaths.ts'
 import { useTreeState } from './useTreeState.ts'
-import { useViewMode } from './useViewMode.ts'
 import { DEFAULT_TREE_SORT, TREE_SORT_KEYS, useTreeSort } from './useTreeSort.ts'
 import { KnowledgeFileTree } from './KnowledgeFileTree.tsx'
 import { KnowledgeReferencePicker } from './KnowledgeReferencePicker.tsx'
@@ -726,7 +725,8 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // The layout preference is no longer switchable (the reader does not change views), so
   // the rail keeps one mode. The hook is retained rather than inlined because the stored
   // value still has to be READ: a reader who once chose the explorer keeps it.
-  const viewMode = useViewMode(state.kind === 'ready' && state.config.mountPoint !== '')
+  // Knowledge base always uses the Better Sidebar explorer; list/grid are no longer offered.
+  const viewMode: { mode: 'list' | 'grid' | 'explorer' } = { mode: 'explorer' }
   /** The tree's row order, remembered in this browser (see `useTreeSort`). */
   const sort = useTreeSort(state.kind === 'ready' ? state.config.mountPoint : '')
 

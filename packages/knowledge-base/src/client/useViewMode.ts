@@ -43,7 +43,7 @@ export interface ViewModeStore {
  * @returns The store.
  */
 export function useViewMode(enabled: boolean): ViewModeStore {
-  const [mode, setLocalMode] = useState<ViewMode>('list')
+  const [mode, setLocalMode] = useState<ViewMode>('explorer')
   const [error, setError] = useState<string | undefined>(undefined)
 
   const read = useCallback(async (): Promise<void> => {
@@ -67,12 +67,12 @@ export function useViewMode(enabled: boolean): ViewModeStore {
       setLocalMode(
         body.mode === 'grid' ? 'grid'
           : body.mode === 'explorer' ? 'explorer'
-            : 'list',
+            : 'explorer',
       )
       setError(undefined)
     } catch (failure: unknown) {
       // A failed read leaves the default layout rather than a stale one.
-      setLocalMode('list')
+      setLocalMode('explorer')
       setError(failure instanceof Error ? failure.message : undefined)
     }
   }, [enabled])
