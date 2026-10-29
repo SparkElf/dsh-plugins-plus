@@ -60,4 +60,17 @@ minimumReleaseAgeExclude:
 # from `src/`. Linking a working copy would make the profile depend on whatever
 # happens to be on this machine.
 overrides:
-  dsh-better-sidebar: npm:@sparkelf/dsh-better-sidebar@0.26.0-sparkelf.3
+  dsh-better-sidebar: npm:@sparkelf/dsh-better-sidebar@0.28.0-sparkelf.grid.17
+  '@deepseek-ai/dsh-client-locale': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-shortcuts': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-conversation': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-dockkit': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-layout': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-primitives': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-renderer': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-session': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-settings': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-sidebar': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-sidebar-right': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-slots': 0.2.1-rc.2
+  '@deepseek-ai/dsh-client-ui-tool': 0.2.1-rc.2
