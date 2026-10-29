@@ -1,0 +1,118 @@
+{
+ "target": "http://127.0.0.1:32008",
+ "samples": [
+  {
+   "t": 168.4,
+   "pages": 0,
+   "spans": 0,
+   "boxes": 0,
+   "boxPages": [],
+   "floatingBoxes": 0,
+   "boxPage": null,
+   "boxVisible": false,
+   "boxTop": null,
+   "boxHeight": null,
+   "scrollTop": null,
+   "scrollHeight": null,
+   "clientHeight": null
+  },
+  {
+   "t": 1422,
+   "pages": 19,
+   "spans": 0,
+   "boxes": 0,
+   "boxPages": [],
+   "floatingBoxes": 0,
+   "boxPage": null,
+   "boxVisible": false,
+   "boxTop": null,
+   "boxHeight": null,
+   "scrollTop": 0,
+   "scrollHeight": 18986,
+   "clientHeight": 1024
+  },
+  {
+   "t": 1758,
+   "pages": 19,
+   "spans": 25,
+   "boxes": 0,
+   "boxPages": [],
+   "floatingBoxes": 0,
+   "boxPage": null,
+   "boxVisible": false,
+   "boxTop": null,
+   "boxHeight": null,
+   "scrollTop": 0,
+   "scrollHeight": 18986,
+   "clientHeight": 1024
+  },
+  {
+   "t": 1919.2,
+   "pages": 19,
+   "spans": 34,
+   "boxes": 1,
+   "boxPages": [
+    14
+   ],
+   "floatingBoxes": 1,
+   "boxPage": 14,
+   "boxVisible": true,
+   "boxTop": 375,
+   "boxHeight": 589,
+   "scrollTop": 13036,
+   "scrollHeight": 19047,
+   "clientHeight": 1024
+  },
+  {
+   "t": 2737,
+   "pages": 19,
+   "spans": 224,
+   "boxes": 1,
+   "boxPages": [
+    14
+   ],
+   "floatingBoxes": 1,
+   "boxPage": 14,
+   "boxVisible": true,
+   "boxTop": 376,
+   "boxHeight": 589,
+   "scrollTop": 13036,
+   "scrollHeight": 19047,
+   "clientHeight": 1024
+  },
+  {
+   "t": 3382.1,
+   "pages": 19,
+   "spans": 402,
+   "boxes": 1,
+   "boxPages": [
+    14
+   ],
+   "floatingBoxes": 0,
+   "boxPage": 14,
+   "boxVisible": true,
+   "boxTop": 276,
+   "boxHeight": 624,
+   "scrollTop": 13215,
+   "scrollHeight": 19225,
+   "clientHeight": 1024
+  },
+  {
+   "t": 3500.5,
+   "pages": 19,
+   "spans": 406,
+   "boxes": 1,
+   "boxPages": [
+    14
+   ],
+   "floatingBoxes": 0,
+   "boxPage": 14,
+   "boxVisible": true,
+   "boxTop": 276,
+   "boxHeight": 624,
+   "scrollTop": 13275,
+   "scrollHeight": 19284,
+   "clientHeight": 1024
+  }
+ ]
+}

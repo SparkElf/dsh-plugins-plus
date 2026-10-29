@@ -85,6 +85,21 @@
   margin-left: auto;
 }
 
+/* A folded rail is 56px wide. The brand glyph and the 28px fold button cannot
+   both fit in that strip with the expanded row's 12px/6px insets: the button
+   is pushed past the right edge (and its focus ring becomes the stray dot at
+   the left). Folded, the toggle is the only thing this row has to show, so it
+   is centred and the brand/insets are dropped. */
+.bodyCollapsed .railTop {
+  padding: 0 14px;
+  justify-content: center;
+}
+
+.bodyCollapsed .railBrand,
+.bodyCollapsed .railTopSpacer {
+  display: none;
+}
+
 /* ---- Section header (基准 A) ----
    The metrics are the shell's own browser header, measured live on the running
    shell on 2026-10-17 and read from

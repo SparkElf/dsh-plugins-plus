@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "manual",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-29T00:00:00.000Z"
+  },
+  "title": "知识库向量化",
+  "description": "为指定文档或目录显式建立/补齐向量索引；可 dryRun 预估，默认只补缺失或过期向量，目录递归并跳过无权文档，不要自动对全库执行。",
+  "summary": "先确认用户明确指定的文档或目录，再用 kb_vectorize dryRun 预估；向量只影响召回，不改变 citation、token、摘要或 outline。检索未启用向量时明确报错，不静默降级。"
+}

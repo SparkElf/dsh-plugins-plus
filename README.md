@@ -17,6 +17,7 @@
 - `@sparkelf/dsh-dataops-integration`：独立DSH的完整DataOps Host + Web Client连接插件，拥有Authorization Code + PKCE、持久target、session-lifetime access credential、Settings和generic MCP组合；不修改DSH core，也不在DataOps托管容器中挂载。
 - `@sparkelf/dsh-dataops-managed`：DataOps托管workspace的JWT与HTTP MCP插件；复用当前DataOps会话权限，不发起OAuth，也不提供连接或断开操作。
 - `@sparkelf/dsh-chart`：完整的 Host + Web Client 交互图表 capability。Host 记录可 durable replay 的完整 ECharts option，Client 在 Harness 消息流中渲染并负责 resize、主题切换和 disposal。当前为 opt-in 发布候选，不默认挂载，也不在正式发布前声明生产 npm pin。
+- `@sparkelf/dsh-credential-manager`：Host + Web Client 凭据管理插件，提供凭据列表、连接器模板、工作区 vault 持久化与右侧栏管理入口；不依赖 Plus 产品分支。
 - `@sparkelf/dsh-query-result-analysis`：有界分页、checkpoint和hierarchical reduction的独立DataOps query-result分析插件；每个模型批次和归并进入持久DSH子会话，由普通AgentLoop记录模型可见内容并拥有重试。
 - `@sparkelf/dsh-mineru`：独立的PDF解析工具。它直接读取official file upload向模型提供的只读路径并调用MinerU，不接管附件上传、prompt或Client UI。
 - `@sparkelf/dsh-officecli`：把官方 OfficeCLI 二进制接入单入口 `officecli` 工具；结构化 argv 原样执行，直接读写原始 `.docx/.xlsx/.pptx`，不另造预览链路。

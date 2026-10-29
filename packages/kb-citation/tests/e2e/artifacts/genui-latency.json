@@ -1,0 +1,179 @@
+{
+ "ok": true,
+ "target": "http://127.0.0.1:32008",
+ "budgetMs": 3000,
+ "repeatBudgetMs": 1500,
+ "cold": {
+  "firstBoxMs": 1764,
+  "firstVisibleMs": 1764.1,
+  "page": 14
+ },
+ "warm": {
+  "firstBoxMs": 38.5,
+  "firstVisibleMs": 38.5,
+  "page": 14
+ },
+ "timing": [
+  {
+   "at": 1792893346220,
+   "text": "[kbtiming] click 14782 "
+  },
+  {
+   "at": 1792893346220,
+   "text": "[kbtiming] resolved 14783 /workspace/kb/global/rag-eval-fixtures/0911南宁低空投资有限责任公司董事会议事规则（试行）.docx"
+  },
+  {
+   "at": 1792893346227,
+   "text": "[kbtiming] resource-open 14790 "
+  },
+  {
+   "at": 1792893346352,
+   "text": "[kbtiming] document-tab 14913 0911南宁低空投资有限责任公司董事会议事规则（试行）.docx"
+  },
+  {
+   "at": 1792893346352,
+   "text": "[kbtiming] apply-docx 14914 ordinal=12 paragraphs=1"
+  },
+  {
+   "at": 1792893346355,
+   "text": "[kbtiming] docx-start 14916 ordinal=12"
+  },
+  {
+   "at": 1792893347526,
+   "text": "[kbtiming] pdf-preview 16087 +1171ms"
+  },
+  {
+   "at": 1792893347526,
+   "text": "[kbtiming] pages-shells 16088 19 pages"
+  },
+  {
+   "at": 1792893347526,
+   "text": "[kbtiming] page-plan 16089 primary=14,13 window=14,13,15 confirmed=-"
+  },
+  {
+   "at": 1792893347958,
+   "text": "[kbtiming] pdf-text-boxes 16519 p14 items=84"
+  },
+  {
+   "at": 1792893347961,
+   "text": "[kbtiming] fast-painted 16523 1 boxes"
+  },
+  {
+   "at": 1792893347964,
+   "text": "[kbtiming] first-box-visible 16526 fast"
+  },
+  {
+   "at": 1792893347965,
+   "text": "[kbtiming] page-scroll 16527 p14"
+  },
+  {
+   "at": 1792893347983,
+   "text": "[kbtiming] apply-done 16545 "
+  },
+  {
+   "at": 1792893348730,
+   "text": "[kbtiming] page-text-ready 17292 p14 +766ms"
+  },
+  {
+   "at": 1792893348737,
+   "text": "[kbtiming] fast-refined 17298 10 matches"
+  },
+  {
+   "at": 1792893349975,
+   "text": "[kbtiming] click 18536 "
+  },
+  {
+   "at": 1792893349975,
+   "text": "[kbtiming] resolved 18537 /workspace/kb/global/rag-eval-fixtures/0911南宁低空投资有限责任公司董事会议事规则（试行）.docx"
+  },
+  {
+   "at": 1792893349977,
+   "text": "[kbtiming] resource-open 18539 "
+  },
+  {
+   "at": 1792893349977,
+   "text": "[kbtiming] document-tab 18540 0911南宁低空投资有限责任公司董事会议事规则（试行）.docx"
+  },
+  {
+   "at": 1792893349984,
+   "text": "[kbtiming] apply-docx 18546 ordinal=12 paragraphs=1"
+  },
+  {
+   "at": 1792893349984,
+   "text": "[kbtiming] docx-start 18546 ordinal=12"
+  },
+  {
+   "at": 1792893349985,
+   "text": "[kbtiming] pdf-preview 18547 +1ms"
+  },
+  {
+   "at": 1792893349985,
+   "text": "[kbtiming] pages-shells 18547 19 pages"
+  },
+  {
+   "at": 1792893349985,
+   "text": "[kbtiming] page-plan 18547 primary=14 window=14 confirmed=14"
+  },
+  {
+   "at": 1792893349987,
+   "text": "[kbtiming] page-ready 18550 p14 spans=80"
+  },
+  {
+   "at": 1792893349990,
+   "text": "[kbtiming] primary-scan 18553 10 matches"
+  },
+  {
+   "at": 1792893349995,
+   "text": "[kbtiming] painted 18555 1 boxes"
+  },
+  {
+   "at": 1792893349996,
+   "text": "[kbtiming] land-start 18556 "
+  },
+  {
+   "at": 1792893349996,
+   "text": "[kbtiming] first-box-visible 18556 immediate"
+  },
+  {
+   "at": 1792893350013,
+   "text": "[kbtiming] apply-done 18575 "
+  },
+  {
+   "at": 1792893350035,
+   "text": "[kbtiming] first-box-visible 18597 +41ms"
+  },
+  {
+   "at": 1792893350035,
+   "text": "[kbtiming] landed 18598 visible"
+  }
+ ],
+ "coldSamples": [
+  {
+   "at": 1828.9,
+   "boxes": 1,
+   "hasBox": true,
+   "hasScrollport": true,
+   "page": 14,
+   "floating": 1,
+   "visible": true,
+   "box": {
+    "top": 375,
+    "bottom": 964,
+    "height": 589
+   },
+   "view": {
+    "top": 76,
+    "bottom": 1100
+   },
+   "scrollTop": 13036,
+   "scrollHeight": 19047,
+   "clientHeight": 1024,
+   "p14": {
+    "top": 95,
+    "bottom": 1082,
+    "height": 987,
+    "spans": 0
+   }
+  }
+ ]
+}

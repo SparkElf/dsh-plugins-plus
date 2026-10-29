@@ -1,0 +1,266 @@
+{
+ "target": "http://127.0.0.1:32008",
+ "hotswap": true,
+ "noTerms": true,
+ "firsts": {
+  "firstBoxAt": 1784.3,
+  "firstHitAt": null
+ },
+ "timeline": [
+  {
+   "t": 186.9,
+   "pages": 0,
+   "spans": 0,
+   "boxes": 0,
+   "boxPage": null,
+   "boxVisible": false,
+   "hits": 0,
+   "hitPages": [],
+   "legend": 0,
+   "rendering": true,
+   "scrollTop": null,
+   "scrollHeight": null,
+   "clientHeight": null
+  },
+  {
+   "t": 1204.2,
+   "pages": 0,
+   "spans": 0,
+   "boxes": 0,
+   "boxPage": null,
+   "boxVisible": false,
+   "hits": 0,
+   "hitPages": [],
+   "legend": 0,
+   "rendering": true,
+   "scrollTop": null,
+   "scrollHeight": null,
+   "clientHeight": null
+  },
+  {
+   "t": 3138.5,
+   "pages": 9,
+   "spans": 472,
+   "boxes": 1,
+   "boxPage": 8,
+   "boxVisible": true,
+   "hits": 0,
+   "hitPages": [],
+   "legend": 0,
+   "rendering": false,
+   "scrollTop": 7103,
+   "scrollHeight": 9119,
+   "clientHeight": 1024
+  },
+  {
+   "t": 4148,
+   "pages": 9,
+   "spans": 538,
+   "boxes": 1,
+   "boxPage": 8,
+   "boxVisible": true,
+   "hits": 0,
+   "hitPages": [],
+   "legend": 0,
+   "rendering": false,
+   "scrollTop": 6864,
+   "scrollHeight": 9297,
+   "clientHeight": 1024
+  },
+  {
+   "t": 6155.2,
+   "pages": 9,
+   "spans": 538,
+   "boxes": 1,
+   "boxPage": 8,
+   "boxVisible": true,
+   "hits": 0,
+   "hitPages": [],
+   "legend": 0,
+   "rendering": false,
+   "scrollTop": 6864,
+   "scrollHeight": 9297,
+   "clientHeight": 1024
+  },
+  {
+   "t": 11162.7,
+   "pages": 9,
+   "spans": 538,
+   "boxes": 1,
+   "boxPage": 8,
+   "boxVisible": true,
+   "hits": 0,
+   "hitPages": [],
+   "legend": 0,
+   "rendering": false,
+   "scrollTop": 6864,
+   "scrollHeight": 9297,
+   "clientHeight": 1024
+  }
+ ],
+ "debug": {
+  "apply": {
+   "path": "/workspace/kb/global/rag-eval-fixtures/0911低空公司经营班子会议事规则（试行）.docx",
+   "chunkId": "1fe09e0dbfb4184d",
+   "chunkOrdinal": 6,
+   "quoteChars": 60,
+   "chunkTextChars": 523,
+   "paragraphChars": 60,
+   "paragraphs": 1,
+   "queryTerms": [],
+   "pages": []
+  }
+ },
+ "htmlSnippet": {
+  "page": "1",
+  "spans": [
+   "南宁低空投资有限责任公司",
+   "经营班子会议事规则（试行）",
+   "第一章",
+   " ",
+   "总则",
+   "第一条",
+   " ",
+   "为完善南宁低空投资有限责任公司(以下简称“低",
+   "空公司”)的经营和管理，保障经营班子依法合规行使职权，履行",
+   "职责，发挥经理层谋经营、抓落实、强管理作用，保证低空公司",
+   "经营班子会议决策的科学化、规范化、程序化，根据《中华人民",
+   "共和国公司法》《南宁低空投资有限责任公司章程》(以下简称",
+   "《公司章程》)及有关法律法规和规范性文件等规定，结合低空",
+   "公司实际情况，特制定本规则。",
+   "第二条 经营班子会负责组织实施董事会决议，研究需要提交",
+   "董事会审议事项，决定低空公司日常经营管理工作事项，在《公",
+   "司章程》规定和董事会授权范围内行使职权，对董事会负总责。",
+   "第三条 经营班子会实行总经理负责制，其他经营班子成员参",
+   "加会议，对会议议题表达自己的意见，并执行经营班子会决定。",
+   "第二章",
+   " ",
+   "经营班子会议事范围",
+   "第四条 经营班子会会议决策事项：",
+   "(一)落实低空公司董事会决议的具体措施；",
+   "(二)低空公司具体规章制度的制定、修改及废除；"
+  ]
+ },
+ "consoleLines": [
+  {
+   "at": 1792914666474,
+   "type": "info",
+   "text": "[genui] client active; fence-channel=dom"
+  },
+  {
+   "at": 1792914668031,
+   "type": "warning",
+   "text": "[.WebGL-0x248405340000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+  },
+  {
+   "at": 1792914669744,
+   "type": "warning",
+   "text": "[.WebGL-0x248405340000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+  },
+  {
+   "at": 1792914669758,
+   "type": "warning",
+   "text": "[.WebGL-0x248405340000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+  },
+  {
+   "at": 1792914669767,
+   "type": "warning",
+   "text": "[.WebGL-0x248405340000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+  },
+  {
+   "at": 1792914687637,
+   "type": "error",
+   "text": "Error: Minified React error #130; visit https://reactjs.org/docs/error-decoder.html?invariant=130&args[]=undefined&args[]= for the full message or use the non-minified dev environment for full errors and additional helpful warnings.\n    at Vl (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:49805)\n    at K (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:54:7884)\n    at ye (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:54:9318)\n    at it (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:54:11555)\n    at Ot (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:1479)\n    at ch (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:46166)\n    at oh (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:40085)\n    at Qk (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:40013)\n    at Zl (http://1"
+  },
+  {
+   "at": 1792914687637,
+   "type": "error",
+   "text": "slot entry crashed in 'conversation.session.header.actions': Error: Minified React error #130; visit https://reactjs.org/docs/error-decoder.html?invariant=130&args[]=undefined&args[]= for the full message or use the non-minified dev environment for full errors and additional helpful warnings.\n    at Vl (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:49805)\n    at K (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:54:7884)\n    at ye (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:54:9318)\n    at it (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:54:11555)\n    at Ot (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:1479)\n    at ch (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:46166)\n    at oh (http://127.0.0.1:32008/assets/index-A6X4mOD3.js:56:40085)\n    at Qk (http://127.0.0.1"
+  },
+  {
+   "at": 1792914687848,
+   "type": "error",
+   "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  },
+  {
+   "at": 1792914688861,
+   "type": "debug",
+   "text": "[kbtiming] click 24030 "
+  },
+  {
+   "at": 1792914688862,
+   "type": "debug",
+   "text": "[kbtiming] resolved 24032 /workspace/kb/global/rag-eval-fixtures/0911低空公司经营班子会议事规则（试行）.docx"
+  },
+  {
+   "at": 1792914688871,
+   "type": "debug",
+   "text": "[kbtiming] resource-open 24041 "
+  },
+  {
+   "at": 1792914689060,
+   "type": "debug",
+   "text": "[kbtiming] document-tab 24220 0911低空公司经营班子会议事规则（试行）.docx"
+  },
+  {
+   "at": 1792914689060,
+   "type": "debug",
+   "text": "[kbtiming] apply-docx 24225 ordinal=6 paragraphs=1"
+  },
+  {
+   "at": 1792914689061,
+   "type": "debug",
+   "text": "[kbtiming] docx-start 24228 ordinal=6"
+  },
+  {
+   "at": 1792914690148,
+   "type": "debug",
+   "text": "[kbtiming] pdf-preview 25317 +1089ms"
+  },
+  {
+   "at": 1792914690148,
+   "type": "debug",
+   "text": "[kbtiming] pages-shells 25317 9 pages"
+  },
+  {
+   "at": 1792914690149,
+   "type": "debug",
+   "text": "[kbtiming] page-plan 25317 primary=8,7 window=8,7,9 confirmed=-"
+  },
+  {
+   "at": 1792914690627,
+   "type": "debug",
+   "text": "[kbtiming] pdf-text-boxes 25796 p8 items=186"
+  },
+  {
+   "at": 1792914690629,
+   "type": "debug",
+   "text": "[kbtiming] fast-painted 25799 1 boxes"
+  },
+  {
+   "at": 1792914690631,
+   "type": "debug",
+   "text": "[kbtiming] first-box-visible 25801 fast"
+  },
+  {
+   "at": 1792914690632,
+   "type": "debug",
+   "text": "[kbtiming] page-scroll 25802 p8"
+  },
+  {
+   "at": 1792914690646,
+   "type": "debug",
+   "text": "[kbtiming] apply-done 25816 "
+  },
+  {
+   "at": 1792914691585,
+   "type": "debug",
+   "text": "[kbtiming] page-text-ready 26755 p8 +953ms"
+  },
+  {
+   "at": 1792914691593,
+   "type": "debug",
+   "text": "[kbtiming] fast-refined 26762 3 matches"
+  }
+ ]
+}
