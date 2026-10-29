@@ -128,7 +128,7 @@ const CONFIG = {
   sshKeyRef: 'KB_SSH_KEY',
   sshRemotePath: '/srv/kb',
   sshMountOptions: 'defaults',
-}
+} as unknown as Parameters<typeof localConfig>[0]
 
 /** Deployment context derived from the same config. */
 const PLAN: DeployPlanContext = {
