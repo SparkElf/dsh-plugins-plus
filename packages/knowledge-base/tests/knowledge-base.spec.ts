@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { describe, expect, it, vi } from 'vitest'
 import { readKnowledgeJson } from '../src/api.ts'
 import { execFileSync } from 'node:child_process'

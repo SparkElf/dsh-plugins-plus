@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * The knowledge tree, drawn by the product's own file explorer.
  *

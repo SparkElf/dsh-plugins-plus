@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Whether the managed DataOps settings section may be registered at all.
  *

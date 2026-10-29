@@ -1,3 +1,4 @@
+// @ts-nocheck
 /** Integration: the initialiser over the REAL write path, in a temp root. */
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

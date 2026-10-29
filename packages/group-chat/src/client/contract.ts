@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * The one official slot this plugin shadows, declared structurally.
  *

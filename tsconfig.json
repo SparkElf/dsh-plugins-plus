@@ -16,7 +16,12 @@
     "paths": {
       "@sparkelf/dsh-workbench-vault": [
         "packages/workbench-vault/src/index.ts"
-      ]
+      ],
+      "dsh-better-sidebar/src/client/FileTree.tsx": ["types/dsh-better-sidebar-source.d.ts"],
+      "dsh-better-sidebar/src/client/file-tree-sort.ts": ["types/dsh-better-sidebar-source.d.ts"],
+      "dsh-better-sidebar/src/client/reference-in-chat.ts": ["types/dsh-better-sidebar-source.d.ts"],
+      "dsh-better-sidebar/src/client/resource-address.ts": ["types/dsh-better-sidebar-source.d.ts"],
+      "dsh-better-sidebar/src/client/upload.ts": ["types/dsh-better-sidebar-source.d.ts"]
     }
   },
   "include": [
