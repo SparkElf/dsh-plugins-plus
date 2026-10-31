@@ -20,6 +20,34 @@ export type AuthState = 'unknown' | 'valid' | 'expired'
 
 let state: AuthState = 'unknown'
 
+/** One observer of the recorded credential observation. */
+export type AuthStateListener = (state: AuthState) => void
+
+const listeners = new Set<AuthStateListener>()
+
+/**
+ * Observe every recorded transition.
+ *
+ * The tool manager uses this to drop its disclosure as soon as any DataOps call reports a 401:
+ * the scope that produced the tool list can no longer be trusted, and waiting for another
+ * explicit sync would leave tools offered against an ended session. Listener failures are
+ * contained so a broken observer cannot turn a credential observation into a failed call.
+ * @param listener - Called with the new state after it is recorded.
+ * @returns The exact unsubscriber.
+ */
+export const onAuthStateChange = (listener: AuthStateListener): (() => void) => {
+  listeners.add(listener)
+  return () => { listeners.delete(listener) }
+}
+
+/** Record one observation and notify observers. */
+const setState = (next: AuthState): void => {
+  state = next
+  for (const listener of listeners) {
+    try { listener(next) } catch { /* observation must not fail the operation that saw it */ }
+  }
+}
+
 /**
  * Record that a DataOps call was accepted.
  *
@@ -27,12 +55,12 @@ let state: AuthState = 'unknown'
  * says the session is fine and the permission is not, so it must not raise the sign-in prompt.
  */
 export const noteAccepted = (): void => {
-  state = 'valid'
+  setState('valid')
 }
 
 /** Record that DataOps refused the credential, which means the session is over. */
 export const noteExpired = (): void => {
-  state = 'expired'
+  setState('expired')
 }
 
 /**
@@ -46,5 +74,5 @@ export const currentAuthState = (): AuthState => state
  * Test-only reset, so one case cannot leak its observation into the next.
  */
 export const resetAuthState = (): void => {
-  state = 'unknown'
+  setState('unknown')
 }

@@ -45,6 +45,7 @@ import {
   LOCAL_USER_ID,
   canWritePath,
   readSharedMineruUrl,
+  knowledgeBaseToolDisclosure,
   type KnowledgeError,
 } from '../src/index.ts'
 import {
@@ -192,6 +193,51 @@ function fakeHost(options: { token?: string; fetchImpl?: typeof fetch } = {}) {
   return { ctx, tools, routes, disposers }
 }
 
+/** Every permission key the shipped tool policies can require. */
+const ALL_DISCLOSURE_PERMISSIONS = [
+  'kb:file:read', 'kb:file:write', 'kb:file:delete', 'kb:file:extract',
+  'kb:audit:read', 'kb:grant:manage', 'kb:review:decide', 'kb:config:manage',
+  'workflow:read', 'workflow:publish', 'workflow:manage',
+  'workflow:review:decide', 'workflow:review:global',
+] as const
+
+/**
+ * A `/api/ai/review/context` reply the disclosure coordinator can decide from.
+ *
+ * `admin: false` models an ordinary APP_USER: a real permission list, but no
+ * reviewer capability, no global data scope and no admin role, so capability-gated
+ * tools stay withheld even when a broad file key is present.
+ */
+function reviewContext(
+  permissions: readonly string[],
+  options: { admin?: boolean } = {},
+): string {
+  const admin = options.admin ?? true
+  return JSON.stringify({
+    userId: 'u-disclosure',
+    roleCodes: admin ? ['SUPER_ADMIN'] : ['APP_USER'],
+    permissions: [...permissions],
+    dataScope: { all: admin, self: true, departmentCodes: [] },
+    review: {
+      canReview: admin,
+      canReviewGlobal: admin,
+      canManagePermissions: admin,
+      departments: [],
+    },
+  })
+}
+
+/** Fetch stub: answers the review context, `{}` for everything else. */
+function disclosureFetch(context: () => string): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/api/ai/review/context')) {
+      return new Response(context(), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+  }) as unknown as typeof fetch
+}
+
 /**
  * Drive one Host route the way the browser does: a JSON body in, one JSON reply
  * out. The reply is what the page renders, so asserting on it covers the whole
@@ -306,9 +352,15 @@ describe('host plugin', () => {
     expect(inject).toContain('webServer')
   })
 
-  it('registers the KB tools, five kb_file_* tools, kb_search, kb_chunk_get and kb_outline', () => {
-    const { ctx, tools } = fakeHost({ token: 't' })
+  it('registers the KB tools allowed by an administrator permission context', async () => {
+    const { ctx, tools } = fakeHost({
+      token: 't',
+      fetchImpl: disclosureFetch(() => reviewContext(ALL_DISCLOSURE_PERMISSIONS)),
+    })
     apply(ctx as never, CONFIG)
+    const disclosure = knowledgeBaseToolDisclosure(ctx as never)
+    expect(disclosure).toBeDefined()
+    await disclosure?.syncToolDisclosure()
     expect(tools.map(tool => tool.name).sort()).toEqual([
       'kb_file_delete',
       'kb_file_extract',
@@ -338,6 +390,75 @@ describe('host plugin', () => {
       'workflow_unpublish',
       'workflow_update',
     ].sort())
+  })
+
+  it('discloses only the reader surface and refreshes it when the context changes', async () => {
+    let permissions: readonly string[] = ['kb:file:read']
+    let admin = false
+    const { ctx, tools } = fakeHost({
+      token: 't',
+      fetchImpl: disclosureFetch(() => reviewContext(permissions, { admin })),
+    })
+    apply(ctx as never, CONFIG)
+    const disclosure = knowledgeBaseToolDisclosure(ctx as never)!
+    await disclosure.syncToolDisclosure()
+    const names = (): string[] => tools.map(tool => tool.name)
+    expect(names()).toContain('kb_search')
+    expect(names()).toContain('kb_outline')
+    expect(names()).not.toContain('kb_file_write')
+    expect(names()).not.toContain('kb_config_get')
+    expect(names()).not.toContain('workflow_publish')
+
+    permissions = ALL_DISCLOSURE_PERMISSIONS
+    admin = true
+    await disclosure.syncToolDisclosure()
+    expect(names()).toContain('kb_file_write')
+    expect(names()).toContain('kb_config_get')
+    expect(names()).toContain('workflow_publish')
+
+    permissions = ['kb:file:read']
+    admin = false
+    await disclosure.syncToolDisclosure()
+    expect(names()).not.toContain('kb_file_write')
+    expect(names()).toContain('kb_search')
+  })
+
+  it('registers the full surface synchronously in a personal deployment', () => {
+    const { ctx, tools } = fakeHost({ token: 't' })
+    apply(ctx as never, { ...CONFIG, baseUrl: '' })
+    // No backend to ask: the local owner holds every key, so the surface is already
+    // complete when `apply` returns rather than waiting on a microtask.
+    expect(tools).toHaveLength(27)
+    expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining([
+      'kb_search', 'kb_file_write', 'kb_config_get', 'workflow_publish', 'workflow_review_decide',
+    ]))
+  })
+
+  it('refreshes disclosure when the DataOps credential reference is updated', async () => {
+    let permissions: readonly string[] = ['kb:file:read']
+    let admin = false
+    const { ctx, tools } = fakeHost({
+      token: 't',
+      fetchImpl: disclosureFetch(() => reviewContext(permissions, { admin })),
+    })
+    const listeners: Array<(ref: string) => void> = []
+    ;(ctx as Record<string, unknown>).on = (name: string, listener: (ref: string) => void) => {
+      if (name === 'credentials/reference-updated') listeners.push(listener)
+      return () => undefined
+    }
+    apply(ctx as never, CONFIG)
+    const disclosure = knowledgeBaseToolDisclosure(ctx as never)!
+    await disclosure.syncToolDisclosure()
+    expect(tools.map(tool => tool.name)).not.toContain('kb_config_get')
+    expect(listeners).toHaveLength(1)
+
+    permissions = ALL_DISCLOSURE_PERMISSIONS
+    admin = true
+    listeners[0]?.('DATAOPS_ACCESS_TOKEN')
+    // The listener starts a refresh; awaiting the coordinator joins that pass (or
+    // starts the next one) and proves the surface caught up.
+    await disclosure.syncToolDisclosure()
+    expect(tools.map(tool => tool.name)).toContain('kb_config_get')
   })
 
   it('reports an unavailable credential instead of calling the backend', async () => {
@@ -534,9 +655,13 @@ describe('host plugin', () => {
     expect(result.body).toMatchObject({ code: 'forbidden' })
   })
 
-  it('disposes every registration through the effect scope', () => {
-    const { ctx, tools, disposers } = fakeHost({ token: 't' })
+  it('disposes every registration through the effect scope', async () => {
+    const { ctx, tools, disposers } = fakeHost({
+      token: 't',
+      fetchImpl: disclosureFetch(() => reviewContext(ALL_DISCLOSURE_PERMISSIONS)),
+    })
     apply(ctx as never, CONFIG)
+    await knowledgeBaseToolDisclosure(ctx as never)?.syncToolDisclosure()
     expect(tools).toHaveLength(27)
     // 18 are this plugin's kb_* tools; DataOps `kb_read` is external.
     expect(tools.filter(tool => tool.name.startsWith('kb_'))).toHaveLength(20)

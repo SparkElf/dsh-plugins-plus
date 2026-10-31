@@ -76,6 +76,7 @@ describe('apply', () => {
 
     await expect(apply(context as never, CONFIG)).resolves.toBeUndefined()
     expect(routes.map((route) => route.path).sort()).toEqual([
+      '/api/dsh-skill-center/connectors',
       '/integrations/dataops/auth-state',
       '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',
@@ -99,6 +100,7 @@ describe('apply', () => {
     // Five surfaces plus the auth-state read the sign-in prompt polls. Asserted by name rather
     // than only by count, so adding a route cannot silently displace one that a panel needs.
     expect(routes.map((route) => route.path).sort()).toEqual([
+      '/api/dsh-skill-center/connectors',
       '/integrations/dataops/auth-state',
       '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',

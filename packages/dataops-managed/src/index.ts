@@ -21,7 +21,15 @@ import {
 } from './settings-sync.ts'
 import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
 import { ReviewApi } from './review-api.ts'
-import { registerAiManagementTools } from './tools.ts'
+import { AiToolManager } from './tool-manager.ts'
+import {
+  CONNECTORS_PATH,
+  DATAOPS_CONNECTOR_ID,
+  buildConnectorView,
+  hasCapability,
+  readConnectorState,
+  writeConnectorState,
+} from './connector-state.ts'
 import {
   WorkspaceLimits,
   WorkspaceLimitsRejection,
@@ -366,7 +374,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
    * a failed connect is reported rather than thrown.
    */
   const connectExisting = async (): Promise<void> => {
-    if (await ctx.credentials.resolve(accessRef) === undefined) return
+    if (await ctx.credentials.resolve(accessRef) === undefined) {
+      // No credential means no scope to disclose from. Drop a set that belonged to a previous
+      // session before waiting for the next adoption.
+      aiTools.clear()
+      return
+    }
+    // Tool disclosure follows the credential, but it must never sit on the startup path: an
+    // unreachable DataOps is a state the settings routes report, not a reason to delay them.
+    void aiTools.refresh()
     try {
       await ensureMcp()
     } catch (error) {
@@ -449,7 +465,23 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   skillPlazaRef = skillPlaza
   const reviewApi = new ReviewApi(ctx, { baseUrl, credentialRef: config.credentialRef })
   reviewApiRef = reviewApi
-  ctx.effect(() => registerAiManagementTools(ctx, reviewApi), 'dataops-managed: skill and review tools')
+  /**
+   * The managed tool list follows the workspace's DataOps scope.
+   *
+   * `AiToolManager` registers only the skill/review tools the current principal can use and
+   * disposes them when the role changes. The credential event below is the existing auth-sync
+   * path: JWT adoption and the managed-auth route both go through `credentials.set`, which
+   * publishes this event after the write commits. The manager also observes the review-context
+   * route's answer, because a role edit does not change the JWT but does change the scope.
+   */
+  const aiTools = new AiToolManager(ctx, reviewApi)
+  ctx.effect(() => () => aiTools.dispose(), 'dataops-managed: skill and review tool disclosure')
+  ctx.effect(() => ctx.on('credentials/reference-updated', (ref) => {
+    if (String(ref) !== config.credentialRef) return
+    // A new token can belong to a different principal, so supersede any read that may still
+    // be answering for the previous one.
+    void aiTools.refresh(true)
+  }), 'dataops-managed: tool disclosure follows the DataOps credential')
   const workspaceLimits = new WorkspaceLimits(ctx, { baseUrl, credentialRef: config.credentialRef })
   setWorkspaceLimits(workspaceLimits)
   const workspaceUpgrade = new WorkspaceUpgrade(ctx, { baseUrl, credentialRef: config.credentialRef })
@@ -506,6 +538,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
       await ctx.credentials.set(accessRef, token)
       resetAuthState()
+      // A re-login can change the principal behind the workspace; re-read the scope before the
+      // next model turn. It stays off the response path for the same reason as activation;
+      // `force` makes it win over a read that captured the old token.
+      void aiTools.refresh(true)
       await ensureMcp()
       await adoptNow()
       response.writeHead(204, { 'cache-control': 'no-store' })
@@ -715,6 +751,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       if (api === undefined) { writeJson(response, 503, { error: 'review api is not active' }); return }
       try {
         const result = await api.request('/api/ai/review/context')
+        // The permission centre refreshes this route after a role edit. Reusing that answer
+        // keeps the model's tool list in step with the role without a second scope read.
+        aiTools.observeContext(result)
         writeJson(response, result.status, result.body)
       } catch (error) {
         ctx.logger.warn('dataops-managed: review context failed')
@@ -1091,6 +1130,69 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       writeJson(response, 200, { state: currentAuthState() })
     },
   }), 'dataops-managed: auth state route')
+
+  /**
+   * The skill center's connector tab. The route is a same-origin presentation bridge: reads
+   * return only capabilities the current scope can use, and writes persist the connector's own
+   * enable state. It never substitutes for a DataOps authorization decision.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: CONNECTORS_PATH,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      try {
+        if (request.method === 'GET') {
+          if (aiTools.currentScope() === undefined) await aiTools.refresh()
+          const state = await readConnectorState()
+          writeJson(response, 200, { connectors: [buildConnectorView(aiTools.currentScope(), state)] })
+          return
+        }
+        if (request.method === 'POST') {
+          const body = await readJson(request)
+          if (body === null) {
+            writeJson(response, 400, { error: 'connector state requires a JSON body' })
+            return
+          }
+          if (body.connectorId !== DATAOPS_CONNECTOR_ID) {
+            writeJson(response, 404, { error: 'unknown connector' })
+            return
+          }
+          const state = await readConnectorState()
+          const capabilityId = typeof body.capabilityId === 'string' ? body.capabilityId : undefined
+          if (capabilityId !== undefined) {
+            if (!hasCapability(capabilityId)) {
+              writeJson(response, 400, { error: 'unknown capability' })
+              return
+            }
+            if (!buildConnectorView(aiTools.currentScope(), state).capabilities.some(row => row.id === capabilityId)) {
+              writeJson(response, 403, { error: 'capability is not available to this account' })
+              return
+            }
+            if (typeof body.enabled !== 'boolean') {
+              writeJson(response, 400, { error: 'capability state requires enabled:boolean' })
+              return
+            }
+            state.capabilities[capabilityId] = body.enabled
+          } else {
+            if (typeof body.enabled !== 'boolean') {
+              writeJson(response, 400, { error: 'connector state requires enabled:boolean' })
+              return
+            }
+            state.enabled = body.enabled
+          }
+          await writeConnectorState(state)
+          writeJson(response, 200, { connectors: [buildConnectorView(aiTools.currentScope(), state)] })
+          return
+        }
+        response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' })
+        response.end()
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: connector catalogue route failed')
+        ctx.logger.warn(error)
+        writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'dataops-managed: skill-center connector catalogue')
 
   await connectExisting()
 }

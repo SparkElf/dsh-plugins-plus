@@ -40,6 +40,38 @@ index tooling over a mounted directory. Runs standalone or against a DataOps bac
 路径校验、上传、提取、搜索、预览这些核心链路两种形态共用同一份实现——区别只是权限判据
 从「问后端」变成「查本地边界」。
 
+## 工具按权限披露
+
+模型看到的工具清单由 `src/toolDisclosure.ts` 的协调器决定，不在每个 `execute()` 里重复查
+权限树。策略按组划分：
+
+| 组 | 工具 | 要求 |
+| --- | --- | --- |
+| `read` | `kb_search`、`kb_chunk_get`、`kb_outline`、`kb_outline_rewrite`、`kb_vectorize`、`workflow_list` | `kb:file:read` / `workflow:read`，具体到工具 |
+| `write` | `kb_file_write`、`kb_file_move`、`kb_file_delete`、`kb_file_mkdir`、`kb_file_extract`、`kb_outline_save` | `kb:file:write` / `kb:file:delete` / `kb:file:extract`；`kb_outline_save` 同时要求读和写 |
+| `manage` | `kb_config_get`、`kb_config_update`、`kb_grant_list`、`kb_grant_set`、`kb_audit_list`、`kb_review_list`、`kb_review_decide`、`kb_sync`、`kb_index_rebuild`、`workflow_unpublish`、`workflow_review_*` | 对应的 manage / audit / review / config 权限，或审核/超管能力 |
+| `publish` | `workflow_publish`、`workflow_update` | `workflow:publish`；`visibility=global` 仍在调用内检查 `workflow:review:global` |
+
+披露点（都是插件已有的权限读取位置，没有新增每调用查询）：
+
+- 插件初始化：个人版用本地全权上下文同步注册；团队版异步读取 `/api/ai/review/context`，
+  读到之前不注册任何工具（fail-closed）。
+- `status` 路由：页面每次加载本来就会读一次权限上下文，这里把同一个上下文交给协调器，
+  不额外请求后端。
+- 带权限映射的 `/knowledge-base/api/*` 路由：路由门禁已经读到的上下文同时刷新工具面。
+- `credentials/reference-updated`：DataOps 令牌指向的凭据更新时重新同步。
+
+**已知缺口：** DataOps 目前没有「角色变更」推送事件。角色在后台变化、但令牌未更新时，
+工具面要到下一次 `status` 请求或下一次带权限门禁的 API 请求才会更新；模型在两者之间开始的
+一个 turn 仍可能看到旧工具面。旧工具面只会导致后端拒绝调用，不会造成越权。权限上下文读取
+失败、或后端返回空权限列表（旧版/未知后端）时，协调器按无权限处理并 dispose 全部工具，
+同时记录原因。需要主动刷新时，宿主可通过
+`knowledgeBaseToolDisclosure(ctx).syncToolDisclosure()` 触发一次。
+
+路径级 `canRead` / `canWrite`（以及审计、授权、审核队列的部门范围过滤）保留在工具执行内：
+它们决定「可见工具能碰哪些数据」，不是「工具是否出现」。DataOps 后端仍是每次请求的最终
+授权边界。
+
 ## 本地验证一个个人版
 
 个人版不依赖任何后端，所以可以直接起一个临时 profile 验证四条链路：

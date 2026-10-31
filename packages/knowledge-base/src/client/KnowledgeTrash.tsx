@@ -60,7 +60,9 @@ type LoadState =
  * @throws when the route refuses or answers with something that is not JSON.
  */
 async function callRoute<T>(route: string, body?: unknown): Promise<T> {
-  const response = await fetch(`/knowledge-base/api/${route}`, {
+  // Resolve against the document base so a deployment under a path prefix
+  // (the portal serves the DSH at /dsh/) keeps the plugin's Host routes.
+  const response = await fetch(new URL(`knowledge-base/api/${route}`, document.baseURI), {
     method: body === undefined ? 'GET' : 'POST',
     credentials: 'same-origin',
     ...(body === undefined

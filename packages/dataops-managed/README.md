@@ -16,6 +16,10 @@ DataOps设置中的“应用万相品牌”默认开启，并在本机浏览器�
 
 本包增加命名空间化DataOps MCP tool schema，但不把JWT写入system prompt、tool参数、结果或session log。认证本身不增加token或改变KV cache。
 
+### 工具按权限披露
+
+工作区的DataOps角色决定模型能看到哪些技能/审核工具：插件在JWT变更、首次连接和审核上下文刷新时读取`/api/ai/review/context`，按`skill:*`能力与审核角色注册或注销工具；没有能力的工具不会出现在模型工具列表中。工具执行时不再重复读取角色，DataOps后端仍对每次API调用做最终授权、参数校验、审批与审计。`dataops_api_docs`只向「超级管理员」披露，用于只读检索`/api/openapi.json`。同一份 scope 还会通过`ctx.skills.useViewer`约束技能目录；技能中心的连接器 Tab 读取`/api/dsh-skill-center/connectors`，未授权能力不会出现在目录中。
+
 ### 已知限制
 
 - JWT尚未同步或DataOps拒绝当前权限时，MCP client直接呈现对应连接或工具错误。
@@ -35,6 +39,10 @@ The Apply Wanxiang branding setting defaults on and persists in the local browse
 ### Model Experience
 
 The package adds namespaced DataOps MCP tool schemas but never places the JWT in the system prompt, tool arguments, results, or Session log. Authentication adds no model tokens and does not affect the KV cache.
+
+### Permission-Based Tool Disclosure
+
+The workspace's DataOps role decides which skill and review tools the model can see. The plugin reads `/api/ai/review/context` when the JWT changes, on the first connect, and whenever the review-context route refreshes, then registers or disposes tools according to the `skill:*` capabilities and review role. A tool the principal cannot use is never offered. Execution does not re-read the role; DataOps still performs final authorization, parameter validation, approval and audit on every API call. `dataops_api_docs` is disclosed only to 超级管理员 and searches `/api/openapi.json` read-only. The same scope is applied to the skill catalog through `ctx.skills.useViewer`; the skill center's connector tab reads `/api/dsh-skill-center/connectors`, which omits capabilities the account cannot use.
 
 ### Known Limitations
 

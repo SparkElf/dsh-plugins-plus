@@ -20,8 +20,17 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import { colors } from './theme.ts'
+import {
+  fetchConnectorState,
+  filterConnectorTasks,
+  saveConnectorState,
+  visibleCapabilities,
+  type ConnectorState,
+} from './connector-state.ts'
+import { ConnectorCard, ConnectorDisabledState } from './ConnectorCard.tsx'
 
-export const inject = ['slots', 'locale', 'uiWorkspace', 'sessions', 'sidebarRight']
+export const inject = ['slots', 'locale', 'uiWorkspace', 'sessions', 'sidebarRight', 'layout']
 
 interface TaskItem {
   id: string
@@ -45,22 +54,13 @@ interface TaskItem {
   actions?: string[]
   dueAt?: string | null
   updatedAt: string
+  /** Connector that produced the row, when the Host carries it. */
+  connectorId?: string
+  /** Capability that produced the row, when the Host carries it. */
+  capabilityId?: string
 }
 
 const ROUTE = '/dsh-task-bus/api'
-
-const colors = {
-  panel: 'var(--dsw-alias-bg-layer-1, #ffffff)',
-  panelAlt: 'var(--dsw-alias-bg-layer-2, #f7f8fa)',
-  text: 'var(--dsw-alias-label-primary, #111827)',
-  muted: 'var(--dsw-alias-label-secondary, #6b7280)',
-  line: 'var(--dsw-alias-border-l1, #e5e7eb)',
-  accent: 'var(--dsw-alias-brand-primary, #2563eb)',
-  accentSoft: 'var(--dsw-alias-brand-primary-alpha, #eff6ff)',
-  warning: 'var(--dsw-alias-state-warning, #b45309)',
-  success: 'var(--dsw-alias-state-success, #047857)',
-  danger: 'var(--dsw-alias-state-danger, #b91c1c)',
-}
 
 const TASK_BUS_MODAL_CLASS = 'task-bus-center-modal'
 const TASK_BUS_HISTORY_CLASS = 'task-bus-history-modal'
@@ -146,6 +146,18 @@ const buttonStyle: CSSProperties = {
   cursor: 'pointer',
 }
 
+/** Capability filter chip; the active chip keeps the accent fill and stroke. */
+const filterChipStyle = (active: boolean): CSSProperties => ({
+  padding: '4px 10px',
+  borderRadius: 999,
+  border: '1px solid ' + (active ? colors.accent : colors.line),
+  background: active ? colors.accentSoft : 'transparent',
+  color: active ? colors.accent : colors.muted,
+  fontSize: 11,
+  lineHeight: 1.6,
+  cursor: 'pointer',
+})
+
 const statusTagTone = (status: string): TagTone => {
   if (status === 'completed') return 'success'
   if (status === 'cancelled') return 'neutral'
@@ -166,8 +178,18 @@ const relativeTime = (value: string) => {
 }
 
 const fetchJson = async <T,>(path: string): Promise<T> => {
-  const response = await fetch(ROUTE + path, { headers: { accept: 'application/json' } })
-  const payload = await response.json() as unknown
+  const attempt = async () => {
+    const response = await fetch(ROUTE + path, { headers: { accept: 'application/json' } })
+    const payload = await response.json() as unknown
+    return { response, payload }
+  }
+  let { response, payload } = await attempt()
+  // The managed session handshake runs in parallel with the panel mount; a 401
+  // here is usually "the cookie is not set yet", not an authorization failure.
+  if (response.status === 401) {
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    ;({ response, payload } = await attempt())
+  }
   if (!response.ok) {
     const message = payload !== null && typeof payload === 'object' && 'error' in payload
       ? String((payload as { error: unknown }).error)
@@ -549,67 +571,12 @@ const TaskDetail = ({ task, onBack }: { task: TaskItem; onBack: () => void }) =>
   )
 }
 
-const CONNECTOR_STORAGE_KEY = 'dsh.task-bus.dataops-connector.enabled'
-
-const DataOpsConnectorCard = ({
-  approvalCount,
-  connected,
-  enabled,
-  onEnable,
-}: {
-  approvalCount: number
-  connected: boolean
-  enabled: boolean
-  onEnable: () => void
-}) => {
-  const [detailOpen, setDetailOpen] = useState(false)
-  const status = !enabled ? '未启用' : connected ? '已连接' : '连接异常'
-  const tone: TagTone = !enabled ? 'neutral' : connected ? 'success' : 'danger'
-  return (
-    <article style={{ width: '100%', minWidth: 0, border: '1px solid ' + colors.line, borderRadius: 12, background: colors.panelAlt, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        <span aria-hidden="true" style={{ width: 32, height: 32, flex: 'none', borderRadius: 9, background: '#2563eb', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15" />
-            <path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15" />
-          </svg>
-        </span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: colors.text }}>万相 AI 中台</div>
-          <div style={{ marginTop: 2, fontSize: 10, color: colors.muted }}>DataOps 连接器</div>
-        </div>
-        <Tag tone={tone}>{status}</Tag>
-      </div>
-      <div style={{ fontSize: 11, lineHeight: 1.55, color: colors.muted }}>
-        接收万相 AI 中台的审批任务
-      </div>
-      {detailOpen ? (
-        <div style={{ borderTop: '1px solid ' + colors.line, paddingTop: 8, display: 'grid', gap: 6 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '68px minmax(0,1fr)', gap: 8, fontSize: 10 }}>
-            <span style={{ color: colors.muted }}>协议</span>
-            <span style={{ color: colors.text }}>DataOps Task Center API</span>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '68px minmax(0,1fr)', gap: 8, fontSize: 10 }}>
-            <span style={{ color: colors.muted }}>审批任务</span>
-            <span style={{ color: colors.text }}>{approvalCount}</span>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '68px minmax(0,1fr)', gap: 8, fontSize: 10 }}>
-            <span style={{ color: colors.muted }}>能力</span>
-            <span style={{ color: colors.text }}>审批 / 通用任务 / AI 受理</span>
-          </div>
-        </div>
-      ) : null}
-      <div style={{ display: 'flex', gap: 6, marginTop: 'auto' }}>
-        <Button size="sm" variant="ghost" onClick={() => setDetailOpen((value) => !value)}>{detailOpen ? '收起' : '详情'}</Button>
-        <Button size="sm" variant={enabled ? 'outline' : 'primary'} disabled={enabled} onClick={onEnable}>{enabled ? '已启用' : '启用'}</Button>
-      </div>
-    </article>
-  )
-}
-
 type TaskTab = 'all' | 'mine' | 'personal' | 'group' | 'connectors'
 
-const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) => void }) => {
+const TaskCenterButton = ({ openSession, openSkillCenter }: {
+  openSession: (sessionId: string) => void
+  openSkillCenter: () => boolean
+}) => {
   const [open, setOpen] = useState(false)
   const [tasks, setTasks] = useState<TaskItem[]>([])
   const [loading, setLoading] = useState(false)
@@ -623,10 +590,14 @@ const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) =>
   const [createBusy, setCreateBusy] = useState(false)
   const [selected, setSelected] = useState<TaskItem | null>(null)
   const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null)
-  const [connectorEnabled, setConnectorEnabled] = useState(() => {
-    try { return window.localStorage.getItem(CONNECTOR_STORAGE_KEY) === 'true' } catch { return false }
-  })
+  const [connector, setConnector] = useState<ConnectorState | null>(null)
+  const [connectorLoading, setConnectorLoading] = useState(true)
+  const [connectorError, setConnectorError] = useState<string | null>(null)
+  const [connectorBusy, setConnectorBusy] = useState(false)
+  const [capabilityFilter, setCapabilityFilter] = useState('all')
+  const [skillCenterError, setSkillCenterError] = useState<string | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
+  const connectorEnabled = connector?.enabled === true
 
   useEffect(() => {
     if (document.getElementById(TASK_BUS_STYLE_ID) !== null) return
@@ -673,6 +644,29 @@ const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) =>
     }
   }, [])
 
+  const readConnector = async (): Promise<void> => {
+    setConnectorLoading(true)
+    setConnectorError(null)
+    try {
+      setConnector(await fetchConnectorState())
+    } catch (cause) {
+      setConnectorError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setConnectorLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    let alive = true
+    setConnectorLoading(true)
+    setConnectorError(null)
+    void fetchConnectorState()
+      .then((next) => { if (alive) setConnector(next) })
+      .catch((cause) => { if (alive) setConnectorError(cause instanceof Error ? cause.message : String(cause)) })
+      .finally(() => { if (alive) setConnectorLoading(false) })
+    return () => { alive = false }
+  }, [])
+
   const load = async (silent = false) => {
     if (!connectorEnabled) {
       setTasks([])
@@ -692,9 +686,45 @@ const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) =>
     }
   }
 
-  const enableConnector = () => {
-    setConnectorEnabled(true)
-    try { window.localStorage.setItem(CONNECTOR_STORAGE_KEY, 'true') } catch { /* local preference only */ }
+  const setConnectorEnabled = async (enabled: boolean): Promise<void> => {
+    setConnectorBusy(true)
+    setConnectorError(null)
+    try {
+      setConnector(await saveConnectorState({ enabled }))
+      if (!enabled) {
+        setTasks([])
+        setCapabilityFilter('all')
+      }
+    } catch (cause) {
+      setConnectorError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setConnectorBusy(false)
+    }
+  }
+
+  const toggleCapability = async (capabilityId: string, enabled: boolean): Promise<void> => {
+    if (connector === null) return
+    setConnectorBusy(true)
+    setConnectorError(null)
+    try {
+      setConnector(await saveConnectorState({
+        enabled: connector.enabled,
+        capabilities: { [capabilityId]: enabled },
+      }))
+    } catch (cause) {
+      setConnectorError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setConnectorBusy(false)
+    }
+  }
+
+  const openSkillCenterFromPanel = (): void => {
+    if (openSkillCenter()) {
+      setSkillCenterError(null)
+      setOpen(false)
+      return
+    }
+    setSkillCenterError('技能中心未安装，无法打开连接器页面')
   }
 
   useEffect(() => {
@@ -731,13 +761,15 @@ const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) =>
   }, [connectorEnabled])
 
 
-  const filtered = useMemo(() => tasks.filter((task) => {
-    if (tab === 'connectors') return task.sourceType === 'dataops_approval'
-    if (tab === 'group') return task.sourceType === 'task_bus' && task.source.type.includes('group')
-    if (tab === 'mine') return task.status !== 'completed' && task.status !== 'cancelled'
-    if (tab === 'personal') return task.sourceType === 'task_bus' && !task.source.type.includes('group')
-    return true
-  }), [tasks, tab])
+  const filtered = useMemo(() => {
+    if (tab === 'connectors') {
+      return connectorEnabled ? filterConnectorTasks(tasks, capabilityFilter) : []
+    }
+    if (tab === 'group') return tasks.filter((task) => task.sourceType === 'task_bus' && task.source.type.includes('group'))
+    if (tab === 'mine') return tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled')
+    if (tab === 'personal') return tasks.filter((task) => task.sourceType === 'task_bus' && !task.source.type.includes('group'))
+    return tasks
+  }, [tasks, tab, connectorEnabled, capabilityFilter])
 
   const actionable = tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled').length
   const tabItems: [SegmentedTab<TaskTab>, ...SegmentedTab<TaskTab>[]] = [
@@ -745,7 +777,7 @@ const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) =>
     { value: 'mine', id: 'task-bus-tab-mine', panelId: 'task-bus-panel-mine', label: <span>待我处理 <span style={{ opacity: 0.55 }}>{actionable}</span></span> },
     { value: 'personal', id: 'task-bus-tab-personal', panelId: 'task-bus-panel-personal', label: <span>个人 <span style={{ opacity: 0.55 }}>{tasks.filter((task) => task.sourceType === 'task_bus' && !task.source.type.includes('group')).length}</span></span> },
     { value: 'group', id: 'task-bus-tab-group', panelId: 'task-bus-panel-group', label: <span>群聊 <span style={{ opacity: 0.55 }}>{tasks.filter((task) => task.sourceType === 'task_bus' && task.source.type.includes('group')).length}</span></span> },
-    { value: 'connectors', id: 'task-bus-tab-connectors', panelId: 'task-bus-panel-connectors', label: <span>连接器 <span style={{ opacity: 0.55 }}>1</span></span> },
+    { value: 'connectors', id: 'task-bus-tab-connectors', panelId: 'task-bus-panel-connectors', label: <span>连接器 <span style={{ opacity: 0.55 }}>{connector === null ? 0 : 1}</span></span> },
   ]
 
   const transition = async (task: TaskItem, action: string) => {
@@ -895,9 +927,49 @@ const TaskCenterButton = ({ openSession }: { openSession: (sessionId: string) =>
               <TaskDetail task={selected} onBack={() => setSelected(null)} />
             ) : (
               <>
-                {tab === 'connectors' ? <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 320px))', gap: 10 }}><DataOpsConnectorCard approvalCount={tasks.filter((task) => task.sourceType === 'dataops_approval').length} connected={error === null} enabled={connectorEnabled} onEnable={enableConnector} /></div> : null}
+                {tab === 'connectors' ? (
+                  <>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 10 }}>
+                      <ConnectorCard
+                        state={connector}
+                        loading={connectorLoading}
+                        error={connectorError}
+                        busy={connectorBusy}
+                        taskCount={filtered.length}
+                        onSetEnabled={(enabled) => { void setConnectorEnabled(enabled) }}
+                        onToggleCapability={(capabilityId, enabled) => { void toggleCapability(capabilityId, enabled) }}
+                        onReload={() => { void readConnector() }}
+                      />
+                    </div>
+                    {connectorEnabled ? (
+                      <div role="group" aria-label="连接器能力筛选" style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        <button type="button" aria-pressed={capabilityFilter === 'all'} onClick={() => setCapabilityFilter('all')} style={filterChipStyle(capabilityFilter === 'all')}>全部</button>
+                        {visibleCapabilities(connector).map((capability) => (
+                          <button
+                            key={capability.id}
+                            type="button"
+                            data-capability-filter={capability.id}
+                            aria-pressed={capabilityFilter === capability.id}
+                            onClick={() => setCapabilityFilter(capability.id)}
+                            style={filterChipStyle(capabilityFilter === capability.id)}
+                          >
+                            {capability.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : connectorLoading ? null : (
+                      <>
+                        <ConnectorDisabledState onOpenSkillCenter={openSkillCenterFromPanel} />
+                        {skillCenterError === null ? null : (
+                          <div role="alert" style={{ textAlign: 'center', color: colors.danger, fontSize: 11 }}>{skillCenterError}</div>
+                        )}
+                      </>
+                    )}
+                  </>
+                ) : null}
                 {loading ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>正在加载…</div> : null}
-                {!loading && filtered.length === 0 ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>{tab === 'connectors' ? (connectorEnabled ? '暂无来自该连接器的任务' : '启用连接器后在此显示任务') : '暂无任务'}</div> : null}
+                {!loading && tab !== 'connectors' && filtered.length === 0 ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无任务</div> : null}
+                {!loading && tab === 'connectors' && connectorEnabled && filtered.length === 0 ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>{capabilityFilter === 'all' ? '暂无来自该连接器的任务' : '该能力下暂无任务'}</div> : null}
                 {!loading && tab === 'connectors' && filtered.length > 0 ? <div style={{ fontSize: 10, color: colors.muted }}>来自该连接器的任务</div> : null}
                 {!loading && filtered.map((task) => (
                   <TaskCard key={task.id} task={task} busy={busyId === task.id} aiBusy={aiBusyId === task.id} onTransition={(item, action) => void transition(item, action)} onAiAccept={(item) => void aiAccept(item)} onOpen={setSelected} />
@@ -1235,6 +1307,7 @@ export const apply = (ctx: Context) => {
       register(options: Record<string, unknown>, component: (props: never) => JSX.Element | null): () => void
     }
     uiWorkspace: { openSession(sessionId: string): void }
+    layout: { selectPanel(panelId: string): void }
   }
   const surfaceWithServices = surface as unknown as {
     sidebarRight?: { openResource?(address: string): void }
@@ -1280,7 +1353,23 @@ export const apply = (ctx: Context) => {
     document.addEventListener('click', onFileClick, true)
     return () => { document.removeEventListener('click', onFileClick, true) }
   }, 'task-bus: native file card preview')
-  const Surface = () => <TaskCenterButton openSession={(sessionId) => surface.uiWorkspace.openSession(sessionId)} />
+  // The connector state lives in the skill center; the task panel consumes it and links
+  // there when the connector is off. selectPanel throws when that panel is not installed,
+  // which is the one case the caller must report instead of silently doing nothing.
+  const openSkillCenter = (): boolean => {
+    try {
+      surface.layout.selectPanel('skill-center')
+      return true
+    } catch {
+      return false
+    }
+  }
+  const Surface = () => (
+    <TaskCenterButton
+      openSession={(sessionId) => surface.uiWorkspace.openSession(sessionId)}
+      openSkillCenter={openSkillCenter}
+    />
+  )
   ctx.effect(() => surface.slots.inject('shell.overlay', () => surface.slots.register(
     { name: 'shell.overlay', id: 'task-bus.center' },
     Surface,

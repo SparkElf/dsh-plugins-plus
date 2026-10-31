@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-credential-manager",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Third-party credential inventory for the official DSH right Sidebar: metadata CRUD, encrypted secrets, guarded model tools, and a reserved connector seam.",
   "type": "module",
   "main": "./lib/index.js",

@@ -6,8 +6,8 @@
  * principal and exposes the same surface to the agent as tools.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdir, writeFile } from 'node:fs/promises'
-import { basename, isAbsolute, join } from 'node:path'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -124,6 +124,49 @@ const genericListPath = (search: string) => {
 
 const open = { type: 'object', additionalProperties: true } as const
 
+/** Where this workspace stores the connector's own enabled state. */
+export const CONNECTOR_STATE_PATH = join(
+  process.env.DSH_HOME?.trim() || '/workspace/.dataops/dsh',
+  'task-bus',
+  'connector-state.json',
+)
+
+/** The persisted connector state shared by the Task Bus panel and the host tools. */
+interface ConnectorState {
+  enabled: boolean
+  capabilities: Record<string, boolean>
+}
+
+const DEFAULT_CONNECTOR_STATE: ConnectorState = {
+  enabled: false,
+  capabilities: { 'approval.push': true },
+}
+
+/** Read the workspace connector state; a missing/corrupt file is a safe disabled state. */
+export async function readConnectorState(path = CONNECTOR_STATE_PATH): Promise<ConnectorState> {
+  try {
+    const text = await readFile(path, 'utf8')
+    const value = JSON.parse(text) as Partial<ConnectorState>
+    return {
+      enabled: value.enabled === true,
+      capabilities: {
+        ...DEFAULT_CONNECTOR_STATE.capabilities,
+        ...(typeof value.capabilities === 'object' && value.capabilities !== null ? value.capabilities : {}),
+      },
+    }
+  } catch {
+    return { ...DEFAULT_CONNECTOR_STATE, capabilities: { ...DEFAULT_CONNECTOR_STATE.capabilities } }
+  }
+}
+
+/** Persist the connector state atomically; the host and UI read the same file. */
+export async function writeConnectorState(next: ConnectorState, path = CONNECTOR_STATE_PATH): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const temporary = path + '.tmp-' + process.pid.toString()
+  await writeFile(temporary, JSON.stringify(next, null, 2), 'utf8')
+  await rename(temporary, path)
+}
+
 const renderJson = (_args: unknown, value: unknown) => [
   { type: 'text' as const, text: JSON.stringify(value, null, 2) },
 ]
@@ -154,13 +197,36 @@ export const apply = (ctx: Context) => {
       const url = new URL(request.url ?? '/', 'http://dsh.internal')
       const route = url.pathname.slice(TASK_BUS_ROUTE.length).replace(/^\/+/u, '')
       try {
+        if (route === 'connector') {
+          if (request.method === 'GET') {
+            writeJson(response, 200, await readConnectorState())
+            void syncTools().catch(() => { disposeTools() })
+            return
+          }
+          if (request.method === 'POST') {
+            const body = await readJsonBody(request) as { enabled?: unknown; capabilities?: unknown } | undefined
+            if (typeof body?.enabled !== 'boolean') throw new Error('connector state requires enabled:boolean')
+            const current = await readConnectorState()
+            const capabilities = typeof body.capabilities === 'object' && body.capabilities !== null
+              ? { ...current.capabilities, ...body.capabilities as Record<string, boolean> }
+              : current.capabilities
+            await writeConnectorState({ enabled: body.enabled, capabilities })
+            await syncTools()
+            writeJson(response, 200, await readConnectorState())
+            return
+          }
+          writeJson(response, 405, { error: 'connector state supports GET and POST' })
+          return
+        }
         if (request.method === 'GET' && route === 'health') {
           resolveBase()
           writeJson(response, 200, { ok: true, source: 'dataops_approval' })
+          void syncTools()
           return
         }
         if (request.method === 'GET' && route === 'overview') {
           writeJson(response, 200, absoluteApprovalLinks(await client('/overview')))
+          void syncTools()
           return
         }
         if (request.method === 'GET' && route === 'attachment-materialize') {
@@ -287,96 +353,181 @@ export const apply = (ctx: Context) => {
     },
   }), 'task-bus: browser API')
 
-  ctx.effect(() => host.tools.register(tool(
-    'task_center_list',
-    'List DataOps Task Center cards visible to the current workspace user, including approval tasks and generic Task Bus tasks. Approval cards are read-only projections of DataOps tasks.',
+  /**
+   * Tool definitions are static; only their registration is permission-dependent.
+   *
+   * This is the plugin-side disclosure boundary: the model never sees a tool the
+   * current DataOps principal cannot use. Authorization itself remains at the
+   * DataOps Task Center API; this layer only adjusts what the connector contributes.
+   */
+  const toolDefinitions = [
     {
-      status: { type: 'string', enum: ['all', 'pending', 'done'] },
-      scope: { type: 'string', enum: ['mine', 'created', 'all'] },
-      limit: { type: 'number' },
+      permission: 'workflow:task:read',
+      definition: tool(
+        'task_center_list',
+        'List DataOps Task Center cards visible to the current workspace user, including approval tasks and generic Task Bus tasks. Approval cards are read-only projections of DataOps tasks.',
+        {
+          status: { type: 'string', enum: ['all', 'pending', 'done'] },
+          scope: { type: 'string', enum: ['mine', 'created', 'all'] },
+          limit: { type: 'number' },
+        },
+        async (args) => {
+          const status = typeof args.status === 'string' ? args.status : 'all'
+          const limit = typeof args.limit === 'number' ? Math.max(1, Math.min(50, args.limit)) : 20
+          const result = absoluteApprovalLinks(await client('/overview')) as { items?: Array<{ status?: string }> }
+          const items = (result.items ?? []).filter((item) => {
+            if (status === 'pending') return item.status !== 'completed' && item.status !== 'cancelled'
+            if (status === 'done') return item.status === 'completed' || item.status === 'cancelled'
+            return true
+          }).slice(0, limit)
+          return { ...result, items, total: items.length }
+        },
+      ),
     },
-    async (args) => {
-      const status = typeof args.status === 'string' ? args.status : 'all'
-      const scope = typeof args.scope === 'string' ? args.scope : 'mine'
-      void scope
-      const limit = typeof args.limit === 'number' ? Math.max(1, Math.min(50, args.limit)) : 20
-      const result = absoluteApprovalLinks(await client('/overview')) as { items?: Array<{ status?: string }> }
-      const items = (result.items ?? []).filter((item) => {
-        if (status === 'pending') return item.status !== 'completed' && item.status !== 'cancelled'
-        if (status === 'done') return item.status === 'completed' || item.status === 'cancelled'
-        return true
-      }).slice(0, limit)
-      return { ...result, items, total: items.length }
-    },
-  )), 'task-bus: list tool')
-
-  ctx.effect(() => host.tools.register(tool(
-    'task_center_get',
-    'Read one Task Center card by its stable id. Use approval:<id> for a DataOps approval task or task:<uuid> for a generic Task Bus task.',
-    { id: { type: 'string', required: true } },
-    async (args) => {
-      const id = String(args.id ?? '')
-      if (id.startsWith('approval:')) return client(`/items/${encodeURIComponent(id)}`)
-      if (id.startsWith('task:')) return client(`/generic/${encodeURIComponent(id.slice(5))}`)
-      throw new Error('Task Center id must start with approval: or task:')
-    },
-  )), 'task-bus: get tool')
-
-  ctx.effect(() => host.tools.register(tool(
-    'task_center_create',
-    [
-      'Create a generic Task Center card ONLY when the user explicitly asks you to create a task/card in this turn.',
-      'Never call this tool proactively, speculatively, as a side effect of another request, or merely because work could be tracked.',
-      'If the user did not explicitly ask for a new card, do not call it; ask for confirmation instead.',
-      'This never creates or mutates a DataOps approval task.',
-    ].join(' '),
     {
-      title: { type: 'string', required: true },
-      description: { type: 'string' },
-      source_type: { type: 'string' },
-      source_id: { type: 'string' },
-      assignee_user_id: { type: 'string' },
-      priority: { type: 'string' },
-      user_requested: {
-        type: 'boolean',
-        required: true,
-        description: 'Must be true only when the user explicitly requested creation of this card in the current turn.',
-      },
+      permission: 'workflow:task:read',
+      definition: tool(
+        'task_center_get',
+        'Read one Task Center card by its stable id. Use approval:<id> for a DataOps approval task or task:<uuid> for a generic Task Bus task.',
+        { id: { type: 'string', required: true } },
+        async (args) => {
+          const id = String(args.id ?? '')
+          if (id.startsWith('approval:')) return client(`/items/${encodeURIComponent(id)}`)
+          if (id.startsWith('task:')) return client(`/generic/${encodeURIComponent(id.slice(5))}`)
+          throw new Error('Task Center id must start with approval: or task:')
+        },
+      ),
     },
-    async (args) => {
-      if (args.user_requested !== true) {
-        throw new Error('task_center_create requires an explicit user request; do not create Task Center cards proactively')
+    {
+      permission: 'workflow:task:create',
+      definition: tool(
+        'task_center_create',
+        [
+          'Create a generic Task Center card ONLY when the user explicitly asks you to create a task/card in this turn.',
+          'Never call this tool proactively, speculatively, as a side effect of another request, or merely because work could be tracked.',
+          'If the user did not explicitly ask for a new card, do not call it; ask for confirmation instead.',
+          'This never creates or mutates a DataOps approval task.',
+        ].join(' '),
+        {
+          title: { type: 'string', required: true },
+          description: { type: 'string' },
+          source_type: { type: 'string' },
+          source_id: { type: 'string' },
+          assignee_user_id: { type: 'string' },
+          priority: { type: 'string' },
+          user_requested: {
+            type: 'boolean',
+            required: true,
+            description: 'Must be true only when the user explicitly requested creation of this card in the current turn.',
+          },
+        },
+        async (args) => {
+          if (args.user_requested !== true) {
+            throw new Error('task_center_create requires an explicit user request; do not create Task Center cards proactively')
+          }
+          return client('/generic', 'POST', {
+            title: String(args.title ?? ''),
+            description: typeof args.description === 'string' ? args.description : undefined,
+            sourceType: typeof args.source_type === 'string' ? args.source_type : 'agent',
+            sourceId: typeof args.source_id === 'string' ? args.source_id : undefined,
+            assigneeUserId: typeof args.assignee_user_id === 'string' ? args.assignee_user_id : undefined,
+            priority: typeof args.priority === 'string' ? args.priority : undefined,
+          })
+        },
+      ),
+    },
+    {
+      permission: 'workflow:task:execute',
+      definition: tool(
+        'task_center_transition',
+        'Advance a generic Task Bus task. Approval tasks must be handled through the existing DataOps approval UI and APIs; this tool refuses approval ids.',
+        {
+          id: { type: 'string', required: true },
+          action: {
+            type: 'string',
+            required: true,
+            enum: ['accept', 'start', 'submit', 'complete', 'cancel', 'block', 'unblock'],
+          },
+          comment: { type: 'string' },
+        },
+        async (args) => {
+          const id = String(args.id ?? '')
+          if (!id.startsWith('task:')) throw new Error('Only generic task:<uuid> cards can be transitioned here')
+          return client(`/generic/${encodeURIComponent(id.slice(5))}/transition`, 'POST', {
+            action: String(args.action ?? ''),
+            comment: typeof args.comment === 'string' ? args.comment : undefined,
+          })
+        },
+      ),
+    },
+  ] as const
+
+  const toolDisposers = new Map<string, () => void>()
+  let syncGeneration = 0
+
+  const disposeTools = (): void => {
+    for (const dispose of toolDisposers.values()) dispose()
+    toolDisposers.clear()
+  }
+
+  /** Read the current principal's DataOps permission keys without caching them per tool call. */
+  const loadPermissionKeys = async (): Promise<Set<string> | null> => {
+    try {
+      const resolved = await host.credentials.resolve(credentialRef(DATAOPS_CREDENTIAL_REF))
+      const token = resolved?.value?.trim()
+      if (!token) return null
+      const response = await fetch(resolveBase() + '/api/ai/review/context', {
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      })
+      if (!response.ok) return null
+      const body = await response.json() as { permissions?: unknown; permissionKeys?: unknown }
+      const values = Array.isArray(body.permissions)
+        ? body.permissions
+        : Array.isArray(body.permissionKeys) ? body.permissionKeys : null
+      return values === null ? null : new Set(values.filter((item): item is string => typeof item === 'string'))
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Reconcile connector state, principal permissions and the registered tool set.
+   *
+   * Called at plugin start, after every browser API request, and after a connector
+   * enable/disable change. The tool execution path never repeats this work.
+   */
+  const syncTools = async (): Promise<void> => {
+    const generation = ++syncGeneration
+    const state = await readConnectorState()
+    if (!state.enabled || state.capabilities['approval.push'] === false) {
+      disposeTools()
+      return
+    }
+    const permissions = await loadPermissionKeys()
+    if (permissions === null) {
+      disposeTools()
+      return
+    }
+    if (generation !== syncGeneration) return
+    for (const item of toolDefinitions) {
+      const existing = toolDisposers.get(item.definition.name)
+      if (permissions.has(item.permission)) {
+        if (existing === undefined) {
+          toolDisposers.set(item.definition.name, host.tools.register(item.definition))
+        }
+      } else if (existing !== undefined) {
+        existing()
+        toolDisposers.delete(item.definition.name)
       }
-      return client('/generic', 'POST', {
-        title: String(args.title ?? ''),
-        description: typeof args.description === 'string' ? args.description : undefined,
-        sourceType: typeof args.source_type === 'string' ? args.source_type : 'agent',
-        sourceId: typeof args.source_id === 'string' ? args.source_id : undefined,
-        assigneeUserId: typeof args.assignee_user_id === 'string' ? args.assignee_user_id : undefined,
-        priority: typeof args.priority === 'string' ? args.priority : undefined,
-      })
-    },
-  )), 'task-bus: create tool')
+    }
+  }
 
-  ctx.effect(() => host.tools.register(tool(
-    'task_center_transition',
-    'Advance a generic Task Bus task. Approval tasks must be handled through the existing DataOps approval UI and APIs; this tool refuses approval ids.',
-    {
-      id: { type: 'string', required: true },
-      action: {
-        type: 'string',
-        required: true,
-        enum: ['accept', 'start', 'submit', 'complete', 'cancel', 'block', 'unblock'],
-      },
-      comment: { type: 'string' },
-    },
-    async (args) => {
-      const id = String(args.id ?? '')
-      if (!id.startsWith('task:')) throw new Error('Only generic task:<uuid> cards can be transitioned here')
-      return client(`/generic/${encodeURIComponent(id.slice(5))}/transition`, 'POST', {
-        action: String(args.action ?? ''),
-        comment: typeof args.comment === 'string' ? args.comment : undefined,
-      })
-    },
-  )), 'task-bus: transition tool')
+  ctx.effect(() => {
+    void syncTools().catch(() => { disposeTools() })
+    return () => {
+      syncGeneration += 1
+      disposeTools()
+    }
+  }, 'task-bus: permission-aware tool disclosure')
+
 }

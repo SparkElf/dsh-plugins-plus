@@ -107,6 +107,26 @@ function reactIconsEsm(): BuildPlugin {
   }
 }
 
+/**
+ * Resolve the borrowed better-sidebar source imports against the local fork.
+ *
+ * `dsh-better-sidebar/src/...` is type-stubbed in the workspace tsconfig so `tsc`
+ * can check this package without the fork on disk. The BUNDLER, however, needs the
+ * real modules: it inlines `FileTree`, `referenceInChat` and the address helpers
+ * into the client bundle. Resolving them to the sibling checkout keeps the bundle
+ * honest instead of failing on the type stub's missing value exports.
+ */
+function betterSidebarSource(): BuildPlugin {
+  const root = '/root/projects/DSH-better-sidebar/src'
+  return {
+    name: 'dsh-kb-better-sidebar-source',
+    resolveId(source: string) {
+      if (!source.startsWith('dsh-better-sidebar/src/')) return null
+      return resolvePath(root, source.slice('dsh-better-sidebar/src/'.length))
+    },
+  }
+}
+
 function cssModules(): BuildPlugin {
   return {
     name: 'dsh-kb-css-modules',
@@ -185,7 +205,7 @@ const client: UserConfig = {
     },
   },
   noExternal: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
-  plugins: [purityGate(), reactIconsEsm(), cssModules()],
+  plugins: [purityGate(), reactIconsEsm(), betterSidebarSource(), cssModules()],
   outputOptions: {
     entryFileNames: 'client.js',
     banner: 'window.__ModuleLoader__.load({ id: ' + JSON.stringify(PLUGIN_ID) + ', factory: (require) => {',

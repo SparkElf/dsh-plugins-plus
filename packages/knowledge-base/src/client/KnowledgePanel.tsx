@@ -1064,12 +1064,23 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   if (state.kind === 'unavailable') {
     return (
       <div className={styles.page}>
-        <p className={styles.error} role="alert">Knowledge base is unavailable.</p>
         {/* This screen exists because the page could not reach its Host, so it
             deliberately depends on nothing that the failing load would have
-            provided -- including the primitive layer, whose locale and theme it
-            cannot assume are mounted. It is a bare control and a bare string. */}
-        <button type="button" className={styles.retry} onClick={() => { void load() }}>Retry</button>
+            provided -- including the primitive layer. The copy is still read
+            from this plugin's own dictionary, and the glyph is inline, so the
+            failure reads as a product state rather than a raw English error. */}
+        <div className={styles.errorPanel} role="alert">
+          <span className={styles.errorGlyph} aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7.5v5.5" />
+              <path d="M12 16.5h.01" />
+            </svg>
+          </span>
+          <h2 className={styles.errorTitle}>{t('unavailable')}</h2>
+          <p className={styles.errorDetail}>{t('unavailableDetail')}</p>
+          <button type="button" className={styles.retry} onClick={() => { void load() }}>{t('retry')}</button>
+        </div>
       </div>
     )
   }

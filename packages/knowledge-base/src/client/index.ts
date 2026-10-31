@@ -176,7 +176,12 @@ function createWorkflowPlazaDeps(ctx: ClientContext) {
 
   /** Same-origin call to the Host's workflow-plaza routes. */
   const callWorkflowRoute = async (method: string, body: Record<string, unknown> = {}): Promise<unknown> => {
-    const response = await fetch(`/knowledge-base/api/${method}`, {
+    // Resolve against the document base so a deployment under a path prefix
+    // (the portal serves the DSH at /dsh/) keeps the plugin's Host routes.
+    // A base without a trailing slash would resolve the relative URL against the
+    // parent path and drop the portal's `/dsh` prefix, so pin the trailing slash.
+    const base = document.baseURI.endsWith('/') ? document.baseURI : `${document.baseURI}/`
+    const response = await fetch(new URL(`knowledge-base/api/${method}`, base), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),

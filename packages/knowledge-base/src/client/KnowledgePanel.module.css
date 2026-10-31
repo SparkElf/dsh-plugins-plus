@@ -912,3 +912,49 @@
   margin: 4px 6px;
   border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
+
+/* ---- Unavailable state ----
+
+   Centred panel state in the same spirit as the shell's empty states: a glyph,
+   a title, a diagnosable detail line, and one retry action. Kept inside the
+   plugin's own CSS module so it needs neither the primitive layer nor the host
+   page that failed to load. */
+.errorPanel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 0;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.errorGlyph {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--dsw-alias-fill-l2, #f2f3f5);
+  color: var(--dsw-alias-state-error-primary, #c0392b);
+}
+
+.errorTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-m-16, 600 16px/24px);
+}
+
+.errorDetail {
+  margin: 0;
+  max-width: 420px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.errorPanel .retry {
+  align-self: center;
+  margin-top: 6px;
+}

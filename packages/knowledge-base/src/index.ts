@@ -10,7 +10,9 @@
  *
  * It owns no authorization logic. DataOps AuthGuard and PermissionGuard resolve
  * the caller's roles and grants from the session credential; this plugin only
- * forwards requests (AGENTS.md "Managed DataOps Authorization").
+ * forwards requests (AGENTS.md "Managed DataOps Authorization"). Which model-facing
+ * tools exist is decided from that same permission projection in `toolDisclosure.ts`;
+ * path-level checks and the backend remain the enforcement boundary.
  *
  * Content retrieval is deliberately absent. Once the view tree is mounted the
  * official `grep`, `read`, `write`, and `edit` tools operate on it as an
@@ -36,7 +38,6 @@ import {
   hasPermission,
   isGlobalAdmin,
   normalizePublishScope,
-  requirePermission,
   type ManagementAudit,
   type ManagementBucket,
   type ManagementContext,
@@ -45,6 +46,10 @@ import {
   type ManagementToolHost,
   type ManagementWorkflow,
 } from './managementTools.ts'
+import {
+  createToolDisclosure,
+  type ToolDisclosureCoordinator,
+} from './toolDisclosure.ts'
 import {
   WorkflowPublishError,
   listApprovedWorkflows,
@@ -580,6 +585,37 @@ export function isTeamDeployment(config: Config): boolean {
  * "no user".
  */
 export const LOCAL_USER_ID = 'local'
+
+/**
+ * The permission context a personal deployment discloses tools from.
+ *
+ * A personal deployment has no accounts, so there is nobody to ask: the local
+ * operator owns every capability the product knows about. Kept as a function rather
+ * than the inline object inside the management host so the disclosure coordinator
+ * can register the personal tool surface synchronously at startup, instead of
+ * waiting for a backend round trip that does not exist.
+ *
+ * @returns the full-capability context a local owner holds.
+ */
+export function localManagementContext(): ManagementContext {
+  return {
+    userId: 'local',
+    username: 'local',
+    displayName: '个人用户',
+    primaryRole: 'LOCAL_OWNER',
+    roleCodes: ['LOCAL_OWNER'],
+    permissions: [
+      'kb:file:read', 'kb:file:write', 'kb:file:delete', 'kb:file:extract',
+      'kb:audit:read', 'kb:grant:manage', 'kb:review:decide', 'kb:config:manage',
+      'workflow:read', 'workflow:publish', 'workflow:manage',
+      'workflow:review:decide', 'workflow:review:global',
+    ],
+    departmentCode: null,
+    departmentPathCodes: [],
+    dataScope: { all: true, self: true, departmentCodes: [] },
+    review: { canReview: true, canReviewGlobal: true, canManagePermissions: true, departments: [] },
+  }
+}
 
 /**
  * Why a path was refused in a personal deployment.
@@ -3054,6 +3090,26 @@ export interface SkillDefinitionLike extends SkillCandidateLike {
   readonly content: string
 }
 
+/**
+ * Per-plugin-instance disclosure coordinators, keyed by the Host context.
+ *
+ * `apply` is synchronous and the Host does not hand a plugin a return value, but
+ * the coordinator must be reachable for two legitimate callers: the host integration
+ * that wants to force a refresh, and the tests that drive `apply` directly. A
+ * WeakMap keeps this a discovery seam rather than a second lifecycle owner.
+ */
+const toolDisclosures = new WeakMap<object, ToolDisclosureCoordinator>()
+
+/**
+ * The permission-based tool disclosure coordinator this plugin instance registered.
+ *
+ * @param host - the Host context the plugin was applied to.
+ * @returns the coordinator, or undefined when this context has no knowledge-base plugin.
+ */
+export function knowledgeBaseToolDisclosure(host: object): ToolDisclosureCoordinator | undefined {
+  return toolDisclosures.get(host)
+}
+
 export function apply(ctx: Context, deploymentConfig: Config): void {
   // Routes re-resolve this per request (see the handler below), so the name a route reads is
   // the merged view rather than the deployment's own value.
@@ -3321,6 +3377,16 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     return { synced: false, ...(lastFailure === undefined ? {} : { failure: lastFailure }) }
   }
 
+  /**
+   * Permission-based tool disclosure, assigned once the host seams exist below.
+   *
+   * Declared before the HTTP surface because the route handler closes over it: the
+   * route gate is one of the two existing places this plugin already reads the
+   * caller's permission context, so it is also where a changed context refreshes the
+   * model-facing tool surface.
+   */
+  let toolDisclosure: ToolDisclosureCoordinator | undefined
+
   ctx.effect(() => host.webServer.register({
     kind: 'prefix',
     path: '/knowledge-base/api',
@@ -3348,6 +3414,12 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               managementHost.context().catch(() => undefined),
               new Promise<undefined>(resolve => setTimeout(() => { resolve(undefined) }, 750)),
             ])
+            // A route that carries a real context also refreshes the disclosed tool
+            // surface. A timed-out read leaves the previous surface in place instead
+            // of treating a transient stall as a role change.
+            if (permissionContext !== undefined) {
+              await toolDisclosure?.syncToolDisclosure(permissionContext)
+            }
             // An empty list is an older/unknown backend, not a caller with zero
             // permissions: the route's own grant checks still apply in that case.
             if (permissionContext !== undefined && permissionContext.permissions.length > 0 && !hasPermission(permissionContext, requiredPermission)) {
@@ -3644,17 +3716,25 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // enforce. A missing permissions list (older backend) keeps the old
             // role-based fallback rather than inventing a grant the caller may not have.
             let permissionKeys: string[] = []
+            let permissionContext: ManagementContext | undefined
             if (isTeamDeployment(config)) {
               try {
-                permissionKeys = [...(await managementHost.context()).permissions]
+                permissionContext = await managementHost.context()
+                permissionKeys = [...permissionContext.permissions]
               } catch {
                 permissionKeys = []
               }
             } else {
-              permissionKeys = [
-                'kb:file:read', 'kb:file:write', 'kb:file:delete', 'kb:file:extract',
-                'kb:audit:read', 'kb:grant:manage', 'kb:review:decide', 'kb:config:manage',
-              ]
+              // One list rather than a second copy that can drift from the context
+              // the disclosure coordinator uses.
+              permissionContext = localManagementContext()
+              permissionKeys = [...permissionContext.permissions]
+            }
+            // The page load is the second existing permission read, and the one a
+            // role change reaches first in a normal session. Applying the context
+            // here keeps the model-facing surface in step without a per-call check.
+            if (permissionContext !== undefined) {
+              await toolDisclosure?.syncToolDisclosure(permissionContext)
             }
             // Build the view pointer on the first load that finds it missing.
             //
@@ -5698,7 +5778,10 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     })
   }
 
-  ctx.effect(() => host.tools.register(defineTool({
+  // Publication is disclosed with the `publish` group (`workflow:publish`); the
+  // global-visibility scope check stays inside the body because it is a property of
+  // the individual call, not of the tool's existence.
+  const workflowPublishTool = defineTool({
     name: 'workflow_publish',
     description: 'Publish one workflow from this conversation to the Workflow Plaza. '
       + 'The record is created as PENDING; it does NOT appear in the public plaza until an administrator approves it. '
@@ -5735,10 +5818,12 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     },
     execute: async (args, exec) => {
       const actor = await resolveWorkflowActor(host, config)
+      // `workflow:publish` was proven when this tool was registered; the context is
+      // read here for the SCOPE decision (global visibility also needs the global
+      // review key), not to re-authorize the tool's existence.
       const context = await managementHost.context()
-      requirePermission(context, 'workflow:publish', 'workflow_publish')
-      if (args.visibility === 'global') {
-        requirePermission(context, 'workflow:review:global', 'global workflow publish')
+      if (args.visibility === 'global' && !hasPermission(context, 'workflow:review:global')) {
+        throw new ManagementToolError('forbidden', '缺少权限 workflow:review:global（global workflow publish）')
       }
       const scope = normalizePublishScope(
         context,
@@ -5762,7 +5847,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         report: `${prefix} 管理员审核通过后才会出现在工作流广场；当前状态：待审核。`,
       }
     },
-  })), 'dsh-knowledge-base: workflow_publish tool')
+  })
 
   // The host seam the model tools compose. Every method is the SAME implementation the
   // matching HTTP route uses: permission decisions stay with DataOps, and paths stay in
@@ -6126,15 +6211,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
   }
 
   const knowledgeToolHost: KnowledgeFileToolHost = {
-    hasPermission: async (permission: string) => {
-      if (!isTeamDeployment(config)) return true
-      try {
-        return (await managementHost.context()).permissions.includes(permission)
-      } catch {
-        // An unavailable context leaves the pre-existing grant checks in charge.
-        return true
-      }
-    },
     vectorize: async input => {
       try {
         await syncKnowledgeIndex(false, false)
@@ -6496,8 +6572,9 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
    * Management-tool host.
    *
    * Every method reads/writes through the same backend or host primitive the matching
-   * UI surface uses. Role checks happen in the tool layer (which has the review
-   * context); this object does not silently turn a denial into an empty result.
+   * UI surface uses. Role checks happen once at tool disclosure; the context reads
+   * that remain here feed data scoping and audit identity, and the backend still
+   * refuses an operation the caller may not perform.
    */
   const builtInWorkflowRows = [
     { id: 'kb-organize-personal', title: 'Tidy up my personal knowledge base' },
@@ -6505,27 +6582,21 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     { id: 'kb-archive-stale', title: 'Archive stale personal documents' },
   ] as const
 
+  /**
+   * The acting user id recorded in a management audit line.
+   *
+   * This is identity, not authorization: the permission decision happened at tool
+   * disclosure, and the backend re-checks the write. Reading `/auth/me` instead of
+   * the full review context keeps an audit write from fetching a permission tree it
+   * does not consult.
+   */
+  const managementActorId = async (): Promise<string> => (
+    isTeamDeployment(config) ? (await fetchCaller(host, config)).userId : LOCAL_USER_ID
+  )
+
   const managementHost: ManagementToolHost = {
     context: async () => {
-      if (!isTeamDeployment(config)) {
-        return {
-          userId: 'local',
-          username: 'local',
-          displayName: '个人用户',
-          primaryRole: 'LOCAL_OWNER',
-          roleCodes: ['LOCAL_OWNER'],
-          permissions: [
-            'kb:file:read', 'kb:file:write', 'kb:file:delete', 'kb:file:extract',
-            'kb:audit:read', 'kb:grant:manage', 'kb:review:decide',
-            'workflow:read', 'workflow:publish', 'workflow:manage',
-            'workflow:review:decide', 'workflow:review:global',
-          ],
-          departmentCode: null,
-          departmentPathCodes: [],
-          dataScope: { all: true, self: true, departmentCodes: [] },
-          review: { canReview: true, canReviewGlobal: true, canManagePermissions: true, departments: [] },
-        }
-      }
+      if (!isTeamDeployment(config)) return localManagementContext()
       const raw = await request<Record<string, unknown>>(host, config, '/api/ai/review/context')
       const dataScope = (raw.dataScope ?? {}) as Record<string, unknown>
       const review = (raw.review ?? {}) as Record<string, unknown>
@@ -6588,7 +6659,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     },
     kbConfigGet: async () => {
       const plan = localConfig(config)
-      const actorId = isTeamDeployment(config) ? (await fetchCaller(host, config)).userId : 'local'
+      const actorId = await managementActorId()
       const viewDir = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: actorId })
       const storage = await readStorageSettings(config.mountPoint)
       const settings = await readSettings(viewDir)
@@ -6623,7 +6694,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       if (patch.reviewRequired !== undefined) {
         if (typeof patch.reviewRequired !== 'boolean') throw new ManagementToolError('invalid', 'reviewRequired must be boolean')
         const plan = localConfig(config)
-        const actorId = isTeamDeployment(config) ? (await fetchCaller(host, config)).userId : 'local'
+        const actorId = await managementActorId()
         const targetView = viewPathFor({ actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: actorId })
         const current = await readSettings(targetView)
         await writeSettings(targetView, { ...current, reviewRequired: patch.reviewRequired })
@@ -6644,7 +6715,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       })
       await appendManagementAudit(config, host, {
         action: 'kb_grant_set',
-        actor: (await managementHost.context()).userId,
+        actor: await managementActorId(),
         detail: input,
       })
       return created as ManagementGrant
@@ -6692,7 +6763,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         await discardPendingWrite(plan.actualRoot, input.name)
         await appendManagementAudit(config, host, {
           action: 'kb_review_reject',
-          actor: (await managementHost.context()).userId,
+          actor: await managementActorId(),
           detail: { name: input.name, relPath: submission.relPath, note: input.note ?? '' },
         })
         return { rejected: submission.relPath }
@@ -6704,7 +6775,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       await refreshViewIfStale(true, created.relPath)
       await appendManagementAudit(config, host, {
         action: 'kb_review_approve',
-        actor: (await managementHost.context()).userId,
+        actor: await managementActorId(),
         detail: { name: input.name, relPath: submission.relPath, note: input.note ?? '' },
       })
       return { approved: created.relPath }
@@ -6778,13 +6849,13 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         '/api/ai/workflow-publications/' + encodeURIComponent(id),
         { method: 'PUT', body: patch },
       )
-      await appendManagementAudit(config, host, { action: 'workflow_update', actor: (await managementHost.context()).userId, detail: { id } })
+      await appendManagementAudit(config, host, { action: 'workflow_update', actor: await managementActorId(), detail: { id } })
       return updated
     },
     workflowUnpublish: async (id) => {
       if (!isTeamDeployment(config)) throw new ManagementToolError('backend', 'workflow unpublish requires a DataOps backend')
       const result = await request(host, config, '/api/ai/workflow-publications/' + encodeURIComponent(id), { method: 'DELETE' })
-      await appendManagementAudit(config, host, { action: 'workflow_unpublish', actor: (await managementHost.context()).userId, detail: { id } })
+      await appendManagementAudit(config, host, { action: 'workflow_unpublish', actor: await managementActorId(), detail: { id } })
       return result
     },
     workflowReviewList: async (query) => {
@@ -6812,18 +6883,47 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     },
   }
 
-  for (const definition of createKnowledgeFileTools(knowledgeToolHost)) {
-    ctx.effect(
-      () => host.tools.register(definition),
-      'dsh-knowledge-base: ' + definition.name + ' tool',
-    )
+  // One disclosure pass owns every model-facing tool. The policy map in
+  // `toolDisclosure.ts` decides which groups exist for the current permission
+  // context; `execute()` keeps only path-level data checks and the backend keeps
+  // final authorization.
+  const disclosure = createToolDisclosure({
+    tools: [
+      workflowPublishTool,
+      ...createKnowledgeFileTools(knowledgeToolHost),
+      ...createManagementTools(managementHost),
+    ],
+    registry: { register: definition => host.tools.register(definition) },
+    resolveContext: () => managementHost.context(),
+    log: message => host.logger?.warn?.('knowledge-base: ' + message),
+  })
+  toolDisclosures.set(ctx, disclosure)
+  toolDisclosure = disclosure
+  ctx.effect(() => () => disclosure.dispose(), 'dsh-knowledge-base: permission-based tool disclosure')
+  if (isTeamDeployment(config)) {
+    // The permission context is a backend read; the tool surface appears as soon as
+    // it answers. Until then the coordinator registers nothing (fail-closed).
+    void disclosure.syncToolDisclosure()
+  } else {
+    // A personal deployment has no backend to ask, and the local owner holds every
+    // key, so its surface is registered synchronously before `apply` returns.
+    void disclosure.syncToolDisclosure(localManagementContext())
   }
-
-  for (const definition of createManagementTools(managementHost)) {
-    ctx.effect(
-      () => host.tools.register(definition),
-      'dsh-knowledge-base: ' + definition.name + ' tool',
-    )
+  // A rotated DataOps token can belong to a different caller. This is the only
+  // credential event the plugin can observe; a role change made in DataOps without a
+  // token update is picked up by the status route or the next permission-gated API
+  // request (see the module README note). Guarded structurally because partial Host
+  // contexts in tests do not carry the event emitter.
+  const hostWithEvents = host as unknown as {
+    on?: (name: string, listener: (ref: string) => void) => () => void
+  }
+  if (typeof hostWithEvents.on === 'function') {
+    ctx.effect(() => {
+      const off = hostWithEvents.on?.('credentials/reference-updated', ref => {
+        if (ref === config.credentialRef) void disclosure.syncToolDisclosure()
+      })
+      return () => { off?.() }
+    }, 'dsh-knowledge-base: tool disclosure refresh on credential change')
   }
 
   // Observe shell/outside writes on the AUTHORITATIVE tree. Observation only: the

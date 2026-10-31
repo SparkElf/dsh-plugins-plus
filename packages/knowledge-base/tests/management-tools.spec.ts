@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   ManagementToolError,
   assertNoSecretFields,
@@ -70,20 +70,19 @@ describe('management tool capability matrix', () => {
   })
 })
 
-describe('management tool execution denies by context', () => {
-  const host = (context: ManagementContext) => ({
-    context: async () => context,
-    kbBucketList: async () => [{ name: 'personal', visibility: 'private' }],
-    kbConfigGet: async () => ({ storageMode: 'local' }),
-    kbGrantList: async () => [],
-  }) as never
-
-  it('refuses kb_config_get and kb_grant_list for an ordinary user without calling the host', async () => {
-    const tools = createManagementTools(host(normal))
+describe('management tool execution relies on disclosure', () => {
+  it('does not read the permission context for a disclosure-gated read', async () => {
+    const context = vi.fn(async () => {
+      throw new Error('a disclosure-gated tool must not re-read the permission context per call')
+    })
+    const tools = createManagementTools({
+      context,
+      kbConfigGet: async () => ({ storageMode: 'local' }),
+    } as never)
     const configTool = tools.find(tool => tool.name === 'kb_config_get')!
-    const grantTool = tools.find(tool => tool.name === 'kb_grant_list')!
-    await expect((configTool.execute as never)({}, {} as never)).rejects.toMatchObject({ code: 'forbidden' })
-    await expect((grantTool.execute as never)({}, {} as never)).rejects.toMatchObject({ code: 'forbidden' })
+    await expect((configTool.execute as never)({}, {} as never))
+      .resolves.toMatchObject({ config: { storageMode: 'local' } })
+    expect(context).not.toHaveBeenCalled()
   })
 
 })
@@ -148,27 +147,41 @@ describe('management tool surface', () => {
   })
 })
 
-describe('management tools enforce backend permission keys', () => {
+describe('management tool data scoping after disclosure', () => {
   const host = (context: ManagementContext) => ({
     context: async () => context,
-    kbGrantList: async () => [],
-    kbAuditList: async () => [],
-    kbReviewList: async () => [],
+    kbGrantList: async () => [
+      { relPath: 'department/other/a.md' },
+      { relPath: 'department/data-platform/b.md' },
+    ],
+    kbAuditList: async () => [
+      { at: '2026-10-01T00:00:00.000Z', actor: 'someone-else', action: 'create', relPath: 'global/a.md' },
+      { at: '2026-10-02T00:00:00.000Z', actor: 'u1', action: 'create', relPath: 'personal/u1/b.md' },
+    ],
+    kbReviewList: async () => [
+      { name: 'one', userId: 'u1', relPath: 'department/data-platform/a.md', at: '', bytes: 1 },
+    ],
     workflowList: async () => [],
   }) as never
 
-  it('refuses grant, audit and review tools to an ordinary user', async () => {
+  it('filters grants, audit and review rows by context instead of re-refusing the tool', async () => {
     const tools = createManagementTools(host(normal))
-    for (const name of ['kb_grant_list', 'kb_audit_list', 'kb_review_list', 'workflow_review_list']) {
-      const tool = tools.find(item => item.name === name)!
-      await expect((tool.execute as never)({}, {} as never)).rejects.toMatchObject({ code: 'forbidden' })
-    }
+    const grants = await (tools.find(item => item.name === 'kb_grant_list')!.execute as never)({}, {} as never)
+    expect(grants).toEqual({ grants: [] })
+    const audit = await (tools.find(item => item.name === 'kb_audit_list')!.execute as never)({}, {} as never)
+    expect(audit).toEqual({ entries: [{ at: '2026-10-02T00:00:00.000Z', actor: 'u1', action: 'create', relPath: 'personal/u1/b.md' }] })
+    const review = await (tools.find(item => item.name === 'kb_review_list')!.execute as never)({}, {} as never)
+    expect(review).toEqual({ pending: [] })
   })
 
-  it('refuses unpublish to an ordinary user without workflow:manage', async () => {
-    const tools = createManagementTools(host(normal))
+  it('keeps the human-confirmation gate while leaving disclosure to registration', async () => {
+    const unpublish = vi.fn(async () => ({ unpublished: 'wf-1' }))
+    const tools = createManagementTools({ workflowUnpublish: unpublish } as never)
     const tool = tools.find(item => item.name === 'workflow_unpublish')!
-    await expect((tool.execute as never)({ id: 'wf-1', authorization: { confirmed: true } }, {} as never))
+    await expect((tool.execute as never)({ id: 'wf-1', authorization: { confirmed: false } }, {} as never))
       .rejects.toMatchObject({ code: 'forbidden' })
+    await expect((tool.execute as never)({ id: 'wf-1', authorization: { confirmed: true } }, {} as never))
+      .resolves.toEqual({ result: { unpublished: 'wf-1' } })
+    expect(unpublish).toHaveBeenCalledWith('wf-1')
   })
 })

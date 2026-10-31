@@ -2,11 +2,17 @@
  * Model-facing management tools for the knowledge base and the workflow plaza.
  *
  * The UI already exposes these operations. This module gives the model the same
- * operations without re-implementing authorization: every tool reads the backend
- * review context (roles + department scope) and refuses with a structured 403 before
- * touching the host. Writes additionally require an explicit human authorization flag,
- * because a model deciding on its own must never be indistinguishable from an operator
- * approving a review.
+ * operations without re-implementing authorization: which tools exist is decided
+ * once from the caller's review context by `toolDisclosure.ts`, so a tool body does
+ * not re-read the permission tree on every call. The context is still read where it
+ * decides WHICH rows a visible tool may return (department scope, own audit trail)
+ * and for the actor recorded in an audit line. Writes additionally require an
+ * explicit human authorization flag, because a model deciding on its own must never
+ * be indistinguishable from an operator approving a review.
+ *
+ * DataOps remains the final authority: every host call below reaches a backend
+ * route that enforces the JWT's current roles and grants, so a stale disclosure can
+ * cause a refusal but never an unauthorized operation.
  *
  * Secrets are write-only through the UI; these tools deliberately reject secret-shaped
  * fields and redact them on reads.
@@ -182,13 +188,6 @@ export function hasPermission(context: ManagementContext, permission: string): b
   return context.permissions.includes(permission)
 }
 
-/** Require one backend permission key; a denial is a structured 403. */
-export function requirePermission(context: ManagementContext, permission: string, action?: string): void {
-  if (!hasPermission(context, permission)) {
-    throw new ManagementToolError('forbidden', `缺少权限 ${permission}${action === undefined ? '' : '（' + action + '）'}`)
-  }
-}
-
 /** Global administrators: all resources and all review queues. */
 export function isGlobalAdmin(context: ManagementContext): boolean {
   return context.review.canReviewGlobal === true
@@ -344,8 +343,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     parameters: {},
     output: jsonOutput,
     execute: async () => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'kb:config:manage')
       return { config: redactSecrets(await host.kbConfigGet()) }
     }),
   }),
@@ -358,8 +355,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { patch: Record<string, unknown>; authorization?: unknown }) => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'kb:config:manage')
       requireConfirmed(args.authorization)
       assertNoSecretFields(args.patch)
       return { config: redactSecrets(await host.kbConfigUpdate(args.patch)) }
@@ -371,8 +366,9 @@ export const createManagementTools = (host: ManagementToolHost) => [
     parameters: {},
     output: jsonOutput,
     execute: async () => run(async () => {
+      // The context decides WHICH grants this caller may see; existence of the
+      // tool itself was decided at registration.
       const context = await host.context()
-      requirePermission(context, 'kb:grant:manage')
       const grants = await host.kbGrantList()
       const visible = isGlobalAdmin(context)
         ? grants
@@ -399,7 +395,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
       authorization?: unknown
     }) => run(async () => {
       const context = await host.context()
-      requirePermission(context, 'kb:grant:manage')
       requirePathScope(context, args.relPath)
       requireConfirmed(args.authorization)
       if (args.relPath.trim() === '' || args.principalId.trim() === '') {
@@ -421,8 +416,9 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { action?: string; actor?: string; path?: string; from?: string; to?: string; limit?: number }) => run(async () => {
+      // Scope the returned rows to what this caller may read; the tool's own
+      // existence was decided from `kb:audit:read` at registration.
       const context = await host.context()
-      requirePermission(context, 'kb:audit:read')
       const entries = await host.kbAuditList({
         ...args,
         limit: Math.max(1, Math.min(500, args.limit ?? 100)),
@@ -441,8 +437,9 @@ export const createManagementTools = (host: ManagementToolHost) => [
     parameters: {},
     output: jsonOutput,
     execute: async () => run(async () => {
+      // Department scope filters the queue; the reviewer capability was proven at
+      // registration.
       const context = await host.context()
-      requirePermission(context, 'kb:review:decide')
       const pending = await host.kbReviewList()
       const visible = isGlobalAdmin(context)
         ? pending
@@ -462,7 +459,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     output: jsonOutput,
     execute: async (args: { name: string; decision: string; note?: string; authorization?: unknown }) => run(async () => {
       const context = await host.context()
-      requirePermission(context, 'kb:review:decide')
       requireConfirmed(args.authorization)
       if (args.decision !== 'approve' && args.decision !== 'reject') {
         throw new ManagementToolError('invalid', 'decision must be approve or reject')
@@ -480,8 +476,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     parameters: {},
     output: jsonOutput,
     execute: async () => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'kb:file:extract')
       return { sync: await host.kbSync() }
     }),
   }),
@@ -491,8 +485,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     parameters: {},
     output: jsonOutput,
     execute: async () => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'kb:file:extract')
       return { index: await host.kbIndexRebuild() }
     }),
   }),
@@ -505,8 +497,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { scope?: string; status?: string }) => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'workflow:read')
       return { workflows: await host.workflowList(args) }
     }),
   }),
@@ -524,8 +514,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: Record<string, unknown>) => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'workflow:publish')
       requireConfirmed(args.authorization)
       return { workflow: await host.workflowUpdate(args) }
     }),
@@ -539,8 +527,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { id: string; authorization?: unknown }) => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'workflow:manage')
       requireConfirmed(args.authorization)
       return { result: await host.workflowUnpublish(args.id) }
     }),
@@ -555,8 +541,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { status?: string; scope?: string; departmentCode?: string }) => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'workflow:review:decide')
       return { workflows: await host.workflowReviewList(args) }
     }),
   }),
@@ -568,8 +552,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { ids: string[] }) => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'workflow:read')
       if (!Array.isArray(args.ids) || args.ids.length === 0) throw new ManagementToolError('invalid', 'ids is required')
       return { scan: await host.workflowReviewScan(args.ids) }
     }),
@@ -585,8 +567,6 @@ export const createManagementTools = (host: ManagementToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { ids: unknown[]; decision: string; note?: string; authorization?: unknown }) => run(async () => {
-      const context = await host.context()
-      requirePermission(context, 'workflow:review:decide')
       requireConfirmed(args.authorization)
       if (args.decision !== 'approve' && args.decision !== 'reject') {
         throw new ManagementToolError('invalid', 'decision must be approve or reject')

@@ -7,11 +7,14 @@
  * bypasses all of that, so the model gets tools that go through the same host
  * operations as the HTTP routes.
  *
- * This module owns argument validation, the permission calls and the tool result
- * shape. The host object is supplied by `index.ts`; it is the seam that reuses the
- * existing `canReadPath` / `canWritePath` / `listDirectoryWithPermissions` /
- * `readKnowledgeFile` / `createKnowledgeEntry` / `moveEntry` implementations, and it
- * is what tests replace without importing the whole plugin.
+ * This module owns argument validation, path-level permission checks and the tool
+ * result shape. Which tools exist is decided once per permission context by
+ * `toolDisclosure.ts`; the path checks here decide which data a visible tool may
+ * touch and are therefore kept. The host object is supplied by `index.ts`; it is the
+ * seam that reuses the existing `canReadPath` / `canWritePath` /
+ * `listDirectoryWithPermissions` / `readKnowledgeFile` / `createKnowledgeEntry` /
+ * `moveEntry` implementations, and it is what tests replace without importing the
+ * whole plugin.
  *
  * @module @sparkelf/dsh-knowledge-base/knowledgeTools
  */
@@ -150,8 +153,6 @@ export type KnowledgeViewSync = { failure?: string }
 export interface KnowledgeFileToolHost {
   /** Resolve the caller (team: DataOps `/auth/me`; personal: the local operator). */
   resolveCaller(): Promise<KnowledgeToolCaller>
-  /** Backend DSH permission for this operation, when the host has a permission context. */
-  hasPermission?(permission: string): Promise<boolean>
   /** FTS5 search over the sidecar index, already scoped to the caller. */
   searchIndex?(input: { query: string; scope?: string; topK: number }): Promise<FtsSearchResult>
   /** Incremental index sync. */
@@ -351,19 +352,12 @@ const run = async (
   }
 }
 
-/** Require one backend DSH permission before the tool touches the tree. */
-async function requirePermission(host: KnowledgeFileToolHost, permission: string): Promise<void> {
-  if (host.hasPermission === undefined) return
-  if (!(await host.hasPermission(permission))) {
-    throw new KnowledgeToolError('forbidden', `缺少权限 ${permission}`)
-  }
-}
-
 /**
- * Build the five file model-facing tools.
+ * Build the knowledge-base model-facing tools.
  *
- * Returned definitions are registered by `apply`; tests call the same definitions with
- * a fake host to assert permission, path and audit behaviour without a live backend.
+ * Returned definitions are registered by `apply` through the permission-based
+ * disclosure coordinator; tests call the same definitions with a fake host to assert
+ * path, audit and result behaviour without a live backend or a permission backend.
  */
 export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
   defineTool({
@@ -380,7 +374,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     execute: async (args: { path: string; content: string; overwrite?: boolean }) => run(args.path, async () => {
       const relPath = assertToolPath(args.path)
       const content = typeof args.content === 'string' ? args.content : ''
-      await requirePermission(host, 'kb:file:write')
       await requireWrite(host, relPath)
       const caller = await host.resolveCaller()
       const existing = await host.statEntry(relPath)
@@ -437,7 +430,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     execute: async (args: { from: string; to: string }) => run(args.from, async () => {
       const from = assertToolPath(args.from)
       const to = assertToolPath(args.to, true)
-      await requirePermission(host, 'kb:file:write')
       await requireWrite(host, from)
       const caller = await host.resolveCaller()
       const targetEntry = to === '' ? undefined : await host.statEntry(to)
@@ -482,7 +474,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     output: jsonOutput,
     isConcurrencySafe: () => true,
     execute: async (args: { query: string; scope?: string; topK?: number }) => run(undefined, async () => {
-      await requirePermission(host, 'kb:file:read')
       if (host.searchIndex === undefined) throw new KnowledgeToolError('not-configured', 'knowledge index is unavailable')
       const query = typeof args.query === 'string' ? args.query.trim() : ''
       if (query === '') throw new KnowledgeToolError('empty-path', 'query must be non-empty')
@@ -566,7 +557,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { docId?: number; path?: string; scope?: string; rebuild?: boolean; dryRun?: boolean }) => run(args.path, async () => {
-      await requirePermission(host, 'kb:file:read')
       if (host.vectorize === undefined) throw new KnowledgeToolError('not-configured', 'vector indexing is unavailable')
       const hasDocId = args.docId !== undefined
       const hasPath = typeof args.path === 'string' && args.path.trim() !== ''
@@ -611,7 +601,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     output: jsonOutput,
     isConcurrencySafe: () => true,
     execute: async (args: { citation?: string; docId?: number; chunkId?: number | string }) => run(undefined, async () => {
-      await requirePermission(host, 'kb:file:read')
       if (host.chunkGet === undefined) throw new KnowledgeToolError('not-configured', 'knowledge chunk resolver is unavailable')
       // The token is authoritative: it is what the model and viewer share. Accepting
       // docId+chunkId as well keeps the tool usable when a caller already split it.
@@ -660,7 +649,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     output: jsonOutput,
     isConcurrencySafe: () => true,
     execute: async (args: { docId?: number; citation?: string; citationToken?: string }) => run(undefined, async () => {
-      await requirePermission(host, 'kb:file:read')
       if (host.outline === undefined) throw new KnowledgeToolError('not-configured', 'knowledge outline resolver is unavailable')
       // Accept the citation body and any chunk suffix; kb_outline is document-scoped.
       const rawToken = args.citation ?? args.citationToken ?? ''
@@ -688,7 +676,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     output: jsonOutput,
     isConcurrencySafe: () => false,
     execute: async (args: { docId?: number }) => run(undefined, async () => {
-      await requirePermission(host, 'kb:file:read')
       if (host.outlineRewrite === undefined) throw new KnowledgeToolError('not-configured', 'knowledge outline rewrite is unavailable')
       const docId = Number(args.docId)
       if (!Number.isInteger(docId) || docId <= 0) {
@@ -755,8 +742,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
       summaryVersion?: string
       sections?: OutlineSectionSubmission[]
     }) => run(undefined, async () => {
-      await requirePermission(host, 'kb:file:read')
-      await requirePermission(host, 'kb:file:write')
       if (host.outlineSave === undefined) throw new KnowledgeToolError('not-configured', 'knowledge outline saver is unavailable')
       const docId = Number(args.docId)
       if (!Number.isInteger(docId) || docId <= 0) {
@@ -788,7 +773,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     output: jsonOutput,
     execute: async (args: { path: string }) => run(args.path, async () => {
       const relPath = assertToolPath(args.path)
-      await requirePermission(host, 'kb:file:delete')
       await requireWrite(host, relPath)
       const caller = await host.resolveCaller()
       const entry = await host.statEntry(relPath)
@@ -818,7 +802,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     output: jsonOutput,
     execute: async (args: { path: string }) => run(args.path, async () => {
       const relPath = assertToolPath(args.path)
-      await requirePermission(host, 'kb:file:write')
       await requireWrite(host, relPath)
       const caller = await host.resolveCaller()
       const created = await host.createEntry(relPath, { directory: true })
@@ -838,7 +821,6 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     output: jsonOutput,
     execute: async (args: { path?: string }) => run(args.path, async () => {
       const relPath = assertToolPath(args.path ?? '', true)
-      await requirePermission(host, 'kb:file:extract')
       const caller = await host.resolveCaller()
       if (relPath === '') {
         const candidates = await host.listExtractCandidates(20)

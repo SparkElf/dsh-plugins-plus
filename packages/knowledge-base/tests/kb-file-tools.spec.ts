@@ -37,7 +37,6 @@ interface FakeOptions {
   search?: (scope: string, query: string, limit: number) => Promise<KnowledgeFileHit[]>
   readSettings?: () => Promise<{ reviewRequired?: boolean; mineruBaseUrl?: string }>
   auditThrows?: boolean
-  permission?: boolean
   searchIndex?: KnowledgeFileToolHost['searchIndex']
   chunkGet?: KnowledgeFileToolHost['chunkGet']
   outline?: KnowledgeFileToolHost['outline']
@@ -57,7 +56,6 @@ const makeHost = (options: FakeOptions = {}) => {
   }
   const caller: KnowledgeToolCaller = { userId: 'u1', label: '超级管理员' }
   const host: KnowledgeFileToolHost = {
-    hasPermission: async () => options.permission ?? true,
     ...(options.searchIndex === undefined ? {} : { searchIndex: options.searchIndex }),
     ...(options.chunkGet === undefined ? {} : { chunkGet: options.chunkGet }),
     ...(options.outline === undefined ? {} : { outline: options.outline }),
@@ -352,22 +350,18 @@ describe('readAuthorized kept for the UI read route', () => {
   })
 })
 
-describe('kb_file permission keys', () => {
-  it('refuses every file tool when the backend key is absent', async () => {
-    const { host } = makeHost({ permission: false })
-    await expect(execute(host, 'kb_file_write', { path: 'a.md', content: 'x' })).rejects.toMatchObject({ code: 'forbidden' })
-    await expect(execute(host, 'kb_file_delete', { path: 'a.md' })).rejects.toMatchObject({ code: 'forbidden' })
-  })
-
-  it('allows a caller holding the key to use the file tools', async () => {
-    const { host } = makeHost({ permission: true })
-    await expect(execute(host, 'kb_file_write', { path: 'a.md', content: 'x' })).resolves.toMatchObject({ ok: true })
+describe('permission disclosure boundary', () => {
+  it('keeps the path-level write check without a per-call permission oracle', async () => {
+    const { host, calls } = makeHost({ canWrite: () => false })
+    await expect(execute(host, 'kb_file_write', { path: 'a.md', content: 'x' }))
+      .rejects.toMatchObject({ code: 'forbidden' })
+    expect(calls.createEntry).toHaveLength(0)
   })
 })
 
 
 describe('kb_search', () => {
-  it('returns a citation token per hit and refuses without read permission', async () => {
+  it('returns a citation token per hit', async () => {
     const searchIndex = vi.fn(async () => ({
       hits: [{
         path: 'global/制度.md', markdownPath: 'global/制度.md', line: 3,
@@ -392,8 +386,6 @@ describe('kb_search', () => {
       'chunkId', 'chunkKey', 'citation', 'docId', 'path', 'quote', 'score', 'snippet',
     ])
     expect(searchIndex).toHaveBeenCalledWith({ query: '差旅', topK: 5 })
-    const denied = makeHost({ searchIndex, permission: false })
-    await expect(execute(denied.host, 'kb_search', { query: '差旅' })).rejects.toMatchObject({ code: 'forbidden' })
   })
 
   it('rejects an empty query before touching the index', async () => {
@@ -519,12 +511,7 @@ describe('kb_outline', () => {
     expect(resolver).not.toHaveBeenCalled()
   })
 
-  it('fails closed without read permission and preserves a host 403', async () => {
-    const resolver = vi.fn(async () => outline)
-    const denied = makeHost({ outline: resolver, permission: false })
-    await expect(execute(denied.host, 'kb_outline', { docId: 49 })).rejects.toMatchObject({ code: 'forbidden' })
-    expect(resolver).not.toHaveBeenCalled()
-
+  it('preserves the host 403 for a document the caller cannot read', async () => {
     const forbidden = makeHost({
       outline: vi.fn(async () => { throw new KnowledgeToolError('forbidden', 'read access is required') }),
     })
@@ -580,32 +567,28 @@ describe('kb_chunk_get', () => {
     })
   })
 
-  it('fails closed without read permission and preserves not-found', async () => {
+  it('preserves a host not-found and a host forbidden refusal', async () => {
     const chunkGet = vi.fn(async () => { throw new KnowledgeToolError('not-found', 'no such document chunk') })
-    const denied = makeHost({ chunkGet, permission: false })
-    await expect(execute(denied.host, 'kb_chunk_get', { docId: 49, chunkId: 335 }))
-      .rejects.toMatchObject({ code: 'forbidden' })
-    expect(chunkGet).not.toHaveBeenCalled()
-    const allowed = makeHost({ chunkGet })
-    await expect(execute(allowed.host, 'kb_chunk_get', { docId: 49, chunkId: 335 }))
+    await expect(execute(makeHost({ chunkGet }).host, 'kb_chunk_get', { docId: 49, chunkId: 335 }))
       .rejects.toMatchObject({ code: 'not-found' })
+    const forbidden = makeHost({
+      chunkGet: async () => { throw new KnowledgeToolError('forbidden', 'read access is required') },
+    })
+    await expect(execute(forbidden.host, 'kb_chunk_get', { docId: 49, chunkId: 335 }))
+      .rejects.toMatchObject({ code: 'forbidden' })
   })
 })
 
 
 describe('kb_outline_save', () => {
-  it('refuses before writing when the caller lacks the summary permission', async () => {
-    const calls: unknown[] = []
+  it('preserves the host read/write refusal for the source document', async () => {
     const { host } = makeHost({
-      permission: false,
-      outlineSave: async (input) => {
-        calls.push(input)
-        return undefined
+      outlineSave: async () => {
+        throw new KnowledgeToolError('forbidden', 'write access is required to save a summary for this document')
       },
     })
     await expect(execute(host, 'kb_outline_save', { docId: 1, summary: '摘要' }))
       .rejects.toMatchObject({ code: 'forbidden' })
-    expect(calls).toHaveLength(0)
   })
 
   it('passes validation failures back without pretending the save succeeded', async () => {
@@ -670,9 +653,7 @@ describe('kb_vectorize explicit tool', () => {
       .rejects.toMatchObject({ code: 'not-configured' })
   })
 
-  it('requires read permission and exactly one target', async () => {
-    const { host } = makeHost({ permission: false })
-    await expect(execute(host, 'kb_vectorize', { docId: 1 })).rejects.toMatchObject({ code: 'forbidden' })
+  it('requires exactly one target', async () => {
     const { host: allowed } = makeHost({ vectorize: async () => ({ ok: true }) })
     await expect(execute(allowed, 'kb_vectorize', {})).rejects.toMatchObject({ code: 'invalid' })
     await expect(execute(allowed, 'kb_vectorize', { docId: 1, path: 'a' })).rejects.toMatchObject({ code: 'invalid' })
