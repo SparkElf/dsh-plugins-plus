@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-credential-manager",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Third-party credential inventory for the official DSH right Sidebar: metadata CRUD, encrypted secrets, guarded model tools, and a reserved connector seam.",
   "type": "module",
   "main": "./lib/index.js",
@@ -93,5 +93,11 @@
   "dependencies": {
     "@sparkelf/dsh-workbench-vault": "^0.1.2",
     "react-icons": "^5.5.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SparkElf/dsh-plugins-plus.git",
+    "directory": "packages/credential-manager"
+  },
+  "homepage": "https://github.com/SparkElf/dsh-plugins-plus#readme"
 }
