@@ -670,7 +670,14 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
   const onTreeContextMenu = useContextMenuExtras({ root, actions: menuActions })
 
   /** Every exclusion pattern at once, in the one array identity the explorer keys on. */
-  const exclude = useMemo(() => METADATA_NAMES.map(name => `**/${name}`), [])
+  const exclude = useMemo(() => [
+    ...METADATA_NAMES.map(name => `**/${name}`),
+    // The graph tab's folders are a domain structure, not a document folder the
+    // Knowledge tree should mirror. The graph tab owns them; the KB tree keeps only
+    // ordinary knowledge folders. Graph documents remain reachable through Home and
+    // search, which are document surfaces rather than the folder tree.
+    '**/知识图谱',
+  ], [])
 
   /**
    * Pass the explorer's own rename through to the caller.

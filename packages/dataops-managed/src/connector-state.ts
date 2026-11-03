@@ -14,9 +14,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
-  canReview,
-  hasPermission,
-  isSuperAdmin,
+  isAdmin,
   type DataOpsScope,
 } from './tool-scope.ts'
 
@@ -60,43 +58,90 @@ export const CONNECTOR_STATE_PATH = join(
   'connector-state.json',
 )
 
-/** Capability definitions before permission filtering. */
+/**
+ * Capability definitions before permission filtering.
+ *
+ * The set follows `dataops/docs/dataops-connector-development-spec.md` §2.3's credential list.
+ * `approval.push` was renamed to `resource.manage` when the capability grew from approval push
+ * into resource approval and authorization. Skill plaza and review queue are governed by
+ * `skill:*` permissions and stay out of the connector's capability switches.
+ */
 const CAPABILITIES = [
-  {
-    id: 'skill.plaza',
-    name: '技能广场',
-    description: '读取、安装和管理当前账号可见的技能',
-    allowed: (scope: DataOpsScope) => hasPermission(scope, 'skill:read'),
-  },
-  {
-    id: 'review.queue',
-    name: '审核队列',
-    description: '查看待审技能、扫描风险并给出审核结论',
-    allowed: (scope: DataOpsScope) => canReview(scope),
-  },
   {
     id: 'data.query',
     name: '数据查询',
     description: '通过 DataOps 数据查询能力回答业务问题',
+    defaultEnabled: true,
+    visible: () => true,
     allowed: () => true,
   },
   {
-    id: 'api.docs',
-    name: '管理接口文档',
-    description: '仅超级管理员可查询 DataOps OpenAPI 接口文档',
-    allowed: (scope: DataOpsScope) => isSuperAdmin(scope),
+    id: 'resource.manage',
+    name: '资源管理',
+    description: '在对话中批量审批资源申请，给用户或角色授予资源访问权限',
+    defaultEnabled: true,
+    visible: (scope: DataOpsScope) => isAdmin(scope),
+    allowed: (scope: DataOpsScope) => isAdmin(scope),
+  },
+  {
+    id: 'admin.manage',
+    name: '万相中台管理',
+    description: '登录万相中台后台执行管理动作',
+    defaultEnabled: true,
+    visible: (scope: DataOpsScope) => isAdmin(scope),
+    allowed: (scope: DataOpsScope) => isAdmin(scope),
   },
 ] as const
+
+/**
+ * Persisted ids that moved to a new capability id.
+ *
+ * `approval.push` shipped before the capability grew from approval push into resource
+ * approval and authorization. Its stored toggle carries over to `resource.manage`; when both
+ * keys are present the current id wins.
+ */
+const CAPABILITY_ALIASES: Readonly<Record<string, string>> = {
+  'approval.push': 'resource.manage',
+}
+
+/** The ids the catalogue accepts; any other persisted key is a legacy value. */
+const CAPABILITY_IDS: readonly string[] = CAPABILITIES.map(capability => capability.id)
+
+/**
+ * Keep only boolean values for known capability ids.
+ *
+ * A state file written before the catalogue changed may still hold retired ids. Those keys are
+ * ignored rather than treated as a corrupt file; a missing new key takes the capability's
+ * `defaultEnabled`.
+ * @param value - the `capabilities` member of a parsed state file.
+ * @returns the readable toggles, keyed by current capability id.
+ */
+function migrateCapabilities(value: unknown): Record<string, boolean> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const stored = value as Record<string, unknown>
+  const capabilities: Record<string, boolean> = {}
+  for (const id of CAPABILITY_IDS) {
+    if (typeof stored[id] === 'boolean') capabilities[id] = stored[id]
+  }
+  for (const [legacyId, id] of Object.entries(CAPABILITY_ALIASES)) {
+    if (capabilities[id] === undefined && typeof stored[legacyId] === 'boolean') {
+      capabilities[id] = stored[legacyId]
+    }
+  }
+  return capabilities
+}
 
 /** Read state; a missing or corrupt file is a safe disabled state. */
 export async function readConnectorState(path = CONNECTOR_STATE_PATH): Promise<DataOpsConnectorState> {
   try {
-    const payload = JSON.parse(await readFile(path, 'utf8')) as Partial<DataOpsConnectorState>
+    const payload = JSON.parse(await readFile(path, 'utf8')) as unknown
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+      return { enabled: false, capabilities: {} }
+    }
+    const record = payload as Record<string, unknown>
     return {
-      enabled: payload.enabled === true,
-      capabilities: typeof payload.capabilities === 'object' && payload.capabilities !== null
-        ? { ...payload.capabilities }
-        : {},
+      enabled: record.enabled === true,
+      capabilities: migrateCapabilities(record.capabilities),
     }
   } catch {
     return { enabled: false, capabilities: {} }
@@ -110,7 +155,12 @@ export async function writeConnectorState(
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = path + '.tmp-' + process.pid.toString()
-  await writeFile(temporary, JSON.stringify(state, null, 2), 'utf8')
+  // Persist only current ids so a legacy key cannot come back through a state write.
+  const payload: DataOpsConnectorState = {
+    enabled: state.enabled,
+    capabilities: migrateCapabilities(state.capabilities),
+  }
+  await writeFile(temporary, JSON.stringify(payload, null, 2), 'utf8')
   await rename(temporary, path)
 }
 
@@ -118,11 +168,11 @@ export async function writeConnectorState(
 export function buildConnectorView(scope: DataOpsScope | undefined, state: DataOpsConnectorState): ConnectorView {
   const capabilities = scope === undefined
     ? []
-    : CAPABILITIES.filter(capability => capability.allowed(scope)).map(capability => ({
+    : CAPABILITIES.filter(capability => capability.visible(scope) && capability.allowed(scope)).map(capability => ({
         id: capability.id,
         name: capability.name,
         description: capability.description,
-        enabled: state.capabilities[capability.id] !== false,
+        enabled: state.capabilities[capability.id] ?? capability.defaultEnabled,
         permitted: true,
       }))
   return {

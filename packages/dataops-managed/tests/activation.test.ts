@@ -81,7 +81,9 @@ describe('apply', () => {
       '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',
       '/integrations/dataops/model-sync',
+      '/integrations/dataops/open-resource/events',
       '/integrations/dataops/rbac',
+      '/integrations/dataops/resource-tab/config',
       '/integrations/dataops/review',
       '/integrations/dataops/review-context',
       '/integrations/dataops/review-notifications',
@@ -105,10 +107,12 @@ describe('apply', () => {
       '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',
       '/integrations/dataops/model-sync',
+      '/integrations/dataops/open-resource/events',
       '/integrations/dataops/rbac',
       '/integrations/dataops/review',
       '/integrations/dataops/review-context',
       '/integrations/dataops/review-notifications',
+      '/integrations/dataops/resource-tab/config',
       '/integrations/dataops/review-settings',
       '/integrations/dataops/skill-plaza',
       '/integrations/dataops/tool-timeout',
@@ -127,8 +131,8 @@ describe('apply', () => {
 
     await apply(context as never, CONFIG)
 
-    expect(registered).toHaveLength(1)
-    const provider = registered[0] as {
+    expect(registered).toHaveLength(2)
+    const provider = (registered as Array<{ name: string }>).find((item) => item.name === 'dataops-query') as unknown as {
       name: string
       list: () => Promise<{ name: string; locator: URL }[]>
       get: () => Promise<{ name: string; content: string }>

@@ -73,16 +73,19 @@ export interface DepartmentRow {
   updatedAt?: string
 }
 
-/** One skill/workflow resource and its visibility scope. */
+/** A resource scope value; `unshared` only applies to a platform built-in skill. */
+export type ResourceScopeVisibility = ResourceVisibility | 'unshared'
+
+/** One plaza skill/workflow or platform built-in skill and its visibility scope. */
 export interface ResourceScopeRow {
-  kind: 'skill' | 'workflow'
+  kind: 'skill' | 'workflow' | 'builtin'
   id: string | number
   name: string
-  ownerId?: string
-  ownerName?: string
+  ownerId?: string | null
+  ownerName?: string | null
   departmentCode?: string | null
-  visibility: ResourceVisibility
-  reviewStatus?: ReviewStatus
+  visibility: ResourceScopeVisibility
+  reviewStatus?: ReviewStatus | 'unshared'
   updatedAt?: string
 }
 

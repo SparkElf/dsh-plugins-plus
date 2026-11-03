@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "description": "Document text recognition (OCR) over a shared MinerU service. Ships a skill, a host half that registers it and relays the shared address, and a settings panel where a super administrator distributes that address to every member.",
   "type": "module",
-  "private": true,
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
   "exports": {

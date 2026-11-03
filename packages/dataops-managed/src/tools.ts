@@ -21,6 +21,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ReviewApi } from './review-api.ts'
+import { CollectApi } from './collect-api.ts'
+import { ResourceManagementApi } from './resource-management-api.ts'
+import type { OpenResourceHub } from './resource-tab.ts'
 import { readLocalSkills } from './skill-plaza.ts'
 import { ApiDocsUnavailableError, searchOpenApiDocument, type ApiDocsFilters } from './api-docs.ts'
 import { OPEN_OBJECT_SCHEMA, renderJson, type Json } from './tool-output.ts'
@@ -65,7 +68,10 @@ export function buildAiManagementTools(
   ctx: Context,
   reviewApi: ReviewApi,
   readScope: () => DataOpsScope | undefined,
+  collectHub: OpenResourceHub,
 ): AiManagedTool[] {
+  const collectApi = new CollectApi(reviewApi)
+  const resourceManagementApi = new ResourceManagementApi(reviewApi)
   const approve = async (tool: string, exec: ToolRunContext, reason: string): Promise<void> => {
     if (exec.agent === undefined) throw new Error(tool + ' requires an initiating agent')
     const approval = (ctx as unknown as { approval: { request(input: { agent: unknown; toolName: string; callId: string; signal: AbortSignal; reason: string }): Promise<string> } }).approval
@@ -126,6 +132,77 @@ export function buildAiManagementTools(
         return { skillId: args.skill_id, enabled }
       },
     })
+  }
+
+  const parseJsonObject = (tool: string, label: string, value: string | undefined): Record<string, unknown> | undefined => {
+    if (value === undefined || value.trim() === '') return undefined
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(value) as unknown
+    } catch {
+      throw new Error(tool + ': ' + label + ' must be valid JSON')
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error(tool + ': ' + label + ' must be a JSON object')
+    }
+    return parsed as Record<string, unknown>
+  }
+
+  const parseJsonArray = (tool: string, label: string, value: string | undefined): unknown[] => {
+    if (value === undefined || value.trim() === '') return []
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(value) as unknown
+    } catch {
+      throw new Error(tool + ': ' + label + ' must be valid JSON')
+    }
+    if (!Array.isArray(parsed)) throw new Error(tool + ': ' + label + ' must be a JSON array')
+    return parsed
+  }
+
+  /**
+   * Keep only the fields the DataOps execute DTO accepts. The plan tool returns
+   * `createSql`/`targetSchema`/`notes` beside `createTable`; if the model passes
+   * the whole plan (or rebuilds it after a table-name edit), the backend's
+   * `forbidNonWhitelisted` pipe rejects the call with a generic 400.
+   */
+  const normalizeCreatePlan = (
+    tool: string,
+    plan: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined => {
+    if (plan === undefined) return undefined
+    const tableName = typeof plan.tableName === 'string' ? plan.tableName.trim() : ''
+    if (!tableName) throw new Error(tool + ': create_plan_json.tableName is required')
+    const rawColumns = Array.isArray(plan.columns) ? plan.columns : []
+    if (!rawColumns.length) throw new Error(tool + ': create_plan_json.columns is required')
+    const columns = rawColumns.map((raw, index) => {
+      const column = raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? raw as Record<string, unknown>
+        : {}
+      const sourceKey = typeof column.sourceKey === 'string' ? column.sourceKey : ''
+      const name = typeof column.name === 'string' ? column.name : ''
+      const chineseName = typeof column.chineseName === 'string' ? column.chineseName : ''
+      const dataType = typeof column.dataType === 'string' ? column.dataType : ''
+      if (!sourceKey || !name || !chineseName || !dataType) {
+        throw new Error(tool + ': create_plan_json.columns[' + index + '] needs sourceKey/name/chineseName/dataType')
+      }
+      return {
+        sourceKey,
+        name,
+        chineseName,
+        dataType,
+        ...(typeof column.nullable === 'boolean' ? { nullable: column.nullable } : {}),
+        ...(typeof column.comment === 'string' ? { comment: column.comment } : {}),
+      }
+    })
+    return {
+      tableName,
+      ...(typeof plan.tableChineseName === 'string' && plan.tableChineseName.trim()
+        ? { tableChineseName: plan.tableChineseName.trim() } : {}),
+      ...(typeof plan.tableComment === 'string' && plan.tableComment.trim()
+        ? { tableComment: plan.tableComment.trim() } : {}),
+      columns,
+    }
   }
 
   return [
@@ -344,6 +421,436 @@ export function buildAiManagementTools(
             if (error instanceof ApiDocsUnavailableError) throw new Error(error.message)
             throw error
           }
+        },
+      }),
+    },
+    {
+      name: 'dataops_collect_preview',
+      definition: defineTool({
+        name: 'dataops_collect_preview',
+        description: 'Parse one spreadsheet attachment from the workspace and return DataOps\'s preview plus the importable database destinations. Read-only: it does not create a table and does not write rows. Use this first in the data-collection skill, then ask the user to choose the destination when more than one is returned.',
+        parameters: {
+          file_path: { type: 'string', required: true, description: 'Absolute or workspace-relative path to one .xlsx/.xls/.csv/.tsv file.' },
+          model_id: { type: 'number', description: 'Optional shared AI model id for the later plan call.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { file_path: string; model_id?: number }, exec) => {
+          const preview = await collectApi.preview(args.file_path)
+          const dataSources = await collectApi.dataSources()
+          audit('dataops_collect_preview', exec, {
+            filePath: args.file_path,
+            sessionId: preview.sessionId,
+            dataSourceCount: dataSources.length,
+          })
+          return {
+            sessionId: preview.sessionId,
+            preview,
+            dataSources,
+          } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_collect_plan',
+      definition: defineTool({
+        name: 'dataops_collect_plan',
+        description: 'Generate a create-table plan or an existing-table field mapping for a parsed spreadsheet session. Read-only: DataOps only plans, it does not execute DDL or write rows. Call this after the user has chosen a data source; pass root_schema + root_table only when appending to an existing table.',
+        parameters: {
+          session_id: { type: 'string', required: true, description: 'Session id returned by dataops_collect_preview.' },
+          data_source_urn: { type: 'string', required: true, description: 'Destination URN from the preview result.' },
+          target_schema: { type: 'string', description: 'Existing-table schema; required when root_table is set.' },
+          target_table: { type: 'string', description: 'Existing table name; omit to create a new table.' },
+          model_id: { type: 'number', description: 'Optional shared AI model id.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { session_id: string; data_source_urn: string; target_schema?: string; target_table?: string; model_id?: number }, exec) => {
+          const plan = await collectApi.plan({
+            sessionId: args.session_id,
+            dataSourceUrn: args.data_source_urn,
+            ...(args.target_table
+              ? {
+                  targetTable: {
+                    schema: args.target_schema || '',
+                    table: args.target_table,
+                  },
+                }
+              : {}),
+            ...(args.model_id === undefined ? {} : { modelId: args.model_id }),
+          })
+          audit('dataops_collect_plan', exec, {
+            sessionId: args.session_id,
+            dataSourceUrn: args.data_source_urn,
+            targetTable: args.target_table ?? null,
+          })
+          return plan as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_collect_execute',
+      definition: defineTool({
+        name: 'dataops_collect_execute',
+        description: 'Execute one confirmed spreadsheet import: create a table (or write to an existing table), insert rows, and register the DataOps resource. This is the ONLY collection tool that mutates data. Call it only after the user explicitly confirms the read-only plan in natural language (e.g. 确认/开始吧); never call it while the plan is still being edited.',
+        parameters: {
+          session_id: { type: 'string', required: true, description: 'Session id from dataops_collect_preview.' },
+          data_source_urn: { type: 'string', required: true, description: 'Destination URN.' },
+          mode: { type: 'string', required: true, description: 'CREATE_TABLE or EXISTING_TABLE.' },
+          target_schema: { type: 'string', description: 'Target schema for EXISTING_TABLE.' },
+          target_table: { type: 'string', description: 'Target table for EXISTING_TABLE.' },
+          create_plan_json: { type: 'string', description: 'Only plan.createTable (tableName/tableChineseName/tableComment/columns). Do not send createSql/targetSchema/notes; if the user edits the table name, call dataops_collect_plan again and pass its createTable.' },
+          mappings_json: { type: 'string', description: 'JSON array of {sourceKey,targetColumn} for EXISTING_TABLE.' },
+          resource_name: { type: 'string', description: 'Resource display name drafted by the plan and confirmed by the user.' },
+          resource_description: { type: 'string', description: 'Optional resource description.' },
+          resource_tags: { type: 'array', items: { type: 'string' }, description: 'Optional resource tags.' },
+          ai_visible: { type: 'boolean', description: 'Whether AI may retrieve this resource. Defaults to true.' },
+          access_level: { type: 'string', description: 'PUBLIC, PROTECTED or PRIVATE. Defaults to PRIVATE.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: {
+          session_id: string
+          data_source_urn: string
+          mode: string
+          target_schema?: string
+          target_table?: string
+          create_plan_json?: string
+          mappings_json?: string
+          resource_name?: string
+          resource_description?: string
+          resource_tags?: string[]
+          ai_visible?: boolean
+          access_level?: string
+        }, exec) => {
+          if (args.mode !== 'CREATE_TABLE' && args.mode !== 'EXISTING_TABLE') {
+            throw new Error('dataops_collect_execute: mode must be CREATE_TABLE or EXISTING_TABLE')
+          }
+          const createPlan = normalizeCreatePlan(
+            'dataops_collect_execute',
+            parseJsonObject('dataops_collect_execute', 'create_plan_json', args.create_plan_json),
+          )
+          const mappings = parseJsonArray('dataops_collect_execute', 'mappings_json', args.mappings_json)
+          if (args.mode === 'CREATE_TABLE' && createPlan === undefined) {
+            throw new Error('dataops_collect_execute: create_plan_json is required for CREATE_TABLE')
+          }
+          if (args.mode === 'EXISTING_TABLE' && (!args.target_schema || !args.target_table)) {
+            throw new Error('dataops_collect_execute: target_schema and target_table are required for EXISTING_TABLE')
+          }
+          const payload: Record<string, unknown> = {
+            sessionId: args.session_id,
+            dataSourceUrn: args.data_source_urn,
+            mode: args.mode,
+            mappings,
+            ...(createPlan === undefined ? {} : { createPlan }),
+            ...(args.target_schema && args.target_table
+              ? { targetTable: { schema: args.target_schema, table: args.target_table } }
+              : {}),
+            ...(args.resource_name === undefined ? {} : { resourceName: args.resource_name }),
+            ...(args.resource_description === undefined ? {} : { resourceDescription: args.resource_description }),
+            ...(args.resource_tags === undefined ? {} : { resourceTags: args.resource_tags }),
+            ...(args.ai_visible === undefined ? {} : { aiVisible: args.ai_visible }),
+            ...(args.access_level === undefined ? {} : { accessLevel: args.access_level }),
+          }
+          const result = await collectApi.execute(payload)
+          const resource = result.resource
+          audit('dataops_collect_execute', exec, {
+            sessionId: args.session_id,
+            mode: args.mode,
+            resourceId: resource?.id ?? null,
+            importedRows: result.importedRows ?? null,
+          })
+          return result as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_collect_resources',
+      definition: defineTool({
+        name: 'dataops_collect_resources',
+        description: 'Search the current DataOps resource catalog for an append target. Read-only and scoped by DataOps resource visibility. Use it when the user chooses "追加到已有资源" instead of a remote select control.',
+        parameters: {
+          query: { type: 'string', description: 'Resource name, table name or URN keyword.' },
+          limit: { type: 'number', description: 'Maximum rows (default 20, max 50).' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { query?: string; limit?: number }) => {
+          const resources = await collectApi.listResources(args.query ?? '', args.limit ?? 20)
+          return { resources } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_open_resource_tab',
+      definition: defineTool({
+        name: 'dataops_open_resource_tab',
+        description: 'Open or focus the DataOps resource tab in the right sidebar. This only navigates the browser: it does not grant access or mutate data. Use mode=focus after an import succeeds, grant for 分配权限, detail for 查看详情, and audit for 查看操作记录.',
+        parameters: {
+          resource_id: { type: 'number', required: true, description: 'DataOps resource id.' },
+          resource_name: { type: 'string', description: 'Display name used as the tab subtitle.' },
+          mode: { type: 'string', description: 'focus | grant | detail | audit. Defaults to focus.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { resource_id: number; resource_name?: string; mode?: string }, exec) => {
+          if (!Number.isSafeInteger(args.resource_id) || args.resource_id <= 0) {
+            throw new Error('dataops_open_resource_tab: resource_id must be a positive integer')
+          }
+          const requested = args.mode ?? 'focus'
+          const mode = requested === 'grant' || requested === 'detail' || requested === 'audit' ? requested : 'focus'
+          const payload = collectHub.broadcast({
+            resourceId: args.resource_id,
+            resourceName: args.resource_name ?? null,
+            mode,
+            nonce: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+          })
+          audit('dataops_open_resource_tab', exec, {
+            resourceId: args.resource_id,
+            mode,
+            subscribers: collectHub.size(),
+          })
+          return {
+            opened: collectHub.size() > 0,
+            mode,
+            resourceId: args.resource_id,
+            requestId: payload.requestId,
+            subscribers: collectHub.size(),
+          }
+        },
+      }),
+    },
+    {
+      name: 'dataops_resource_pending_list',
+      definition: defineTool({
+        name: 'dataops_resource_pending_list',
+        description: 'List pending DataOps approval tasks and their active user tasks. Administrator only; the resource.manage connector capability must be on. Read-only.',
+        parameters: {
+          query: { type: 'string', description: 'Optional keyword over task title/code/requester.' },
+          limit: { type: 'number', description: 'Maximum tasks (default 20, max 100).' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { query?: string; limit?: number }) => {
+          const limit = Math.max(1, Math.min(100, Math.round(args.limit ?? 20)))
+          const tasks = await resourceManagementApi.listPendingTasks(args.query ?? '', limit)
+          return {
+            tasks: tasks.map((task) => ({
+              id: task.id,
+              code: task.code,
+              title: task.title,
+              status: task.status,
+              requester: task.requester,
+              requesterUserId: task.requesterUserId,
+              workflow: task.workflow,
+              userTasks: task.userTasks,
+              updatedAt: task.updatedAt,
+            })),
+            count: tasks.length,
+          } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_resource_grant_list',
+      definition: defineTool({
+        name: 'dataops_resource_grant_list',
+        description: 'List the current access grants of one DataOps resource. Administrator only; resource.manage capability must be on. Read-only.',
+        parameters: {
+          resource_id: { type: 'number', required: true, description: 'DataOps resource id.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { resource_id: number }) => {
+          if (!Number.isSafeInteger(args.resource_id) || args.resource_id <= 0) throw new Error('resource_id must be a positive integer')
+          const grants = await resourceManagementApi.listGrants(args.resource_id)
+          return { resourceId: args.resource_id, grants } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_resource_grant_batch',
+      definition: defineTool({
+        name: 'dataops_resource_grant_batch',
+        description: 'Batch grant READ/MANAGE access on one DataOps resource to users, roles or departments. Administrator only; resource.manage capability must be on. The existing grants are preserved; the operation is audited by DataOps.',
+        parameters: {
+          resource_id: { type: 'number', required: true, description: 'DataOps resource id.' },
+          application_id: { type: 'number', description: 'Application id used for the grants. Defaults to an existing grant application or the first selectable application.' },
+          grants: {
+            type: 'array',
+            required: true,
+            description: 'Targets to grant.',
+            items: {
+              type: 'object',
+              properties: {
+                targetType: { type: 'string', description: 'USER, ROLE, DEPARTMENT or APPLICATION.' },
+                targetId: { type: 'string', description: 'User id, role code, department code or application id.' },
+                permission: { type: 'string', description: 'READ or MANAGE. Defaults to READ.' },
+                grantType: { type: 'string', description: 'REGULAR or TEMPORARY. Defaults to REGULAR.' },
+                applicationId: { type: 'number', description: 'Optional per-grant application id override.' },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: {
+          resource_id: number
+          application_id?: number
+          grants: Array<{ targetType: string; targetId: string; permission?: string; grantType?: string; applicationId?: number }>
+        }, exec) => {
+          if (!Number.isSafeInteger(args.resource_id) || args.resource_id <= 0) throw new Error('resource_id must be a positive integer')
+          if (!Array.isArray(args.grants) || args.grants.length === 0) throw new Error('grants must be a non-empty array')
+          const existing = await resourceManagementApi.listGrants(args.resource_id)
+          let appId = args.application_id
+          if (appId === undefined) appId = existing.map((g) => Number(g.applicationId)).find((id) => Number.isSafeInteger(id) && id > 0)
+          if (appId === undefined) {
+            const apps = await resourceManagementApi.listApplications()
+            appId = apps.map((app) => Number(app.id)).find((id) => Number.isSafeInteger(id) && id > 0)
+          }
+          if (appId === undefined) throw new Error('no application is available for access grants')
+          const merged = new Map<string, Record<string, unknown>>()
+          for (const grant of existing) {
+            const targetType = String(grant.targetType ?? '')
+            const targetId = String(grant.targetId ?? '')
+            if (!targetType || !targetId) continue
+            const applicationId = Number(grant.applicationId) || appId
+            merged.set(targetType + ':' + targetId + ':' + applicationId, {
+              targetType,
+              targetId,
+              permission: String(grant.permission ?? 'READ'),
+              grantType: String(grant.grantType ?? 'REGULAR'),
+              applicationId,
+            })
+          }
+          for (const grant of args.grants) {
+            const targetType = String(grant.targetType ?? '').trim().toUpperCase()
+            const targetId = String(grant.targetId ?? '').trim()
+            if (!['USER', 'ROLE', 'DEPARTMENT', 'APPLICATION'].includes(targetType) || !targetId) {
+              throw new Error('each grant needs targetType and targetId')
+            }
+            const permission = String(grant.permission ?? 'READ').trim().toUpperCase()
+            if (!['READ', 'WRITE', 'MANAGE'].includes(permission)) throw new Error('permission must be READ, WRITE or MANAGE')
+            const applicationId = grant.applicationId ?? appId
+            merged.set(targetType + ':' + targetId + ':' + applicationId, {
+              targetType,
+              targetId,
+              permission,
+              grantType: String(grant.grantType ?? 'REGULAR').trim().toUpperCase(),
+              applicationId,
+            })
+          }
+          const grants = [...merged.values()]
+          await resourceManagementApi.replaceGrants(args.resource_id, grants as never)
+          audit('dataops_resource_grant_batch', exec, { resourceId: args.resource_id, count: grants.length, applicationId: appId })
+          return { resourceId: args.resource_id, applicationId: appId, grants, count: grants.length } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_resource_approval_decide',
+      definition: defineTool({
+        name: 'dataops_resource_approval_decide',
+        description: 'Approve or reject pending DataOps user tasks in batch. Administrator only; resource.manage capability must be on. Each decision needs task_id and user_task_id; expected_version is read from the task when omitted.',
+        parameters: {
+          decisions: {
+            type: 'array',
+            required: true,
+            description: 'Approval decisions.',
+            items: {
+              type: 'object',
+              properties: {
+                task_id: { type: 'number', description: 'DataOps task id.' },
+                user_task_id: { type: 'string', description: 'BPMN user task UUID.' },
+                decision: { type: 'string', description: 'approve or reject.' },
+                comment: { type: 'string', description: 'Decision comment.' },
+                expected_version: { type: 'number', description: 'Current taskVersion; read from task detail when omitted.' },
+                idempotency_key: { type: 'string', description: 'Optional replay key; reuse the original key to retry a timed-out command.' },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: {
+          decisions: Array<{ task_id: number; user_task_id: string; decision: string; comment?: string; expected_version?: number; idempotency_key?: string }>
+        }, exec) => {
+          if (!Array.isArray(args.decisions) || args.decisions.length === 0) throw new Error('decisions must be a non-empty array')
+          const results: Array<Record<string, unknown>> = []
+          for (const decision of args.decisions) {
+            const taskId = Number(decision.task_id)
+            const userTaskId = String(decision.user_task_id ?? '')
+            const action = String(decision.decision ?? '').toLowerCase()
+            if (!Number.isSafeInteger(taskId) || taskId <= 0 || !userTaskId || (action !== 'approve' && action !== 'reject')) {
+              results.push({ taskId, userTaskId, ok: false, error: 'invalid decision' })
+              continue
+            }
+            try {
+              let expectedVersion = decision.expected_version
+              if (expectedVersion === undefined) {
+                const task = await resourceManagementApi.getTask(taskId)
+                const userTasks = Array.isArray(task.userTasks) ? task.userTasks as Array<Record<string, unknown>> : []
+                const target = userTasks.find((item) => item.id === userTaskId)
+                expectedVersion = typeof target?.taskVersion === 'number' ? target.taskVersion : 0
+              }
+              await resourceManagementApi.decideTask({
+                taskId,
+                userTaskId,
+                decision: action,
+                comment: decision.comment,
+                expectedVersion,
+                idempotencyKey: decision.idempotency_key,
+              })
+              results.push({ taskId, userTaskId, decision: action, ok: true })
+            } catch (error) {
+              results.push({ taskId, userTaskId, decision: action, ok: false, error: error instanceof Error ? error.message : String(error) })
+            }
+          }
+          audit('dataops_resource_approval_decide', exec, { count: results.length, ok: results.filter((item) => item.ok === true).length })
+          return { results } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_resource_grant_revoke',
+      definition: defineTool({
+        name: 'dataops_resource_grant_revoke',
+        description: 'Batch revoke access grants from one DataOps resource by target type and target id. Administrator only; resource.manage capability must be on. DataOps audits the resulting grant replacement.',
+        parameters: {
+          resource_id: { type: 'number', required: true, description: 'DataOps resource id.' },
+          targets: {
+            type: 'array',
+            required: true,
+            description: 'Targets to revoke.',
+            items: {
+              type: 'object',
+              properties: {
+                targetType: { type: 'string', description: 'USER, ROLE, DEPARTMENT or APPLICATION.' },
+                targetId: { type: 'string', description: 'Target id/code.' },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { resource_id: number; targets: Array<{ targetType: string; targetId: string }> }, exec) => {
+          if (!Number.isSafeInteger(args.resource_id) || args.resource_id <= 0) throw new Error('resource_id must be a positive integer')
+          if (!Array.isArray(args.targets) || args.targets.length === 0) throw new Error('targets must be a non-empty array')
+          const existing = await resourceManagementApi.listGrants(args.resource_id)
+          const keys = new Set(args.targets.map((target) => String(target.targetType).toUpperCase() + ':' + String(target.targetId)))
+          let appId = existing.map((g) => Number(g.applicationId)).find((id) => Number.isSafeInteger(id) && id > 0)
+          if (appId === undefined) {
+            const apps = await resourceManagementApi.listApplications()
+            appId = apps.map((app) => Number(app.id)).find((id) => Number.isSafeInteger(id) && id > 0)
+          }
+          if (appId === undefined) throw new Error('no application is available for access grants')
+          const remaining = existing
+            .filter((grant) => !keys.has(String(grant.targetType).toUpperCase() + ':' + String(grant.targetId)))
+            .map((grant) => ({
+              targetType: String(grant.targetType),
+              targetId: String(grant.targetId),
+              permission: String(grant.permission ?? 'READ'),
+              grantType: String(grant.grantType ?? 'REGULAR'),
+              applicationId: Number(grant.applicationId) || appId,
+            }))
+          const removed = existing.length - remaining.length
+          if (removed === 0) throw new Error('no matching grant to revoke')
+          await resourceManagementApi.replaceGrants(args.resource_id, remaining as never)
+          audit('dataops_resource_grant_revoke', exec, { resourceId: args.resource_id, removed })
+          return { resourceId: args.resource_id, removed, remaining, count: remaining.length } as unknown as Record<string, Json>
         },
       }),
     },

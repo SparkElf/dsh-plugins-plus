@@ -45,6 +45,21 @@ export const KB_API = {
   trashRestore: 'trash.restore',
   /** Search the mounted tree by file name and text. */
   search: 'search',
+  /**
+   * Read the permission-filtered knowledge-graph tree.
+   *
+   * The graph tab's only data route and strictly read-only: it scans
+   * `知识图谱/*` under the caller's scopes, asks `canReadPath` once per graph, and
+   * returns the domain tree. No graph, topic or relation is created here.
+   */
+  graph: 'graph',
+  /**
+   * The canvas-only page the graph tab embeds.
+   *
+   * A page rather than a JSON route: the first version reuses the prototype's
+   * mind-map canvas as-is, and the panel feeds it through `postMessage`.
+   */
+  graphCanvas: 'graph.canvas',
   /** List one directory level, with each entry's modification time. */
   list: 'list',
   /** Read one file for the preview, without needing a conversation session. */

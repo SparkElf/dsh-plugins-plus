@@ -77,6 +77,14 @@ import {
   type KnowledgeStatus,
 } from './protocol.ts'
 import { localizedScopeForPath, resolveScopeAlias, type ScopeLocale } from './scopeAliases.ts'
+import { scanKnowledgeGraphs, type KnowledgeGraphScopeRoot } from './graph.ts'
+import { GRAPH_CANVAS_HTML } from './graphCanvas.ts'
+import {
+  KNOWLEDGE_GRAPH_FOLDER,
+  knowledgeGraphsOf,
+  type KnowledgeGraphCaller,
+} from './graphTypes.ts'
+import { createKnowledgeGraphTools, type KnowledgeGraphToolHost } from './graphTools.ts'
 import {
   appendAuditEntry,
   isContainedRelPath,
@@ -2557,7 +2565,7 @@ export async function resolveWorkflowActor(ctx: Context, config: Config): Promis
  * data is already scoped by the caller's grants.
  */
 export function permissionForKbRoute(method: string): string | undefined {
-  if (method === 'list' || method === 'read' || method === 'search') return 'kb:file:read'
+  if (method === 'list' || method === 'read' || method === 'search' || method === 'graph') return 'kb:file:read'
   if (method === 'create' || method === 'edit' || method === 'move' || method === 'upload' || method === 'rename') return 'kb:file:write'
   if (method === 'trash' || method === 'trash.remove' || method === 'trash.restore') return 'kb:file:delete'
   if (method === 'index' || method === 'extract.retry') return 'kb:file:extract'
@@ -2903,6 +2911,8 @@ export const KB_SUMMARIZE_SKILL_NAME = 'kb-summarize'
 
 /** Third bundled skill: explicit document/directory vectorization. */
 export const KB_VECTORIZE_SKILL_NAME = 'kb-vectorize'
+export const KNOWLEDGE_GRAPH_SKILL_NAME = 'knowledge-graph'
+export const KNOWLEDGE_GRAPH_SKILL_DESCRIPTION = '读写团队知识库里的知识图谱：主题卡、关系文档与四个动作。'
 
 /**
  * Short description shown in the skill list.
@@ -2963,6 +2973,12 @@ export function kbSummarizeSkillPath(): string {
 export function kbVectorizeSkillPath(): string {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url))
   return join(moduleDirectory, '..', 'skills', KB_VECTORIZE_SKILL_NAME, 'SKILL.md')
+}
+
+/** Where the bundled `knowledge-graph` skill lives. */
+export function knowledgeGraphSkillPath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
+  return join(moduleDirectory, '..', 'skills', KNOWLEDGE_GRAPH_SKILL_NAME, 'SKILL.md')
 }
 
 /**
@@ -3050,6 +3066,17 @@ export function knowledgeBaseSkillProvider(): {
       resourceBase: { kind: 'directory', path: dirname(kbVectorizeSkillPath()) },
       rank: KB_VECTORIZE_SKILL_RANK,
       locator: kbVectorizeSkillPath(),
+    },
+    {
+      name: KNOWLEDGE_GRAPH_SKILL_NAME,
+      description: KNOWLEDGE_GRAPH_SKILL_DESCRIPTION,
+      invocation: KNOWLEDGE_SKILL_INVOCATION,
+      source: 'bundled',
+      provider: KNOWLEDGE_SKILL_PROVIDER,
+      path: knowledgeGraphSkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(knowledgeGraphSkillPath()) },
+      rank: 36,
+      locator: knowledgeGraphSkillPath(),
     },
   ]
   return {
@@ -3438,6 +3465,142 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
           }
         }
         switch (method) {
+          case 'graph.canvas': {
+            // The graph tab embeds the prototype's canvas as a same-origin page. It
+            // carries no data and makes no request of its own; the panel posts the
+            // permission-filtered payload into it. Serving it here rather than from a
+            // static asset keeps the deployment one `docker cp` of `lib/`, which is
+            // how every other part of this plugin ships.
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'cache-control': 'no-store',
+              'x-content-type-options': 'nosniff',
+            })
+            res.end(GRAPH_CANVAS_HTML)
+            return
+          }
+          case 'graph': {
+            // Read-only domain tree for the graph tab.
+            //
+            // The scanner is handed the AUTHORITATIVE roots and one permission seam.
+            // It asks `canReadPath` once per graph folder and never returns a denied
+            // folder's name; the browser receives only what DataOps resolved.
+            //
+            // The caller is resolved here, not accepted from the request. Without an
+            // identity there is no personal root and no grant question to ask, so the
+            // answer is a refusal rather than an empty tree that looks like "no graphs".
+            let caller
+            try {
+              caller = await fetchCaller(host, config)
+            } catch (error) {
+              return writeJson(res, 403, {
+                error: 'the permission service did not identify this caller',
+                code: 'forbidden',
+                detail: describeError(error).message,
+              })
+            }
+            if (!isSafeUserId(caller.userId)) {
+              return writeJson(res, 403, { error: 'unsafe caller id', code: 'forbidden' })
+            }
+            const plan = localConfig(config)
+            const graphViewPath = (scope: 'global' | 'department' | 'personal'): string =>
+              scope + '/' + KNOWLEDGE_GRAPH_FOLDER
+            /**
+             * Resolve one scope root to its authoritative path.
+             *
+             * `actualRelPathForView` is the authority for a FILE: it matches the view
+             * entry to the source by inode. A directory does not share that inode, so
+             * for an existing scope directory the function falls back to its input.
+             * The personal root therefore uses the uid from `fetchCaller` -- the same
+             * identity `actualRelPathForView` reads -- and never a path supplied by the
+             * browser. Department roots still go through the resolver because
+             * `department/知识图谱` is not a view path: only the caller's chain is.
+             */
+            const scopeActual = async (scope: 'global' | 'department' | 'personal'): Promise<string | undefined> => {
+              const viewPath = graphViewPath(scope)
+              const resolved = await actualRelPathForView(host, config, viewPath, caller).catch(() => viewPath)
+              if (scope === 'personal') {
+                const prefix = 'personal/' + caller.userId + '/'
+                return resolved.startsWith(prefix) ? resolved : prefix + KNOWLEDGE_GRAPH_FOLDER
+              }
+              // A department root that did not resolve to the caller's chain is not
+              // this caller's tree; reading `department/知识图谱` would show a generic
+              // folder that no grant names. The global root is legitimately the same
+              // string as its view path, so only the department case is refused here.
+              if (scope === 'department' && resolved === viewPath) return undefined
+              return resolved
+            }
+            const departmentCodes = (caller.departmentPathCodes !== undefined && caller.departmentPathCodes.length > 0)
+              ? caller.departmentPathCodes
+              : (caller.departmentCode === undefined || caller.departmentCode === '' ? [] : [caller.departmentCode])
+            const roots: KnowledgeGraphScopeRoot[] = []
+            const globalRoot = await scopeActual('global')
+            if (globalRoot !== undefined) {
+              roots.push({
+                key: 'global',
+                actualPath: globalRoot,
+                viewPath: graphViewPath('global'),
+                groupKey: '',
+                groupLabel: '',
+              })
+            }
+            if (departmentCodes.length > 0) {
+              const departmentRoot = await scopeActual('department')
+              if (departmentRoot !== undefined) {
+                roots.push({
+                  key: 'department',
+                  actualPath: departmentRoot,
+                  viewPath: graphViewPath('department'),
+                  groupKey: departmentCodes.join('/'),
+                  groupLabel: (caller.departmentPathNames ?? []).join(' / ') || caller.departmentName || departmentCodes.join(' / '),
+                })
+              }
+            }
+            const personalRoot = await scopeActual('personal')
+            if (personalRoot !== undefined) {
+              roots.push({
+                key: 'personal',
+                actualPath: personalRoot,
+                viewPath: graphViewPath('personal'),
+                groupKey: '',
+                groupLabel: '',
+              })
+            }
+            const graphCaller: KnowledgeGraphCaller = {
+              userId: caller.userId,
+              label: caller.label,
+              ...(caller.departmentPathCodes === undefined
+                ? {}
+                : { departmentPathCodes: caller.departmentPathCodes }),
+              ...(caller.departmentPathNames === undefined
+                ? {}
+                : { departmentPathNames: caller.departmentPathNames }),
+            }
+            const graphTree = await scanKnowledgeGraphs({
+              actualRoot: plan.actualRoot,
+              roots,
+              caller: graphCaller,
+              canRead: relPath => canReadPath(host, config, relPath),
+            })
+            // The scanner keeps each graph's authoritative path for the Host-side
+            // tools. It must not cross into the browser: on a personal scope that
+            // path contains the caller's uid.
+            const forBrowser = {
+              ...graphTree,
+              scopes: graphTree.scopes.map(scope => ({
+                ...scope,
+                groups: scope.groups.map(group => ({
+                  ...group,
+                  graphs: group.graphs.map((graph) => {
+                    const copy = { ...graph }
+                    delete copy.actualPath
+                    return copy
+                  }),
+                })),
+              })),
+            }
+            return writeJson(res, 200, forBrowser)
+          }
           case 'workflow.mine': {
             if (!isTeamDeployment(config)) {
               const records = await listWorkflowsForAuthor(
@@ -6883,6 +7046,74 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     },
   }
 
+  /**
+   * The graph tools' Host seam.
+   *
+   * `listGraphs` asks the same scanner the graph tab uses, so a graph that is not
+   * readable is absent from `kg_get`/`kg_add` exactly as it is absent from the tree.
+   * Writes reuse the file tools' authoritative-path methods; the browser never sees
+   * the `personal/<uid>/...` path these tools compose from the Host-resolved caller.
+   */
+  const graphToolHost: KnowledgeGraphToolHost = {
+    resolveCaller: knowledgeToolHost.resolveCaller,
+    canWrite: knowledgeToolHost.canWrite,
+    createEntry: knowledgeToolHost.createEntry,
+    overwriteFile: knowledgeToolHost.overwriteFile,
+    moveEntry: knowledgeToolHost.moveEntry,
+    statEntry: knowledgeToolHost.statEntry,
+    refreshView: knowledgeToolHost.refreshView,
+    appendAudit: knowledgeToolHost.appendAudit,
+    viewDir: knowledgeToolHost.viewDir,
+    readText: async (viewPath) => {
+      const read = await knowledgeToolHost.readAuthorized(viewPath)
+      if (read.kind !== 'text') throw new KnowledgeToolError('binary', 'this document is binary', viewPath)
+      return read.content
+    },
+    listGraphs: async () => {
+      const caller = await fetchCaller(host, config)
+      if (!isSafeUserId(caller.userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
+      const plan = localConfig(config)
+      const scopeViewPath = (scope: 'global' | 'department' | 'personal'): string => scope + '/' + KNOWLEDGE_GRAPH_FOLDER
+      const scopeActual = async (scope: 'global' | 'department' | 'personal'): Promise<string | undefined> => {
+        const viewPath = scopeViewPath(scope)
+        const resolved = await actualRelPathForView(host, config, viewPath, caller).catch(() => viewPath)
+        if (scope === 'personal') {
+          const prefix = 'personal/' + caller.userId + '/'
+          return resolved.startsWith(prefix) ? resolved : prefix + KNOWLEDGE_GRAPH_FOLDER
+        }
+        if (scope === 'department' && resolved === viewPath) return undefined
+        return resolved
+      }
+      const codes = (caller.departmentPathCodes !== undefined && caller.departmentPathCodes.length > 0)
+        ? caller.departmentPathCodes
+        : (caller.departmentCode === undefined || caller.departmentCode === '' ? [] : [caller.departmentCode])
+      const roots: KnowledgeGraphScopeRoot[] = []
+      const globalRoot = await scopeActual('global')
+      if (globalRoot !== undefined) roots.push({ key: 'global', actualPath: globalRoot, viewPath: scopeViewPath('global'), groupKey: '', groupLabel: '' })
+      if (codes.length > 0) {
+        const departmentRoot = await scopeActual('department')
+        if (departmentRoot !== undefined) roots.push({
+          key: 'department', actualPath: departmentRoot, viewPath: scopeViewPath('department'),
+          groupKey: codes.join('/'), groupLabel: (caller.departmentPathNames ?? []).join(' / ') || caller.departmentName || codes.join(' / '),
+        })
+      }
+      const personalRoot = await scopeActual('personal')
+      if (personalRoot !== undefined) roots.push({ key: 'personal', actualPath: personalRoot, viewPath: scopeViewPath('personal'), groupKey: '', groupLabel: '' })
+      const tree = await scanKnowledgeGraphs({
+        actualRoot: plan.actualRoot,
+        roots,
+        caller: {
+          userId: caller.userId,
+          label: caller.label,
+          ...(caller.departmentPathCodes === undefined ? {} : { departmentPathCodes: caller.departmentPathCodes }),
+          ...(caller.departmentPathNames === undefined ? {} : { departmentPathNames: caller.departmentPathNames }),
+        },
+        canRead: relPath => canReadPath(host, config, relPath),
+      })
+      return knowledgeGraphsOf(tree)
+    },
+  }
+
   // One disclosure pass owns every model-facing tool. The policy map in
   // `toolDisclosure.ts` decides which groups exist for the current permission
   // context; `execute()` keeps only path-level data checks and the backend keeps
@@ -6891,6 +7122,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     tools: [
       workflowPublishTool,
       ...createKnowledgeFileTools(knowledgeToolHost),
+      ...createKnowledgeGraphTools(graphToolHost),
       ...createManagementTools(managementHost),
     ],
     registry: { register: definition => host.tools.register(definition) },

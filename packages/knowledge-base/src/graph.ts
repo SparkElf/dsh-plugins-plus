@@ -1,0 +1,447 @@
+/**
+ * Read-only scanner behind the knowledge-graph tab.
+ *
+ * The graph tab is a NAVIGATION layer over the knowledge tree, not a second
+ * document store. A graph is an ordinary folder under a scope:
+ *
+ * ```text
+ * <scope>/知识图谱/<graph>/
+ *   <topic>/index.md          # the topic card, visible
+ *   <topic>/<document>.md     # documents, visible
+ *   .kg/links/<a>--<b>.md     # relations, hidden from the file tree and search
+ * ```
+ *
+ * Two rules shape this module:
+ *
+ * 1. **The permission answer is the Host's, one graph at a time.** DataOps resolves
+ *    each graph folder; a graph it does not resolve is dropped before anything about
+ *    it (name, topic, document) is returned. The browser never receives a full scope
+ *    and filters it, because a denied name is still a disclosure.
+ * 2. **The scanner is told where the scopes are.** The authoritative personal and
+ *    department roots are resolved by the caller through `actualRelPathForView`, so
+ *    this module never invents `personal/<uid>/…`. It only reads the directories it
+ *    is handed and reports what is inside them.
+ *
+ * `.kg` is skipped by name everywhere a topic or document is listed. It is read on
+ * purpose only for `<graph>/.kg/links/*.md`, which is exactly the structure the
+ * design hides from the knowledge base.
+ *
+ * @module @sparkelf/dsh-knowledge-base/graph
+ */
+
+import { readdir, readFile, stat } from 'node:fs/promises'
+import { join } from 'node:path'
+import {
+  KNOWLEDGE_GRAPH_META_FOLDER,
+  KNOWLEDGE_GRAPH_TRASH_FOLDER,
+  type KnowledgeGraphCaller,
+  type KnowledgeGraphDocument,
+  type KnowledgeGraphGroup,
+  type KnowledgeGraphLink,
+  type KnowledgeGraphNode,
+  type KnowledgeGraphScope,
+  type KnowledgeGraphScopeKey,
+  type KnowledgeGraphTopic,
+  type KnowledgeGraphTree,
+} from './graphTypes.ts'
+
+/** How much of a card or document is read for its summary and body. */
+const GRAPH_TEXT_LIMIT = 256 * 1024
+
+/** How many documents one topic reports; a card stack cannot show more. */
+const MAX_TOPIC_DOCUMENTS = 200
+
+/** How many graphs one scope reports. */
+const MAX_SCOPE_GRAPHS = 200
+
+/** How many topics one graph reports. */
+const MAX_GRAPH_TOPICS = 200
+
+/** A resolved scope root: where to scan, and how the tree labels the group. */
+export interface KnowledgeGraphScopeRoot {
+  /** Which canonical scope this root belongs to. */
+  key: KnowledgeGraphScopeKey
+  /** Authoritative path, relative to the knowledge root. */
+  actualPath: string
+  /** View-relative path the browser should show. */
+  viewPath: string
+  /** Department chain key; empty for global and personal. */
+  groupKey: string
+  /** Department display label; empty for global and personal. */
+  groupLabel: string
+}
+
+/** What the scanner needs from the caller that owns the route. */
+export interface KnowledgeGraphScanOptions {
+  /** Authoritative knowledge root. */
+  actualRoot: string
+  /** Resolved scope roots, in display order the caller wants. */
+  roots: KnowledgeGraphScopeRoot[]
+  /** Caller identity, returned for tests and for a future owner label. */
+  caller: KnowledgeGraphCaller
+  /**
+   * One permission question per graph folder.
+   *
+   * The route binds this to `canReadPath`, the same authority every other read
+   * uses. A rejection is a denial (fail closed), not an empty directory.
+   */
+  canRead: (actualRelPath: string) => Promise<boolean>
+}
+
+/** One front-matter block and the body beneath it. */
+interface FrontMatter {
+  meta: Record<string, string>
+  body: string
+}
+
+/**
+ * Whether a relative path stays inside the root it will be joined to.
+ *
+ * The roots arrive from the Host's own resolver, so this is defence in depth
+ * rather than the primary check: a `..` segment that slipped through a caller
+ * would otherwise read outside the knowledge tree.
+ */
+function isSafeRelative(relPath: string): boolean {
+  if (relPath === '' || relPath.startsWith('/') || relPath.includes('\0') || relPath.includes('\\')) return false
+  return relPath.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
+}
+
+/** Join a relative path onto a root, refusing an escape. */
+function under(root: string, relPath: string): string | undefined {
+  return isSafeRelative(relPath) ? join(root, relPath) : undefined
+}
+
+/**
+ * Split a Markdown document into its simple YAML front matter and body.
+ *
+ * The graph format uses one `key: value` per line and optional bracket arrays;
+ * a full YAML parser would be a dependency this package does not need. Unknown
+ * lines are ignored rather than failing the whole card, so a hand-edited
+ * `index.md` still renders.
+ */
+export function parseGraphFrontMatter(text: string): FrontMatter {
+  const normalized = text.replace(/\r\n/gu, '\n')
+  if (!normalized.startsWith('---\n')) return { meta: {}, body: normalized }
+  const end = normalized.indexOf('\n---\n', 4)
+  if (end < 0) return { meta: {}, body: normalized }
+  const meta: Record<string, string> = {}
+  for (const rawLine of normalized.slice(4, end).split('\n')) {
+    const line = rawLine.trim()
+    if (line === '' || line.startsWith('#')) continue
+    const colon = line.indexOf(':')
+    if (colon <= 0) continue
+    meta[line.slice(0, colon).trim()] = line.slice(colon + 1).trim()
+  }
+  return { meta, body: normalized.slice(end + 5) }
+}
+
+/** Read a bracketed or comma-separated list value from front matter. */
+export function parseGraphList(value: string | undefined): string[] {
+  if (value === undefined) return []
+  const trimmed = value.trim()
+  const inner = trimmed.startsWith('[') && trimmed.endsWith(']')
+    ? trimmed.slice(1, -1)
+    : trimmed
+  return inner.split(',')
+    .map(item => item.trim().replace(/^['"]|['"]$/gu, ''))
+    .filter(item => item !== '')
+}
+
+/** First H1 of a Markdown body, without the marker. */
+export function firstHeading(body: string): string | undefined {
+  for (const line of body.split('\n')) {
+    if (line.startsWith('# ')) return line.slice(2).trim()
+  }
+  return undefined
+}
+
+/**
+ * The first paragraph after the H1: the text the card shows as its summary.
+ *
+ * Starting at the H1 rather than at the top is deliberate: the title is already
+ * the card's heading, so repeating it as the first line of the summary would
+ * render the same sentence twice.
+ */
+export function firstSummary(body: string): string {
+  const lines = body.split('\n')
+  let index = lines.findIndex(line => line.startsWith('# '))
+  if (index < 0) index = 0
+  else index += 1
+  while (index < lines.length && lines[index]?.trim() === '') index += 1
+  const collected: string[] = []
+  while (index < lines.length) {
+    const line = lines[index] ?? ''
+    if (line.trim() === '' || line.startsWith('#')) break
+    collected.push(line.trim())
+    index += 1
+  }
+  return collected.join(' ')
+}
+
+/** Remove the H1 and the summary paragraph, leaving the card's free body. */
+export function bodyAfterSummary(body: string): string {
+  const lines = body.split('\n')
+  const heading = lines.findIndex(line => line.startsWith('# '))
+  // A card without an H1 has no reliable summary boundary; keeping the body whole
+  // is better than dropping the first paragraph the reader wrote.
+  if (heading < 0) return body.trim()
+  let start = heading + 1
+  while (start < lines.length && lines[start]?.trim() === '') start += 1
+  let end = start
+  while (end < lines.length && (lines[end] ?? '').trim() !== '' && !(lines[end] ?? '').startsWith('#')) end += 1
+  return [...lines.slice(0, heading), ...lines.slice(end)].join('\n').trim()
+}
+
+/** Read a text file, returning undefined for binary or oversized content. */
+async function readGraphText(path: string): Promise<string | undefined> {
+  try {
+    const info = await stat(path)
+    if (!info.isFile() || info.size > GRAPH_TEXT_LIMIT) return undefined
+    const text = await readFile(path, 'utf8')
+    return text.includes('\0') ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+/** ISO date (`YYYY-MM-DD`) of a file's modification instant. */
+async function dateOf(path: string): Promise<string | undefined> {
+  try {
+    return (await stat(path)).mtime.toISOString().slice(0, 10)
+  } catch {
+    return undefined
+  }
+}
+
+/** Visible child directories of a directory, in name order. */
+async function visibleDirectories(path: string): Promise<Array<{ name: string; path: string }>> {
+  try {
+    const entries = await readdir(path, { withFileTypes: true })
+    return entries
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map(entry => ({ name: entry.name, path: join(path, entry.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+  } catch {
+    return []
+  }
+}
+
+/** Visible files of a directory, in name order. */
+async function visibleFiles(path: string): Promise<Array<{ name: string; path: string }>> {
+  try {
+    const entries = await readdir(path, { withFileTypes: true })
+    return entries
+      .filter(entry => entry.isFile() && !entry.name.startsWith('.'))
+      .map(entry => ({ name: entry.name, path: join(path, entry.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+  } catch {
+    return []
+  }
+}
+
+/** Join one view-relative parent with a child name, keeping POSIX separators. */
+function viewJoin(parent: string, name: string): string {
+  return parent === '' ? name : parent + '/' + name
+}
+
+/**
+ * Read one topic folder into the canvas's topic shape.
+ *
+ * A missing `index.md` is not an error: the folder still names a topic, and the
+ * card falls back to the folder name with an empty summary. That keeps a
+ * half-written topic navigable instead of silently dropping it.
+ */
+export async function readGraphTopic(
+  graphPath: string,
+  viewGraphPath: string,
+  folder: string,
+): Promise<KnowledgeGraphTopic | undefined> {
+  const topicPath = join(graphPath, folder)
+  const viewTopicPath = viewJoin(viewGraphPath, folder)
+  const indexPath = join(topicPath, 'index.md')
+  const cardText = await readGraphText(indexPath)
+  const card = cardText === undefined ? undefined : parseGraphFrontMatter(cardText)
+  const body = card?.body ?? ''
+  const meta = card?.meta ?? {}
+  const documents: KnowledgeGraphDocument[] = []
+  for (const file of (await visibleFiles(topicPath)).slice(0, MAX_TOPIC_DOCUMENTS)) {
+    if (file.name === 'index.md') continue
+    const text = await readGraphText(file.path)
+    const documentBody = text === undefined ? undefined : parseGraphFrontMatter(text)
+    const title = documentBody === undefined
+      ? file.name.replace(/\.[^.]+$/u, '')
+      : (firstHeading(documentBody.body) ?? file.name.replace(/\.[^.]+$/u, ''))
+    const date = await dateOf(file.path)
+    const document: KnowledgeGraphDocument = {
+      title,
+      file: file.name,
+      path: viewJoin(viewTopicPath, file.name),
+      ...(date === undefined ? {} : { date }),
+      ...(documentBody === undefined ? {} : { summary: firstSummary(documentBody.body) }),
+    }
+    documents.push(document)
+  }
+  const depthValue = Number.parseInt(meta.depth ?? '', 10)
+  return {
+    id: (meta.id ?? '').trim() === '' ? folder : (meta.id ?? '').trim(),
+    title: (meta.title ?? '').trim() === '' ? folder : (meta.title ?? '').trim(),
+    status: (meta.status ?? 'active').trim() === '' ? 'active' : (meta.status ?? 'active').trim(),
+    depth: Number.isFinite(depthValue) ? Math.min(5, Math.max(1, depthValue)) : 1,
+    ...((meta.domain ?? '').trim() === '' ? {} : { domain: (meta.domain ?? '').trim() }),
+    tags: parseGraphList(meta.tags),
+    summary: firstSummary(body),
+    body: bodyAfterSummary(body),
+    folder,
+    path: viewTopicPath,
+    documents,
+  }
+}
+
+/**
+ * Read `<graph>/.kg/links/*.md` into relation records.
+ *
+ * Links whose endpoints are not topics in this graph are dropped: the canvas
+ * draws an edge between two cards, so an edge to a missing id would be an
+ * invisible relation that still counted in the header. The relation FILE stays
+ * on disk; this is a view decision, not a deletion.
+ */
+export async function readGraphLinks(graphPath: string, topicIds: ReadonlySet<string>): Promise<KnowledgeGraphLink[]> {
+  const directory = join(graphPath, KNOWLEDGE_GRAPH_META_FOLDER, 'links')
+  const links: KnowledgeGraphLink[] = []
+  for (const file of await visibleFiles(directory)) {
+    if (!file.name.endsWith('.md')) continue
+    const text = await readGraphText(file.path)
+    if (text === undefined) continue
+    const { meta, body } = parseGraphFrontMatter(text)
+    const fallback = file.name.replace(/\.md$/u, '').split('--')
+    const a = (meta.a ?? fallback[0] ?? '').trim()
+    const b = (meta.b ?? fallback[1] ?? '').trim()
+    if (a === '' || b === '' || a === b) continue
+    if (!topicIds.has(a) || !topicIds.has(b)) continue
+    const label = (meta.label ?? meta.title ?? '').trim()
+    links.push({
+      a,
+      b,
+      ...(label === '' ? {} : { label }),
+      ...((meta.updated ?? '').trim() === '' ? {} : { updated: (meta.updated ?? '').trim() }),
+      body: firstSummary(body),
+      file: file.name,
+    })
+  }
+  return links
+}
+
+/**
+ * Read one graph folder: its topics, documents and hidden relations.
+ *
+ * The permission question is asked by the caller BEFORE this runs, so this
+ * function never sees a denied folder. It still treats unreadable paths as empty
+ * rather than failing the whole graph: one removed folder should not blank the
+ * canvas.
+ */
+export async function readGraph(
+  actualRoot: string,
+  root: KnowledgeGraphScopeRoot,
+  folder: string,
+  caller: KnowledgeGraphCaller,
+): Promise<KnowledgeGraphNode | undefined> {
+  const actualGraphRel = viewJoin(root.actualPath, folder)
+  const actualGraphPath = under(actualRoot, actualGraphRel)
+  if (actualGraphPath === undefined) return undefined
+  const viewGraphPath = viewJoin(root.viewPath, folder)
+  const topics: KnowledgeGraphTopic[] = []
+  for (const directory of (await visibleDirectories(actualGraphPath)).slice(0, MAX_GRAPH_TOPICS)) {
+    if (directory.name === KNOWLEDGE_GRAPH_META_FOLDER || directory.name === KNOWLEDGE_GRAPH_TRASH_FOLDER) continue
+    const topic = await readGraphTopic(actualGraphPath, viewGraphPath, directory.name)
+    if (topic !== undefined) topics.push(topic)
+  }
+  const topicIds = new Set(topics.map(topic => topic.id))
+  const links = await readGraphLinks(actualGraphPath, topicIds)
+  return {
+    id: viewGraphPath,
+    name: folder,
+    scope: root.key,
+    path: viewGraphPath,
+    group: root.groupLabel,
+    actualPath: actualGraphRel,
+    topics,
+    links,
+    counts: {
+      topics: topics.length,
+      links: links.length,
+      documents: topics.reduce((total, topic) => total + topic.documents.length, 0),
+    },
+  }
+}
+
+/** Order scopes the way the tree shows them. */
+const SCOPE_ORDER: readonly KnowledgeGraphScopeKey[] = ['global', 'department', 'personal']
+
+/**
+ * Scan every resolved scope root and build the permission-filtered domain tree.
+ *
+ * The loop asks `canRead` once per graph folder. It never asks about `.kg`: the
+ * metadata folder is read only after the graph itself was allowed, and its
+ * contents are relations whose endpoints are already readable topics.
+ *
+ * @param options - roots, caller, and the permission seam.
+ * @returns The tree, with denied graph names absent and only counted.
+ */
+export async function scanKnowledgeGraphs(options: KnowledgeGraphScanOptions): Promise<KnowledgeGraphTree> {
+  const byScope = new Map<KnowledgeGraphScopeKey, Map<string, KnowledgeGraphGroup>>()
+  for (const key of SCOPE_ORDER) byScope.set(key, new Map())
+  let scanned = 0
+  let visible = 0
+
+  for (const root of options.roots) {
+    const groups = byScope.get(root.key)
+    if (groups === undefined) continue
+    const groupKey = root.key === 'department' ? root.groupKey : ''
+    let group = groups.get(groupKey)
+    if (group === undefined) {
+      group = { key: groupKey, label: root.groupLabel, graphs: [] }
+      groups.set(groupKey, group)
+    }
+    const actualScopePath = under(options.actualRoot, root.actualPath)
+    if (actualScopePath === undefined) continue
+    const folders = (await visibleDirectories(actualScopePath))
+      .filter(directory => directory.name !== KNOWLEDGE_GRAPH_META_FOLDER)
+      .slice(0, MAX_SCOPE_GRAPHS)
+    for (const folder of folders) {
+      scanned += 1
+      let allowed = false
+      try {
+        allowed = await options.canRead(viewJoin(root.actualPath, folder.name))
+      } catch {
+        // A permission question that could not be answered is a denial. This is the
+        // fail-closed half of the rule; the route additionally refuses when it could
+        // not even identify the caller.
+        allowed = false
+      }
+      if (!allowed) continue
+      const graph = await readGraph(options.actualRoot, root, folder.name, options.caller)
+      if (graph === undefined) continue
+      group.graphs.push(graph)
+      visible += 1
+    }
+  }
+
+  const scopes: KnowledgeGraphScope[] = SCOPE_ORDER.map((key) => {
+    const groups = [...(byScope.get(key)?.values() ?? [])]
+      .filter(group => group.graphs.length > 0)
+      .sort((a, b) => a.key.localeCompare(b.key, 'zh-Hans-CN'))
+    for (const group of groups) {
+      group.graphs.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+    }
+    return { key, groups }
+  })
+
+  return {
+    scopes,
+    caller: options.caller,
+    actualRoot: options.actualRoot,
+    scanned,
+    visible,
+    denied: Math.max(0, scanned - visible),
+  }
+}

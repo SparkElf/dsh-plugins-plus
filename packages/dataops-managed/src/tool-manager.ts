@@ -20,16 +20,19 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { onAuthStateChange } from './auth-state.ts'
 import type { ReviewApi, ReviewApiResult } from './review-api.ts'
+import type { OpenResourceHub } from './resource-tab.ts'
 import {
   AI_TOOL_NAMES,
   isAdmin,
   isDepartmentAdmin,
   isSuperAdmin,
   isToolVisible,
+  isToolCapabilityEnabled,
   normalizeScope,
   type AiToolName,
   type DataOpsScope,
 } from './tool-scope.ts'
+import { readConnectorState, type DataOpsConnectorState } from './connector-state.ts'
 import { buildAiManagementTools } from './tools.ts'
 
 /** Structural view of the skill registry's viewer hook (newer DSH releases). */
@@ -59,13 +62,18 @@ export class AiToolManager {
   private readonly unsubscribeExpiry: () => void
   private disposeViewer: (() => void) | undefined
   private scope: DataOpsScope | undefined
+  private connectorState: DataOpsConnectorState | undefined
   private revision = 0
   private inflight: Promise<void> | undefined
   private disposed = false
 
-  constructor(private readonly ctx: Context, private readonly reviewApi: ReviewApi) {
+  constructor(
+    private readonly ctx: Context,
+    private readonly reviewApi: ReviewApi,
+    private readonly collectHub: OpenResourceHub,
+  ) {
     this.definitions = new Map(
-      buildAiManagementTools(ctx, reviewApi, () => this.scope).map(tool => [tool.name, tool.definition]),
+      buildAiManagementTools(ctx, reviewApi, () => this.scope, this.collectHub).map(tool => [tool.name, tool.definition]),
     )
     this.unsubscribeExpiry = onAuthStateChange((state) => {
       // A 401 from any DataOps call means the stored JWT is no longer accepted. The next
@@ -159,6 +167,36 @@ export class AiToolManager {
     this.scope = undefined
   }
 
+  /**
+   * Read the connector state that gates capability-owned tools.
+   *
+   * A missing or unreadable state file is not a permission decision: it means the connector has
+   * never been enabled in this workspace, so capability-gated tools stay unregistered.
+   * @returns The persisted connector state, or a disabled placeholder when it cannot be read.
+   */
+  private async readConnectorState(): Promise<DataOpsConnectorState> {
+    try {
+      return await readConnectorState()
+    } catch (error) {
+      this.ctx.logger.warn('dataops-managed: connector state could not be read for tool disclosure')
+      this.ctx.logger.warn(error)
+      return { enabled: false, capabilities: {} }
+    }
+  }
+
+  /**
+   * Re-reconcile after the connector's capability switches changed.
+   *
+   * The skill center writes the connector state; calling this keeps the registered tool set in
+   * step with it without waiting for the next credential or role sync.
+   */
+  async refreshCapabilities(): Promise<void> {
+    if (this.disposed) return
+    const connectorState = await this.readConnectorState()
+    if (this.disposed) return
+    this.applyScope(this.scope, connectorState)
+  }
+
   private async loadScope(revision: number): Promise<void> {
     let result: ReviewApiResult
     try {
@@ -170,12 +208,14 @@ export class AiToolManager {
       return
     }
     if (this.disposed || revision !== this.revision) return
+    const connectorState = await this.readConnectorState()
+    if (this.disposed || revision !== this.revision) return
     if (result.status === 200) {
-      this.applyScope(normalizeScope(result.body))
+      this.applyScope(normalizeScope(result.body), connectorState)
       return
     }
     if (result.status === 401 || result.status === 403 || result.status === 404 || result.status === 503) {
-      this.applyScope(undefined)
+      this.applyScope(undefined, connectorState)
       return
     }
     // 5xx and unexpected answers are treated as transient: the next credential/role sync retries.
@@ -183,12 +223,16 @@ export class AiToolManager {
   }
 
   /** Store the scope and make the registry match it. */
-  private applyScope(scope: DataOpsScope | undefined): void {
+  private applyScope(scope: DataOpsScope | undefined, connectorState?: DataOpsConnectorState): void {
     this.scope = scope
+    if (connectorState !== undefined) this.connectorState = connectorState
     if (this.disposed) return
     this.applyViewer(scope)
+    const capabilities = this.connectorState ?? { enabled: false, capabilities: {} }
     const desired = new Set<AiToolName>(
-      scope === undefined ? [] : AI_TOOL_NAMES.filter(name => isToolVisible(name, scope)),
+      scope === undefined
+        ? []
+        : AI_TOOL_NAMES.filter(name => isToolVisible(name, scope) && isToolCapabilityEnabled(name, capabilities)),
     )
 
     for (const [name, registration] of this.registrations) {

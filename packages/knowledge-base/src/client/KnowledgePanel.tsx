@@ -21,7 +21,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import {
   IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
-  IconDeliverDocRegular,
   IconChevronUpOutlineRegular,
   IconPanelLeftOutlineRegular,
   IconPlusOutlineRegular,
@@ -63,7 +62,7 @@ function extname(path: string): string {
 }
 import { KnowledgePermissions } from './KnowledgePermissions.tsx'
 import { KnowledgeLoading } from './KnowledgeLoading.tsx'
-import { closeSidebar, isHostMissing, openInSidebar, readColumnExpanded } from './openInSidebar.ts'
+import { closeSidebar, openInSidebar, readColumnExpanded } from './openInSidebar.ts'
 import { publishActor, setMountPointResolver } from './saveAudit.ts'
 import { KnowledgeHome } from './KnowledgeHome.tsx'
 import { KnowledgeTrash } from './KnowledgeTrash.tsx'
@@ -89,12 +88,18 @@ import { uploadJsonWithProgress } from './uploadTransport.ts'
 import { KnowledgeShareDialog } from './KnowledgeShareDialog.tsx'
 import { shareCopyFor } from './knowledgeMenuCopy.ts'
 import { KnowledgeIconButton, KnowledgeSectionHeader } from './KnowledgeSectionHeader.tsx'
+import { KnowledgeScopeTabs, type KnowledgePanelScope } from './graph/KnowledgeScopeTabs.tsx'
+import { KnowledgeGraphTree } from './graph/KnowledgeGraphTree.tsx'
+import { KnowledgeGraphView } from './graph/KnowledgeGraphView.tsx'
+import { useKnowledgeGraph } from './graph/useKnowledgeGraph.ts'
+import { knowledgeGraphsOf } from '../graphTypes.ts'
 import { useFavorites } from './useFavorites.ts'
 import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
 import { usePinnedPaths } from './usePinnedPaths.ts'
 import { useTreeState } from './useTreeState.ts'
 import { DEFAULT_TREE_SORT, TREE_SORT_KEYS, useTreeSort } from './useTreeSort.ts'
 import { KnowledgeFileTree } from './KnowledgeFileTree.tsx'
+import { KnowledgeFilePreview } from './KnowledgeFilePreview.tsx'
 import { KnowledgeReferencePicker } from './KnowledgeReferencePicker.tsx'
 import { KnowledgeSelectionBar } from './KnowledgeSelectionBar.tsx'
 import { Button, Menu, MenuItemButton } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -277,6 +282,41 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const [selection, setSelection] = useState<Selection>({ kind: 'home' })
 
   /**
+   * Which data source the rail tree and the content region show.
+   *
+   * The two pills replace the band's title; this state is the only thing they
+   * switch. `selection` (the KB page) is deliberately left untouched while the
+   * graph tab is open, so moving back restores the same page instead of resetting
+   * to Home.
+   */
+  const [scope, setScope] = useState<KnowledgePanelScope>('kb')
+  /** The permission-filtered graph tree, loaded lazily on first activation. */
+  const graph = useKnowledgeGraph(scope === 'graph')
+  const graphNodes = useMemo(() => knowledgeGraphsOf(graph.tree), [graph.tree])
+  const [activeGraphId, setActiveGraphId] = useState<string | undefined>(undefined)
+  const [activeTopicId, setActiveTopicId] = useState<string | undefined>(undefined)
+  const activeGraph = graphNodes.find(node => node.id === activeGraphId)
+
+  // The canvas needs a graph as soon as the tab has one. Keeping the current
+  // selection when it is still present is what makes a reload non-destructive.
+  useEffect(() => {
+    if (scope !== 'graph' || graph.kind !== 'ready' || graphNodes.length === 0) return
+    setActiveGraphId(current => (
+      current !== undefined && graphNodes.some(node => node.id === current) ? current : graphNodes[0]?.id
+    ))
+  }, [scope, graph.kind, graphNodes])
+
+  const selectGraph = useCallback((graphId: string): void => {
+    setActiveGraphId(graphId)
+    setActiveTopicId(undefined)
+  }, [])
+
+  const selectTopic = useCallback((graphId: string, topicId: string): void => {
+    setActiveGraphId(graphId)
+    setActiveTopicId(topicId)
+  }, [])
+
+  /**
    * The open document's modification instant, reported by the preview.
    *
    * Held here rather than in the preview because the header draws it: the header is
@@ -285,9 +325,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * label the next one.
    */
   const [fileMtimeMs, setFileMtimeMs] = useState<number | undefined>(undefined)
-
-  /** Why the host could not show a document, when it could not. */
-  const [openFailure, setOpenFailure] = useState<string | undefined>(undefined)
 
   /** A real Session created for host-owned previews opened from this panel. */
   const explorerSessionRef = useRef<string | undefined>(undefined)
@@ -346,10 +383,10 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
       joinPath(config.mountPoint, path),
       ensureExplorerSession,
     )
-    // Record the failures that mean "the host column is not on this profile" so the
-    // page can say so. `unclaimed` is not recorded: a file kind nothing claims is a
-    // normal outcome the host renders as a download pane.
-    setOpenFailure(isHostMissing(outcome) ? outcome : undefined)
+    // The host column is a progressive enhancement: on a global panel it has no
+    // session surface to render into. The page always owns a readable fallback below,
+    // so the outcome only informs that the host tab may be showing the same file.
+    void outcome
   }
   const [refreshTick, setRefreshTick] = useState(0)
   /**
@@ -495,7 +532,15 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // The tree header's own narrowing, which costs no request. Kept apart from the
   // rail's search term: one narrows what is displayed, the other queries the tree.
   const [treeFilter, setTreeFilter] = useState('')
+  // The graph tab has its own narrowing. Sharing the KB term would hide every graph
+  // as soon as a filename filter happened to match no graph name.
+  const [graphFilter, setGraphFilter] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
+  const activeFilter = scope === 'graph' ? graphFilter : treeFilter
+  const setActiveFilter = (value: string): void => {
+    if (scope === 'graph') setGraphFilter(value)
+    else setTreeFilter(value)
+  }
   // The pinned band's fold, which is a view state rather than a stored one: the
   // band's existence is the fact worth persisting, and a band the reader collapsed
   // reopens expanded so its contents are not lost behind a stale toggle.
@@ -981,7 +1026,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // the page's state depend on an effect it causes -- and it would keep the page in
   // preview mode while the reader was back on the list, suppressing the content column
   // and leaving the frame with a blank third track.
-  const documentInSidebar = selection.kind === 'file' && openFailure === undefined
+  // The page's own preview is always the visible surface; the host column, when it
+  // exists, is allowed to show the same document beside it.
+  const documentInSidebar = false
 
 
   // Follow the host column's own expanded flag while a document is selected.
@@ -1342,9 +1389,17 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
               )}
             </section>
           )}
-          <section className={styles.treeBand} aria-label={t('sectionKnowledge')}>
+          <section className={styles.treeBand} aria-label={scope === 'graph' ? t('scopeGraph') : t('sectionKnowledge')}>
             <KnowledgeSectionHeader
-              name={t('sectionKnowledge')}
+              name={(
+                <KnowledgeScopeTabs
+                  value={scope}
+                  onChange={setScope}
+                  label={t('sectionKnowledge')}
+                  knowledgeLabel={t('scopeKnowledge')}
+                  graphLabel={t('scopeGraph')}
+                />
+              )}
               actions={(
                 <>
                   <KnowledgeIconButton
@@ -1355,7 +1410,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                         // Closing the control clears the narrowing: a filter that
                         // is invisible but still applied would hide rows with no
                         // visible cause.
-                        if (current) setTreeFilter('')
+                        if (current) setActiveFilter('')
                         return !current
                       })
                     }}
@@ -1413,7 +1468,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     <span className={styles.menuSeparator} aria-hidden="true" />
                     <span className={styles.menuGroupLabel}>{t('filterHeading')}</span>
                     <MenuItemButton
-                      icon={filterOpen || treeFilter !== ''
+                      icon={filterOpen || activeFilter !== ''
                         ? <IconCheckOutlineRegular size={16} />
                         : <span />}
                       onSelect={() => {
@@ -1439,17 +1494,29 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
               <div className={styles.treeFilter}>
                 <Input
                   type="search"
-                  value={treeFilter}
+                  value={activeFilter}
                   icon={<IconSearchOutlineRegular size={16} />}
                   placeholder={t('filterPlaceholder')}
                   aria-label={t('filterPlaceholder')}
                   autoFocus
-                  onChange={(event) => { setTreeFilter(event.target.value) }}
+                  onChange={(event) => { setActiveFilter(event.target.value) }}
                 />
               </div>
             )}
             <div className={styles.treeScroll}>
-              {config.mountPoint === ''
+              {scope === 'graph' && (
+                <KnowledgeGraphTree
+                  state={graph}
+                  t={t}
+                  {...(activeGraphId === undefined ? {} : { activeGraphId })}
+                  {...(activeTopicId === undefined ? {} : { activeTopicId })}
+                  filter={graphFilter}
+                  onSelectGraph={selectGraph}
+                  onSelectTopic={selectTopic}
+                  onRetry={() => { void graph.reload() }}
+                />
+              )}
+              {scope !== 'graph' && (config.mountPoint === ''
                 ? <p className={styles.muted}>{t('mountPointMissing')}</p>
                 : viewMode.mode === 'explorer' ? (
                   // The product's own file explorer, pointed at the knowledge root.
@@ -1633,7 +1700,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                       </Button>
                     )}
                   />
-                )}
+                ))}
               {/* The batch bar closes the tree's own scroll container, so it sits
                   below every row rather than over them and never shifts the tree the
                   way a top bar would. It appears only while rows are selected: an
@@ -1743,7 +1810,17 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
               own top-left corner. It still states what this surface is and which
               tree it governs, once for the page. */}
           <header className={styles.header}>
-            <h2 className={styles.headerTitle}>{sectionTitle(t, rendered)}</h2>
+            <h2 className={styles.headerTitle}>
+              {scope === 'graph'
+                ? t('scopeGraph') + (activeGraph === undefined
+                  ? ''
+                  : ' / ' + (activeGraph.group === ''
+                    ? t(activeGraph.scope === 'global'
+                      ? 'bucketGlobal'
+                      : activeGraph.scope === 'department' ? 'bucketDepartment' : 'bucketPersonal')
+                    : activeGraph.group) + ' / ' + activeGraph.name)
+                : sectionTitle(t, rendered)}
+            </h2>
             {/* The fact is the second item on the title's own line, not a line under it:
                 the page names itself and says how big the tree is in one glance. It is
                 allowed to shrink and ellipsize; the title and the actions keep their
@@ -1753,7 +1830,23 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   everything in the tree is a fact about the KNOWLEDGE BASE, not about
                   the document on screen, so it is not repeated over an open file --
                   it describes the tree, and the tree already has its own header. */}
-              {rendered.kind === 'file' ? (
+              {scope === 'graph' ? (
+                activeGraph === undefined ? (
+                  <>
+                    <span>{String(graphNodes.length) + ' ' + t('graphUnitGraphs')}</span>
+                    <span className={styles.factDot} aria-hidden="true">·</span>
+                    <span>{t('graphSelectHint')}</span>
+                  </>
+                ) : (
+                  <>
+                    <span>{String(activeGraph.counts.topics) + ' ' + t('graphUnitLines')}</span>
+                    <span className={styles.factDot} aria-hidden="true">·</span>
+                    <span>{String(activeGraph.counts.links) + ' ' + t('graphUnitRelations')}</span>
+                    <span className={styles.factDot} aria-hidden="true">·</span>
+                    <span>{String(activeGraph.counts.documents) + ' ' + t('graphUnitDocuments')}</span>
+                  </>
+                )
+              ) : rendered.kind === 'file' ? (
                 <>
                   {fileMtimeMs === undefined
                     ? null
@@ -1803,7 +1896,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   setProgressRefresh(n => n + 1)
                 }}
               />
-              {pageAction}
+              {scope === 'graph' ? null : pageAction}
             </div>
             {/* Only for the state the reader can act on: the pointer resolves itself,
                 and saying so keeps them from hunting for the rebuild button. Its own
@@ -1812,8 +1905,25 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
               <p className={styles.headerHint}>{t('viewNotBuiltHint')}</p>
             )}
           </header>
-          <section className={styles.content}>
-            {rendered.kind === 'home' && (
+          <section
+            className={styles.content}
+            // The canvas owns the whole column: its pan surface must not be inset by
+            // the document column's reading padding, and the page itself already
+            // draws the graph's header facts.
+            style={scope === 'graph'
+              ? { padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }
+              : undefined}
+          >
+            {scope === 'graph' && (
+              <KnowledgeGraphView
+                state={graph}
+                t={t}
+                {...(activeGraphId === undefined ? {} : { activeGraphId })}
+                {...(activeTopicId === undefined ? {} : { activeTopicId })}
+                onRetry={() => { void graph.reload() }}
+              />
+            )}
+            {scope !== 'graph' && rendered.kind === 'home' && (
               <KnowledgeHome
                 t={t}
                 locale={props.locale}
@@ -1868,10 +1978,10 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 canManageGrants={state.kind === 'ready' ? state.status.canManageGrants === true : false}
               />
             )}
-            {rendered.kind === 'trash' && <KnowledgeTrash t={t} />}
-            {rendered.kind === 'audit' && <KnowledgeAudit t={t} />}
-            {rendered.kind === 'settings' && <KnowledgeSettings t={t} />}
-            {rendered.kind === 'search' && (
+            {scope !== 'graph' && rendered.kind === 'trash' && <KnowledgeTrash t={t} />}
+            {scope !== 'graph' && rendered.kind === 'audit' && <KnowledgeAudit t={t} />}
+            {scope !== 'graph' && rendered.kind === 'settings' && <KnowledgeSettings t={t} />}
+            {scope !== 'graph' && rendered.kind === 'search' && (
               <KnowledgeSearch
                 t={t}
                 search={search}
@@ -1890,7 +2000,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 />}
               />
             )}
-            {rendered.kind === 'permissions' && (
+            {scope !== 'graph' && rendered.kind === 'permissions' && (
               <KnowledgePermissions
                 t={t}
                 mountPoint={config.mountPoint}
@@ -1899,19 +2009,12 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 onAction={setPageAction}
               />
             )}
-            {rendered.kind === 'file' && (
-              // A document is shown by the host's file preview window, not here. This
-              // page is the browsing surface; what fills the reading column is the
-              // product's own viewer, opened through `betterSidebar.openFile`.
-              //
-              // The panel still states which document is open and where it went, so a
-              // click that hands the document to a window the reader cannot see (one
-              // closed behind this page) is not a silent no-op.
-              <div className={styles.openedElsewhere}>
-                <IconDeliverDocRegular size={24} className={styles.emptyGlyph} />
-                <p className={styles.emptyTitle}>{t('openedInSidebar')}</p>
-                <p className={styles.muted}>{config.mountPoint + '/' + rendered.path}</p>
-              </div>
+            {scope !== 'graph' && rendered.kind === 'file' && (
+              <KnowledgeFilePreview
+                path={rendered.path}
+                t={t}
+                onClose={() => { setSelection(canSeeHome ? { kind: 'home' } : { kind: 'search' }) }}
+              />
             )}
           </section>
         </div>

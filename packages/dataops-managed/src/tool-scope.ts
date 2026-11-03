@@ -57,7 +57,22 @@ export interface ToolAccessPolicy {
   readonly reviewer?: boolean
   /** Only the DataOps 超级管理员 role sees this tool. */
   readonly superAdminOnly?: boolean
+  /** Super administrators and administrators see this tool; everyone else does not. */
+  readonly adminOnly?: boolean
+  /**
+   * Connector capability that must be switched on for this tool to exist at all.
+   *
+   * The connector's row in the skill center owns this bit; the manager reconciles the whole group
+   * when it changes, so a disabled capability removes its tools instead of leaving callable stubs
+   * that fail at invocation time.
+   */
+  readonly capability?: ToolCapabilityId
+  /** Fallback when the connector state has no explicit boolean for that capability. */
+  readonly defaultEnabled?: boolean
 }
+
+/** Connector capability ids that gate a group of tools. */
+export type ToolCapabilityId = 'resource.manage' | 'admin.manage'
 
 /**
  * Tool-to-capability disclosure map.
@@ -82,6 +97,16 @@ export const AI_TOOL_ACCESS = {
   review_notifications_list: {},
   review_notifications_read: {},
   dataops_api_docs: { superAdminOnly: true },
+  dataops_collect_preview: { permission: 'data:resource:manage' },
+  dataops_collect_plan: { permission: 'data:resource:manage' },
+  dataops_collect_execute: { permission: 'data:resource:manage' },
+  dataops_collect_resources: { permission: 'data:resource:read' },
+  dataops_open_resource_tab: {},
+  dataops_resource_pending_list: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
+  dataops_resource_grant_list: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
+  dataops_resource_grant_batch: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
+  dataops_resource_approval_decide: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
+  dataops_resource_grant_revoke: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
 } as const satisfies Record<string, ToolAccessPolicy>
 
 /** Every managed tool name, in the order the manager considers them. */
@@ -178,9 +203,20 @@ export const hasPermission = (scope: DataOpsScope, key: string): boolean => {
  * Every check is disclosure metadata, not an execution gate: a visible tool still lets DataOps
  * answer with 403 when the underlying grant changed between a scope sync and the call.
  */
+export function isToolCapabilityEnabled(
+  name: AiToolName,
+  state: { readonly enabled: boolean; readonly capabilities: Record<string, boolean> },
+): boolean {
+  const policy: ToolAccessPolicy = AI_TOOL_ACCESS[name]
+  if (policy.capability === undefined) return true
+  if (!state.enabled) return false
+  return state.capabilities[policy.capability] ?? policy.defaultEnabled ?? false
+}
+
 export function isToolVisible(name: AiToolName, scope: DataOpsScope): boolean {
   const policy: ToolAccessPolicy = AI_TOOL_ACCESS[name]
   if (policy.superAdminOnly === true && !isSuperAdmin(scope)) return false
+  if (policy.adminOnly === true && !isAdmin(scope)) return false
   if (policy.reviewer === true && !canReview(scope)) return false
   if (policy.permission !== undefined && !hasPermission(scope, policy.permission)) return false
   return true

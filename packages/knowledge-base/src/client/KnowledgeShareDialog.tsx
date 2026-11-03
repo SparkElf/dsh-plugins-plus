@@ -266,6 +266,8 @@ export function KnowledgeShareDialog(props: KnowledgeShareDialogProps) {
     <Modal
       open
       title={copy.title}
+      className={styles.dialog}
+      contentClassName={styles.content}
       // The file name sits under the title in the dialog's own supporting line: a reader
       // who opened Share from a row needs to see WHICH document they are about to share,
       // and the generic phrasing alone does not say. It also occupies the place the
@@ -282,7 +284,7 @@ export function KnowledgeShareDialog(props: KnowledgeShareDialogProps) {
         </>
       )}
     >
-      <div className={styles.body}>
+      <div className={styles.body} data-testid="share-body">
         {/* No introductory paragraph here. It explained how permissions are recorded,
             which the reader asked us to remove: the dialog opens directly on the choice
             it exists to make. `intro` is still used for the directory hint below, where
@@ -334,7 +336,7 @@ export function KnowledgeShareDialog(props: KnowledgeShareDialogProps) {
           </div>
         )}
 
-        <ul className={styles.list} ref={listRef} role="listbox" aria-label={copy.search}>
+        <ul className={styles.list} ref={listRef} role="listbox" aria-label={copy.search} data-testid="share-list">
           {loading && <li className={styles.state}>{copy.loading}</li>}
           {!loading && filtered.length === 0 && (
             <li className={styles.state}>{options.length === 0 ? copy.empty : copy.noMatch}</li>

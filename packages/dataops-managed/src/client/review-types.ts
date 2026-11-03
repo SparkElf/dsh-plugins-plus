@@ -95,6 +95,40 @@ export function normalizeVisibility(value: unknown): ResourceVisibility {
   return value === 'department' || value === 'private' ? value : 'global'
 }
 
+/** The resource-scope facts the permission centre needs to decide button availability. */
+export interface ResourceScopeSubject {
+  kind: 'skill' | 'workflow' | 'builtin'
+  visibility: 'global' | 'department' | 'private' | 'unshared'
+  departmentCode?: string | null
+}
+
+/**
+ * Whether this actor may edit one resource-scope row.
+ *
+ * Mirrors the backend policy: built-in skills are super-administrator only, global skills
+ * belong to administrators, and a department administrator edits department rows in their
+ * subtree (the list itself is already narrowed to that subtree).
+ * @param subject - the row's kind and current scope.
+ * @param actorRole - the caller's portal role.
+ * @returns the decision and, when denied, the reason shown on the disabled control.
+ */
+export function canEditResourceScopeRow(
+  subject: ResourceScopeSubject,
+  actorRole: PortalRole,
+): { allowed: boolean; reason?: string } {
+  if (subject.kind === 'builtin') {
+    return actorRole === 'SUPER_ADMIN'
+      ? { allowed: true }
+      : { allowed: false, reason: '只有超级管理员可以修改内置技能的可见范围。' }
+  }
+  if (actorRole === 'SUPER_ADMIN' || actorRole === 'ADMIN') return { allowed: true }
+  if (actorRole !== 'DEPT_ADMIN') return { allowed: false, reason: '没有修改资源范围的权限。' }
+  if (subject.visibility !== 'department' || subject.departmentCode === null || subject.departmentCode === undefined) {
+    return { allowed: false, reason: '部门管理员只能修改本部门的技能。' }
+  }
+  return { allowed: true }
+}
+
 /** Whether the caller may see and act on the review queue. */
 export function canReview(context: ReviewContext | null | undefined): boolean {
   if (context === null || context === undefined) return false

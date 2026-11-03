@@ -44,11 +44,12 @@ export class ReviewApi {
   async request(path: string, init: RequestInit = {}): Promise<ReviewApiResult> {
     const token = await this.token()
     if (token === undefined) return { status: 503, body: { error: 'DataOps is not connected' } }
+    const isMultipart = typeof FormData !== 'undefined' && init.body instanceof FormData
     const response = await fetch(new URL(path, this.apiBase()), {
       ...init,
       headers: {
         authorization: `Bearer ${token}`,
-        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(init.body === undefined || isMultipart ? {} : { 'content-type': 'application/json' }),
         ...init.headers,
       },
     })

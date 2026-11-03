@@ -50,7 +50,7 @@ function setup(context: DataOpsScope, options: { outcome?: string; routes?: Reco
     logger: { info: (line: string) => { audits.push(line) }, warn: () => {}, error: () => {} },
     skills: { snapshot: async () => ({ skills: [] }), get: async () => undefined },
   }
-  const manager = new AiToolManager(ctx as never, api as never)
+  const manager = new AiToolManager(ctx as never, api as never, { subscribe: () => () => undefined } as never)
   managers.push(manager)
   manager.applyContext(context)
   const exec = { agent: { session: { id: 's1' } }, callId: 'call-1', signal: new AbortController().signal }
@@ -162,7 +162,7 @@ describe('uninstall / unshare / delete semantics', () => {
 describe('scope-based disclosure', () => {
   it('registers only the notification tools when the permission list is empty', () => {
     const f = setup({ ...ADMIN, permissions: [] })
-    expect([...f.tools.keys()].sort()).toEqual(['review_notifications_list', 'review_notifications_read'])
+    expect([...f.tools.keys()].sort()).toEqual(['dataops_open_resource_tab', 'review_notifications_list', 'review_notifications_read'])
   })
 
   it('registers review_decide for a department reviewer and leaves resource scope to DataOps', async () => {

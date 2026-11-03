@@ -1932,6 +1932,16 @@ export interface KnowledgeAuditEntry {
   relPath: string
   /** For a move, the destination path. */
   toRelPath?: string
+  /** Model-facing tool that performed the action, when one did. */
+  tool?: string
+  /** Graph the action belongs to, when the action is a graph operation. */
+  graphId?: string
+  /** Topic id inside the graph, when the action names one. */
+  topicId?: string
+  /** Short human intent (`new topic`, `move-to-trash`, ...). */
+  intent?: string
+  /** One-line description of what changed, for review. */
+  diffSummary?: string
   /**
    * Extra detail for actions that have more than one flavour.
    *

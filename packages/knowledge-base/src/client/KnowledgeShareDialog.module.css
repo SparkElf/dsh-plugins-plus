@@ -116,3 +116,52 @@
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxxs-11);
 }
+
+/* ---------------------------------------------------------------------------
+ * Dialog proportions (task 16).
+ *
+ * The dialog was a 380px sheet whose auto height shrank the principal list to a
+ * couple of rows, so a reader could not scan the directory they were choosing
+ * from. It now sizes against the viewport instead of a monitor: a wider card, a
+ * minimum height that gives the list room for 6–8 rows, and a maximum that keeps
+ * the header and footer reachable on a 1280x800 screen. The list consumes the
+ * remaining height and scrolls; the card itself never scrolls.
+ *
+ * Width is capped with `100%` so a narrow viewport narrows the card rather than
+ * overflowing it. No new tokens or colors are introduced.
+ * ------------------------------------------------------------------------- */
+
+.dialog {
+  width: min(520px, 100%);
+  min-height: min(680px, 80vh);
+  max-height: min(78vh, 720px);
+}
+
+/* The primitive content column (header + description + body) takes the space the
+   footer does not, and its body child becomes the flex host for the dialog's own
+   column. `:last-child` is the primitive's body wrapper, the only child that can
+   scroll. */
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.content > div:last-child {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.list {
+  flex: 1 1 auto;
+  min-height: 180px;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}

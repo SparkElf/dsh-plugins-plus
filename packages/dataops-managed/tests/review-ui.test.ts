@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  canEditResourceScopeRow,
   canManagePermissions,
   canReview,
   filterByReview,
@@ -50,6 +51,24 @@ describe('review state and permissions', () => {
     expect(filterByReview(rows, 'approved')).toHaveLength(2)
     expect(filterByReview(rows, 'pending')).toHaveLength(1)
     expect(filterByReview(rows, 'all')).toHaveLength(4)
+  })
+
+  it('gates resource-scope editing by row category and role', () => {
+    const builtin = { kind: 'builtin' as const, visibility: 'unshared' as const, departmentCode: null }
+    expect(canEditResourceScopeRow(builtin, 'SUPER_ADMIN').allowed).toBe(true)
+    expect(canEditResourceScopeRow(builtin, 'ADMIN').allowed).toBe(false)
+    expect(canEditResourceScopeRow(builtin, 'DEPT_ADMIN').allowed).toBe(false)
+
+    const global = { kind: 'skill' as const, visibility: 'global' as const, departmentCode: null }
+    expect(canEditResourceScopeRow(global, 'SUPER_ADMIN').allowed).toBe(true)
+    expect(canEditResourceScopeRow(global, 'ADMIN').allowed).toBe(true)
+    expect(canEditResourceScopeRow(global, 'DEPT_ADMIN').allowed).toBe(false)
+
+    const department = { kind: 'skill' as const, visibility: 'department' as const, departmentCode: 'crm-ops' }
+    expect(canEditResourceScopeRow(department, 'DEPT_ADMIN').allowed).toBe(true)
+    expect(canEditResourceScopeRow(department, 'APP_USER').allowed).toBe(false)
+    // A department admin never edits a personal/private row.
+    expect(canEditResourceScopeRow({ ...department, visibility: 'private' as const }, 'DEPT_ADMIN').allowed).toBe(false)
   })
 
   it('labels visibility with the department path in the tooltip', () => {

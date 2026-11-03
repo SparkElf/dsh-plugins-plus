@@ -19,6 +19,7 @@ import {
   filterByReview,
   notificationTab,
   normalizeReviewStatus,
+  normalizeVisibility,
   reviewCounts,
   reviewTabsFor,
   visibilityTag,
@@ -60,6 +61,59 @@ function countsOf(skills: readonly PlazaSkill[]): NonNullable<PlazaListing['coun
     rejected: skills.filter(row => row.reviewStatus === 'rejected').length,
     total: counted.all,
   }
+}
+
+/** A plaza tab: the review states plus the department filter. */
+type PlazaTab = ReviewTab | 'department'
+
+/** One department option derived from the rows the plaza can show. */
+export interface PlazaDepartmentOption {
+  /** Value the select submits: the department code when the row carries one. */
+  code: string
+  /** Label shown in the select; never empty. */
+  name: string
+}
+
+/**
+ * The department a plaza row belongs to.
+ *
+ * The backend normally sends `departmentCode`; a legacy row may carry only a name or path, so the
+ * fallbacks keep those rows selectable instead of dropping them into an empty key.
+ * @param skill - one plaza row.
+ * @returns the code, the name, or the deepest path name; empty when the row says nothing.
+ */
+export function departmentKeyOf(skill: PlazaSkill): string {
+  return skill.departmentCode ?? skill.departmentName ?? skill.departmentPath?.at(-1)?.name ?? ''
+}
+
+/**
+ * The department choices present in the visible rows.
+ *
+ * The label falls back from the row's own name to the deepest path name and finally to the code,
+ * so a department the backend can no longer name still renders as a readable option.
+ * @param skills - every row the current query returned.
+ * @returns distinct departments, sorted by label.
+ */
+export function departmentOptionsOf(skills: readonly PlazaSkill[]): PlazaDepartmentOption[] {
+  const options = new Map<string, string>()
+  for (const skill of skills) {
+    if (normalizeVisibility(skill.visibility) !== 'department') continue
+    const code = departmentKeyOf(skill)
+    if (code === '' || options.has(code)) continue
+    options.set(code, skill.departmentName ?? skill.departmentPath?.at(-1)?.name ?? code)
+  }
+  return [...options].map(([code, name]) => ({ code, name })).sort((left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN'))
+}
+
+/**
+ * The rows the department tab shows.
+ * @param skills - every row the current query returned.
+ * @param code - selected department key, or an empty string for all of them.
+ * @returns the department-shared rows, narrowed to `code` when it is set.
+ */
+export function filterByDepartment(skills: readonly PlazaSkill[], code: string): PlazaSkill[] {
+  const shared = skills.filter(skill => normalizeVisibility(skill.visibility) === 'department')
+  return code === '' ? shared : shared.filter(skill => departmentKeyOf(skill) === code)
 }
 
 /** One skill as a card in the plaza grid. */
@@ -178,8 +232,8 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
   const { t } = props
   const [state, setState] = useState<PlazaState>({ kind: 'loading' })
   const [context, setContext] = useState<ReviewContext | null | undefined>(undefined)
-  const [tab, setTab] = useState<ReviewTab>('approved')
-  const [tag, setTag] = useState('')
+  const [tab, setTab] = useState<PlazaTab>('approved')
+  const [department, setDepartment] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [audit, setAudit] = useState<PlazaSkill | null>(null)
@@ -198,7 +252,7 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
     return () => { live = false }
   }, [])
 
-  const load = useCallback(async (filter: { tab: ReviewTab; tag: string; query: string }) => {
+  const load = useCallback(async (filter: { query: string }) => {
     try {
       // The demo fixture is complete on its own: mixing it with a live list would still call a
       // backend whose review endpoints have not shipped, which is exactly what the fixture exists
@@ -208,32 +262,32 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
         setState({
           kind: 'ready',
           listing: {
-            skills: [...filterByReview(demo, filter.tab)],
-            tags: ['性能', '数据', '数据库', '质量', '经营', '日报', '客户'],
+            skills: [...demo],
+            tags: [],
             counts: countsOf(demo),
           },
         })
         return
       }
-      // One visible snapshot per query/tag. The tab is a client-side filter, so the count on
-      // each tab is always the number of cards that tab will actually show.
-      const listing = await fetchPlaza({ tag: filter.tag, query: filter.query, status: allowed ? 'all' : 'approved' })
+      // One visible snapshot per query. The tab and the department are client-side filters, so the
+      // count on each tab is always the number of cards that tab will actually show.
+      const listing = await fetchPlaza({ query: filter.query, status: allowed ? 'all' : 'approved' })
       if (listing === null) {
         setState({ kind: 'unavailable' })
         return
       }
       const visible = allowed ? listing.skills : listing.skills.filter(row => normalizeReviewStatus(row.reviewStatus) === 'approved')
-      setState({ kind: 'ready', listing: { ...listing, skills: [...filterByReview(visible, filter.tab)], counts: countsOf(visible) } })
+      setState({ kind: 'ready', listing: { ...listing, skills: [...visible], counts: countsOf(visible) } })
     } catch {
       setState({ kind: 'failed' })
     }
   }, [allowed])
 
-  useEffect(() => { void load({ tab, tag, query }) }, [load, tab, tag, query])
+  useEffect(() => { void load({ query }) }, [load, query])
 
-  const refresh = useCallback(async (nextTab = tab, nextTag = tag) => {
-    await load({ tab: nextTab, tag: nextTag, query })
-  }, [load, tab, tag, query])
+  const refresh = useCallback(async () => {
+    await load({ query })
+  }, [load, query])
 
   const act = useCallback(async (body: Record<string, unknown>, message: string) => {
     setBusy(true)
@@ -288,7 +342,8 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
       }
       setAudit(null)
       setNotice(t === undefined ? null : t('plazaReviewDone'))
-      await refresh('pending')
+      setTab('pending')
+      await refresh()
     } catch {
       setReviewError(t === undefined ? null : t('plazaReviewFailed'))
     } finally {
@@ -338,12 +393,23 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
   const counts: Record<ReviewTab, number> = listing.counts === undefined
     ? reviewCounts(listing.skills)
     : { approved: listing.counts.approved, pending: listing.counts.pending, all: listing.counts.total }
-  const tabs = reviewTabsFor(context)
-  const tabLabel = (item: ReviewTab): string => item === 'approved' ? t('plazaTabApproved') : item === 'pending' ? t('plazaTabPending') : t('plazaTabAll')
+  const reviewTabs = reviewTabsFor(context)
+  const departmentOptions = departmentOptionsOf(listing.skills)
+  // A department deleted or renamed away after the selection was made falls back to "all", so the
+  // select never holds a value that is absent from its own options.
+  const selectedDepartment = departmentOptions.some(option => option.code === department) ? department : ''
+  const departmentSkills = filterByDepartment(listing.skills, selectedDepartment)
+  const tabs: readonly PlazaTab[] = departmentOptions.length === 0 ? reviewTabs : [...reviewTabs, 'department']
+  const countOfTab = (item: PlazaTab): number => item === 'department' ? departmentSkills.length : counts[item]
+  const tabLabel = (item: PlazaTab): string => item === 'approved' ? t('plazaTabApproved')
+    : item === 'pending' ? t('plazaTabPending')
+      : item === 'all' ? t('plazaTabAll')
+        : t('plazaTabDepartment')
+  const visibleSkills = tab === 'department' ? departmentSkills : filterByReview(listing.skills, tab)
 
   return (
     <section className={styles.section}>
-      {head(counts[tab])}
+      {head(countOfTab(tab))}
       {tabs.length > 1 ? (
         <div className={styles.tabs} role="tablist" aria-label={t('plazaTitle')}>
           {tabs.map(item => (
@@ -353,35 +419,45 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
               role="tab"
               aria-selected={tab === item}
               className={tab === item ? styles.tab + ' ' + styles.tabActive : styles.tab}
-              onClick={() => { setTab(item); void load({ tab: item, tag, query }) }}
+              onClick={() => { setTab(item) }}
             >
               {tabLabel(item)}
-              <span className={styles.tabCount}>{counts[item]}</span>
+              <span className={styles.tabCount}>{countOfTab(item)}</span>
             </button>
           ))}
         </div>
       ) : null}
 
-      {listing.tags.length === 0 ? null : (
-        <div className={styles.tagBar}>
-          <button type="button" className={tag === '' ? styles.chip + ' ' + styles.chipOn : styles.chip} onClick={() => { setTag(''); void refresh(tab, '') }}>{t('plazaAllTags')}</button>
-          {listing.tags.map(item => (
-            <button key={item} type="button" className={tag === item ? styles.chip + ' ' + styles.chipOn : styles.chip} onClick={() => { setTag(item); void refresh(tab, item) }}>{item}</button>
-          ))}
-        </div>
-      )}
+      {tab === 'department' && departmentOptions.length > 0 ? (
+        <label className={styles.departmentBar}>
+          <span className={styles.departmentLabel}>{t('plazaDepartment')}</span>
+          <select
+            className={styles.departmentSelect}
+            value={selectedDepartment}
+            aria-label={t('plazaDepartment')}
+            onChange={(event) => { setDepartment(event.target.value) }}
+          >
+            <option value="">{t('plazaDepartmentAll')}</option>
+            {departmentOptions.map(option => (
+              <option key={option.code} value={option.code}>{option.name}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
 
       {notice === null ? null : <p className={styles.notice}>{notice}</p>}
 
-      {listing.skills.length === 0 ? (
+      {visibleSkills.length === 0 ? (
         <div className={styles.empty}>
           <span className={styles.emptyIcon}><IconShareOutlineRegular size={28} /></span>
-          <p className={styles.emptyText}>{tab === 'pending' ? t('plazaPendingEmpty') : t('plazaEmpty')}</p>
+          <p className={styles.emptyText}>
+            {tab === 'department' ? t('plazaDepartmentEmpty') : tab === 'pending' ? t('plazaPendingEmpty') : t('plazaEmpty')}
+          </p>
         </div>
       ) : null}
 
       <ul className={styles.cards}>
-        {listing.skills.map(skill => (
+        {visibleSkills.map(skill => (
           <PlazaCard
             key={skill.id}
             skill={skill}

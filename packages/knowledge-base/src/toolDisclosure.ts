@@ -92,6 +92,12 @@ export const KB_TOOL_ACCESS: Readonly<Record<string, ToolAccessRule>> = Object.f
   kb_file_delete: { group: 'write', permissions: ['kb:file:delete'] },
   kb_file_mkdir: { group: 'write', permissions: ['kb:file:write'] },
   kb_file_extract: { group: 'write', permissions: ['kb:file:extract'] },
+  // Graph tools: read for get, write for add/set, delete for del. Path-level
+  // `canWritePath` still runs on the graph folder before any write.
+  kg_get: { group: 'read', permissions: ['kb:file:read'] },
+  kg_add: { group: 'write', permissions: ['kb:file:write'] },
+  kg_set: { group: 'write', permissions: ['kb:file:write'] },
+  kg_del: { group: 'write', permissions: ['kb:file:delete'] },
   // A summary is written next to a document the caller must also be able to read.
   kb_outline_save: { group: 'write', permissions: ['kb:file:read', 'kb:file:write'] },
 

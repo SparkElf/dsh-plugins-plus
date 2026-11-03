@@ -1,3 +1,4 @@
+import { ResourceTabIcon } from './ResourceTabIcon.tsx'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -12,10 +13,18 @@ import { PermissionCenterSection } from './PermissionCenterSection.tsx'
 import { PermissionCenterIcon } from './PermissionCenterIcon.tsx'
 import { WorkspaceUpgradePrompt } from './WorkspaceUpgradePrompt.tsx'
 import { WorkflowPlazaBell } from './NotificationBell.tsx'
+import { DataOpsResourcesTab } from './DataOpsResourcesTab.tsx'
+import { OpenResourceBridge, RESOURCE_TAB_TYPE, type ResourceTabService } from './OpenResourceBridge.tsx'
 import { canSeeManagedSettings, subscribeManagedSettingsVisibility } from './settings-gate.ts'
 import { REVIEW_CONTEXT_PATH, reviewDemoMode } from './review-client.ts'
 import type { ManagedDataOpsSectionInjected } from './ManagedDataOpsSection.tsx'
 import { en, zh, type ManagedDataOpsKey } from './locales.ts'
+
+/** Minimal public composer surface used by the resource-reference hand-off. */
+type SessionInputLike = {
+  insertReference?: (ref: unknown, span: { start: number; end: number; draftRev: number }) => boolean
+  state?: { getSnapshot?: () => { draft: string; draftRev: number } }
+}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
@@ -40,8 +49,8 @@ const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
 /** Sidebar entry and main page id for the permission centre. */
 const PERMISSION_PANEL_ID = 'dataops-permissions'
 
-/** Required client services for the managed DataOps Settings section. */
-export const inject = ['slots', 'locale']
+/** Required client services for the managed DataOps Settings section and the resource tab bridge. */
+export const inject = ['slots', 'locale', 'conversation', 'sessions']
 
 /**
  * Bind the four strings the sign-in prompt needs.
@@ -206,6 +215,120 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('workflow-plaza.actions', () => ctx.slots.register({
     name: 'workflow-plaza.actions',
   }, WorkflowPlazaBell as never))
+
+  /**
+   * The custom DataOps resource tab and the host→client opening bridge.
+   *
+   * Both are optional on the Better Sidebar service: a profile without it keeps the rest of
+   * the managed surfaces and simply has no sidebar resource page. The registration waits for
+   * the service instead of sampling it once, because plugin load order is not ours to choose.
+   */
+  ctx.effect(() => {
+    let disposeTab: (() => void) | undefined
+    let disposeBridge: (() => void) | undefined
+    const inject = (ctx as unknown as {
+      inject?: (names: readonly string[], callback: (injected: { betterSidebar?: ResourceTabService }) => void) => unknown
+    }).inject
+    inject?.(['betterSidebar', 'conversation', 'sessions', 'inputTriggers'], (injected) => {
+      const service = injected.betterSidebar as (ResourceTabService & {
+        registerTab?: (descriptor: Record<string, unknown>) => () => void
+      }) | undefined
+      if (service?.registerTab === undefined) return
+      const conversation = (injected as {
+        conversation?: {
+          send?: (text: string) => Promise<void>
+          input?: { for?: (actx: unknown) => SessionInputLike | undefined }
+        }
+      }).conversation
+      const sessions = (injected as {
+        sessions?: { scope?: (id: string) => unknown | undefined }
+      }).sessions
+      const inputTriggers = (injected as {
+        inputTriggers?: { registerSource?: (source: unknown) => () => void }
+      }).inputTriggers
+      // The chip owner: the composer resolves this source's codec on submit and asks it
+      // for the model text. The ref carries the resource identity so a later submit can
+      // still serialize after the tab has moved on.
+      if (inputTriggers?.registerSource !== undefined) {
+        const source = {
+          trigger: '@',
+          name: 'dataops-resource',
+          showGroupTitle: false,
+          candidates: async () => [],
+          codec: {
+            clipboardText: (ref: string) => {
+              try { return '@' + String((JSON.parse(ref) as { name?: unknown }).name ?? '资源') } catch { return '@资源' }
+            },
+            serialize: async (ref: string) => {
+              try {
+                const parsed = JSON.parse(ref) as { kind?: unknown; resourceId?: unknown; name?: unknown; table?: unknown }
+                return '引用数据资源：\n\n```resource-ref\n' + JSON.stringify({
+                  kind: 'dataops-resource',
+                  resourceId: parsed.resourceId,
+                  name: parsed.name,
+                  table: parsed.table ?? null,
+                }, null, 2) + '\n```\n'
+              } catch { return ref }
+            },
+          },
+        }
+        try { inputTriggers.registerSource(source) } catch { /* HMR / duplicate source: keep the existing owner */ }
+      }
+      const insertResourceReference = (
+        resource: { id?: unknown; name?: unknown; table?: unknown },
+        reference: Record<string, unknown>,
+        sessionId?: string,
+      ): void => {
+        if (!sessionId) throw new Error('no active session')
+        const scoped = sessions?.scope?.(sessionId)
+        const input = conversation?.input?.for?.(scoped)
+        if (!input?.insertReference || !input.state?.getSnapshot) throw new Error('composer is unavailable')
+        const state = input.state.getSnapshot()
+        const span = { start: state.draft.length, end: state.draft.length, draftRev: state.draftRev }
+        const name = String(resource.name ?? reference.name ?? '资源')
+        const payload = {
+          kind: 'dataops-resource',
+          resourceId: resource.id ?? reference.resourceId,
+          name,
+          table: resource.table ?? reference.table ?? null,
+        }
+        const inserted = input.insertReference({
+          source: 'dataops-resource',
+          ref: JSON.stringify(payload),
+          label: name,
+          appearance: 'resource',
+          clipboardText: '@' + name,
+        } as never, span)
+        if (!inserted) throw new Error('输入框正忙，请稍后再试')
+      }
+      disposeTab = service.registerTab({
+        id: RESOURCE_TAB_TYPE,
+        title: '数据资源',
+        icon: ResourceTabIcon,
+        description: 'DataOps 全量资源、授权与操作记录',
+        order: 60,
+        single: true,
+        component: ((props: Record<string, unknown>) => DataOpsResourcesTab({
+          ...(props as { tab: { meta?: unknown }; scope?: { sessionId?: string } }),
+          insertResourceReference,
+        })) as never,
+      })
+      disposeBridge = ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+        name: 'sidebar.footer.action',
+        id: 'dataops-resource-bridge',
+        order: 95,
+      }, ((props: { scope?: { sessionId?: string } }) => OpenResourceBridge({
+        service,
+        scope: props?.scope,
+      })) as never))
+    })
+    return () => {
+      disposeBridge?.()
+      disposeBridge = undefined
+      disposeTab?.()
+      disposeTab = undefined
+    }
+  }, 'dataops-managed: resource tab and open bridge')
 
   const synchronizeJwt = async (): Promise<void> => {
     const response = await fetch(new URL(MANAGED_AUTH_PATH, window.location.origin), {

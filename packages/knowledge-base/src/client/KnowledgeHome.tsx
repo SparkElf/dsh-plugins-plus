@@ -499,6 +499,8 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
   const [shareLoading, setShareLoading] = useState(false)
   /** A failed grants read, surfaced in the block rather than silently showing nothing. */
   const [shareError, setShareError] = useState<string | undefined>(undefined)
+  /** Local re-read trigger for table mutations (delete/share/star/rename/move). */
+  const [localTick, setLocalTick] = useState(0)
   /** One pager: the merged table is one list, so it gets one page number. */
   const [sharePage, setSharePage] = useState(1)
 
@@ -574,7 +576,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
     } finally {
       setShareLoading(false)
     }
-  }, [props.mountPoint, props.callerId, c])
+  }, [props.mountPoint, props.callerId, c, localTick, props.refreshTick])
 
   // Read the shares when the tab is opened, and again whenever the caller identity
   // resolves (it arrives after mount), so the split is never computed against
@@ -619,9 +621,23 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
       } catch {
         setState('error')
       }
-    }, [props.mountPoint, props.refreshTick])
+    }, [props.mountPoint])
 
-  useEffect(() => { void read() }, [read])
+  useEffect(() => { void read() }, [read, props.refreshTick, localTick])
+
+  /**
+   * Re-read every table after a mutation.
+   *
+   * The parent's `refreshTick` is still bumped (the tree and other listing surfaces
+   * listen to it), but the Home table also owns a local tick and awaits its own read:
+   * a delete must not depend on a parent re-render racing the view sync.
+   */
+  const refreshRows = useCallback(async (): Promise<void> => {
+    setLocalTick(value => value + 1)
+    props.onTreeChanged?.()
+    await read()
+    if (tab === 'shared') await readShares()
+  }, [props, read, readShares, tab])
   /**
    * Paste the Home table's clipboard into one directory.
    *
@@ -641,9 +657,8 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
       if (!response.ok) break
     }
     if (clip.cut) setClipboard(null)
-    props.onTreeChanged?.()
-    await read()
-  }, [clipboard, props, read])
+    await refreshRows()
+  }, [clipboard, refreshRows])
 
   /**
    * Delete one row to the trash, then re-read the table.
@@ -667,15 +682,19 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         cache: 'no-store',
       })
       if (!response.ok) throw new Error('HTTP ' + String(response.status))
-      props.onTreeChanged?.()
+      // Remove the row immediately, then re-read the authoritative listing. The
+      // optimistic step is what makes the table move on the same click; the read is
+      // what keeps the table honest after the view rebuild.
+      setRows(current => current.filter(candidate => candidate.relPath !== row.relPath))
+      await refreshRows()
     } catch {
-      // The table re-reads either way: a failed delete that silently left the row on
-      // screen would read as a successful one.
-      props.onTreeChanged?.()
+      // A failed delete still re-reads: leaving a speculative removal on screen
+      // would claim a delete that did not happen.
+      await refreshRows()
     } finally {
       setDeletingPath(undefined)
     }
-  }, [c, props])
+  }, [c, refreshRows])
 
   /**
    * Which create/upload flow one card row starts.
@@ -933,7 +952,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         departmentPath={props.departmentPath}
         sort={props.sort}
         isFavorite={props.isFavorite}
-        onToggleFavorite={props.onFavorite}
+        onToggleFavorite={(path, favorite) => { props.onFavorite?.(path, favorite); void refreshRows() }}
         onShare={(relPath) => { setShareTarget({ relPath, name: relPath.slice(relPath.lastIndexOf('/') + 1), isDir: false }) }}
         onClipboard={setClipboard}
         hasClipboard={clipboard !== null}
@@ -1240,7 +1259,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         onClose={() => { setShareTarget(null) }}
         onShared={() => {
           setShareTarget(null)
-          props.onTreeChanged?.()
+          void refreshRows()
         }}
       />
 
@@ -1259,16 +1278,16 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         onClose={() => { setMenu(null) }}
         onGrant={(path) => { props.onGrant?.(path) }}
         onPin={(path, pinned) => { props.onPin?.(path, pinned) }}
-        onFavorite={(path, favorite) => { props.onFavorite?.(path, favorite) }}
+        onFavorite={(path, favorite) => { props.onFavorite?.(path, favorite); void refreshRows() }}
         onReference={(path, isDir) => { props.onReference?.(path, isDir) }}
         onClipboard={(entry) => { setClipboard(entry) }}
-        onRenamed={() => { props.onTreeChanged?.() }}
-        onDeleted={() => { props.onTreeChanged?.() }}
+        onRenamed={() => { void refreshRows() }}
+        onDeleted={() => { void refreshRows() }}
         onMoved={() => {
           // A cut consumes the clipboard (its source is gone); a copy keeps it so the
           // same entry can be pasted into a second folder.
           setClipboard(current => (current?.cut === true ? null : current))
-          props.onTreeChanged?.()
+          void refreshRows()
         }}
       />
     </div>

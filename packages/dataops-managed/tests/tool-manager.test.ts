@@ -47,7 +47,7 @@ function harness() {
   }
   const responses = new Map<string, { status: number; body: unknown }>()
   const request = vi.fn(async (path: string) => responses.get(path) ?? { status: 404, body: { error: 'not found' } })
-  const manager = new AiToolManager(ctx as never, { request } as never)
+  const manager = new AiToolManager(ctx as never, { request } as never, { subscribe: () => () => undefined } as never)
   managers.push(manager)
   return { tools, disposed, viewers, responses, request, manager }
 }
@@ -81,7 +81,7 @@ const READER = {
   permissions: ['skill:capability:read'],
 }
 
-const NOTIFICATION_TOOLS = ['review_notifications_list', 'review_notifications_read']
+const NOTIFICATION_TOOLS = ['dataops_open_resource_tab', 'review_notifications_list', 'review_notifications_read']
 
 describe('no scope, no tools', () => {
   it('registers no tool when the permission list is empty', async () => {

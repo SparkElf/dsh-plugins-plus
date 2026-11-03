@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-dataops-managed",
-  "version": "0.3.22",
+  "version": "0.3.31",
   "description": "DataOps JWT intake and credential-backed MCP tools for managed DeepSeek Harness workspaces.",
   "type": "module",
   "main": "./lib/index.js",
@@ -41,6 +41,7 @@
     "cordis.patch.yml",
     "skills/dataops-query/SKILL.md",
     "skills/dataops-query/i18n/zh.json",
+    "skills/dataops-collect/SKILL.md",
     "README.md",
     "LICENSE"
   ],

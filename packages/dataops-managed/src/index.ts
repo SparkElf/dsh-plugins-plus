@@ -3,7 +3,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { currentAuthState, resetAuthState } from './auth-state.ts'
+import { currentAuthState, noteAccepted, noteExpired, resetAuthState } from './auth-state.ts'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -23,6 +23,12 @@ import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
 import { ReviewApi } from './review-api.ts'
 import { AiToolManager } from './tool-manager.ts'
 import {
+  OpenResourceHub,
+  OPEN_RESOURCE_EVENTS_PATH,
+  RESOURCE_TAB_CONFIG_PATH,
+  resolveResourceTabConfig,
+} from './resource-tab.ts'
+import {
   CONNECTORS_PATH,
   DATAOPS_CONNECTOR_ID,
   buildConnectorView,
@@ -41,7 +47,7 @@ import { WorkspaceUpgrade, WorkspaceUpgradeError, recoverWorkspaceUpgradeAfterBo
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
 /** Host services required by managed JWT and MCP ownership. */
-export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval', 'agents']
+export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval']
 
 export const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
 
@@ -145,6 +151,14 @@ function volatileValue<T>(field: T | VolatileRef<T> | undefined, fallback: T): T
 export interface Config {
   /** DataOps browser/API origin reachable from the DSH Host. */
   baseUrl: string
+  /**
+   * Browser-facing DataOps origin used by the resource sidebar iframe.
+   *
+   * `baseUrl` may point at a container-internal API address. Leave this empty in a
+   * same-origin portal deployment (the request Host is the correct origin) and set it
+   * only for a split-origin deployment where the browser reaches DataOps elsewhere.
+   */
+  webBaseUrl?: string
   /** Local namespace for DataOps MCP tools. */
   serverName: string
   /** DSH credential reference that stores the current DataOps access JWT. */
@@ -213,6 +227,7 @@ const MODEL_SYNC_DEFAULT: ModelSyncState = {
 /** Schemastery parser for managed DataOps configuration. */
 export const Config: z<Config> = z.object({
   baseUrl: z.string().default('http://host.docker.internal:3101'),
+  webBaseUrl: z.string().default(''),
   serverName: z.string().default('dataops'),
   credentialRef: z.string().role('credential-ref').default('DATAOPS_ACCESS_TOKEN'),
   /**
@@ -322,6 +337,78 @@ const querySkillProvider = {
     return { ...QUERY_SKILL, content: await readFile(QUERY_SKILL_FILE, 'utf8') }
   },
 }
+
+/** The skill this plugin contributes: turn one spreadsheet into a queryable resource. */
+const COLLECT_SKILL_NAME = 'dataops-collect'
+/** Location of the collection skill document inside the published package. */
+const COLLECT_SKILL_FILE = new URL('../skills/dataops-collect/SKILL.md', import.meta.url)
+/** Package root, which the skill loads its relative resources against. */
+const COLLECT_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+/**
+ * Describe the collection skill to the catalog without reading it.
+ *
+ * The description carries the natural-language triggers so a request like "把这份表格建成
+ * 能问数的资源" selects this skill before the model sees the body.
+ */
+const COLLECT_SKILL = {
+  name: COLLECT_SKILL_NAME,
+  description:
+    '把表格 / Excel / CSV 建成可问数的数据资源，或把新表格追加到已有资源时使用。包含新建与追加的分岔、计划确认、建表写入、权限入口和结果汇报；确认计划前绝不建表。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: COLLECT_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: COLLECT_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: COLLECT_SKILL_FILE,
+} as const
+
+/** Connector authoring skill: only superadmins hold `data:connector:authoring`. */
+const CONNECTOR_SKILL_NAME = 'api-connector-authoring'
+const CONNECTOR_SKILL_FILE = new URL('../skills/api-connector-authoring/SKILL.md', import.meta.url)
+const CONNECTOR_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+/** 该技能的门禁：只有持有 `data:connector:authoring` 的超管能看到（只对超管授权）。 */
+const CONNECTOR_SKILL_PERMISSION = 'data:connector:authoring'
+
+const CONNECTOR_SKILL = {
+  name: CONNECTOR_SKILL_NAME,
+  metadata: { permissions: [CONNECTOR_SKILL_PERMISSION] },
+  description:
+    '从接口文档（OpenAPI / Swagger / 接口说明）创建 API Connector 并导入为接口资源时使用。包含文档解析、导入粒度判断、资源命名与目录治理、GenUI 预览和用户确认后才导入的流程。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: CONNECTOR_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: CONNECTOR_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: CONNECTOR_SKILL_FILE,
+} as const
+
+/**
+ * 当前 DataOps 身份是否允许看到连接器作者技能。
+ *
+ * 核心层对 provider 的列表是 fail-open 的：不认识的技能一律展示。所以门禁必须在这里做——
+ * 没有权限时返回空列表，`get` 也拒绝，避免只靠 SKILL.md 里的 frontmatter 声明。
+ */
+let connectorSkillAllowed: () => boolean = () => false
+
+const connectorSkillProvider = {
+  name: CONNECTOR_SKILL_NAME,
+  list: () => Promise.resolve(connectorSkillAllowed() ? [CONNECTOR_SKILL] : []),
+  async get() {
+    if (!connectorSkillAllowed()) throw new Error('connector skill is not available for this account')
+    return { ...CONNECTOR_SKILL, content: await readFile(CONNECTOR_SKILL_FILE, 'utf8') }
+  },
+}
+
+/** Serve the collection skill to the catalog. */
+const collectSkillProvider = {
+  name: COLLECT_SKILL_NAME,
+  list: () => Promise.resolve([COLLECT_SKILL]),
+  async get() {
+    return { ...COLLECT_SKILL, content: await readFile(COLLECT_SKILL_FILE, 'utf8') }
+  },
+}
 /**
  * Accept the current DataOps JWT and expose DataOps MCP tools through its credential.
  * @param ctx - DSH Host context with credentials, Web routes, and tools.
@@ -336,6 +423,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // The query skill ships with the plugin: a data question is the plugin's own subject, so its
   // guidance travels with the DataOps integration rather than the deployment profile.
   ctx.skills.registerProvider(() => querySkillProvider)
+  // The collection skill is the product's main entry: a normal conversation request is what
+  // triggers it, so the guidance must ship with the plugin rather than be pasted into a prompt.
+  ctx.skills.registerProvider(() => collectSkillProvider)
+  ctx.skills.registerProvider(() => connectorSkillProvider)
 
   const ensureMcp = async (): Promise<void> => {
     if (mcpFiber !== undefined && mcpFiber.uid !== null) return
@@ -465,6 +556,62 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   skillPlazaRef = skillPlaza
   const reviewApi = new ReviewApi(ctx, { baseUrl, credentialRef: config.credentialRef })
   reviewApiRef = reviewApi
+  // One workspace-local fan-out for "open the DataOps resource tab". The model tool publishes
+  // here; the client half is the only code that calls betterSidebar.openTab.
+  const resourceTabHub = new OpenResourceHub(ctx.logger)
+  ctx.effect(() => () => resourceTabHub.dispose(), 'dataops-managed: resource tab SSE clients')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: OPEN_RESOURCE_EVENTS_PATH,
+    handler: (request, response) => resourceTabHub.subscribe(request, response),
+  }), 'dataops-managed: resource tab SSE route')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: RESOURCE_TAB_CONFIG_PATH,
+    handler: async (request, response) => {
+      const payload = resolveResourceTabConfig(request, config.webBaseUrl)
+      // The tab hands this token to the embed page through the URL fragment; a fragment never
+      // reaches the server or access logs, and the page strips it after storing it. This is the
+      // only way a cross-origin portal iframe can start with the workspace's identity.
+      let token: string | undefined
+      try { token = (await ctx.credentials.resolve(accessRef))?.value } catch { token = undefined }
+      response.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      })
+      response.end(JSON.stringify(token === undefined ? payload : { ...payload, token }))
+    },
+  }), 'dataops-managed: resource tab config route')
+  /**
+   * Same-origin resource reads for the tab's native fallback.
+   *
+   * A DSH page served from its own origin (for example the workspace port) cannot open the
+   * portal's `/embed/resources` iframe with a session: that document is cross-origin and its
+   * sessionStorage token is unreachable. The tab then renders the list in React and reads the
+   * same DataOps resources through this route, where the Host still owns the JWT.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: '/integrations/dataops/resources',
+    handler: async (request, response) => {
+      const method = (request.method ?? 'GET').toUpperCase()
+      const url = new URL(request.url ?? '/', 'http://dsh.internal')
+      const rest = url.pathname.slice('/integrations/dataops/resources'.length).replace(/^\/+/u, '').replace(/\/+$/u, '')
+      // Reads cover the list, catalog-tree and preference pages; writes are limited to the
+      // two per-resource preference flags the cards expose.
+      const preferenceWrite = /^\d+\/(?:favorite|pin)$/u.test(rest)
+      if (method !== 'GET' && !(preferenceWrite && (method === 'PUT' || method === 'DELETE'))) {
+        response.writeHead(405, { allow: 'GET, PUT, DELETE', 'content-length': '0' })
+        response.end()
+        return
+      }
+      const target = rest === ''
+        ? '/api/resources' + (url.search || '')
+        : '/api/resources/' + encodeURIComponent(rest) + (url.search || '')
+      const result = await reviewApi.request(target, { method })
+      writeJson(response, result.status, result.body)
+    },
+  }), 'dataops-managed: resource list bridge')
   /**
    * The managed tool list follows the workspace's DataOps scope.
    *
@@ -474,7 +621,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
    * publishes this event after the write commits. The manager also observes the review-context
    * route's answer, because a role edit does not change the JWT but does change the scope.
    */
-  const aiTools = new AiToolManager(ctx, reviewApi)
+  const aiTools = new AiToolManager(ctx, reviewApi, resourceTabHub)
+  connectorSkillAllowed = () => {
+    const scope = aiTools.currentScope()
+    if (scope === undefined) return false
+    return (scope.permissions ?? scope.permissionKeys ?? []).includes(CONNECTOR_SKILL_PERMISSION)
+  }
   ctx.effect(() => () => aiTools.dispose(), 'dataops-managed: skill and review tool disclosure')
   ctx.effect(() => ctx.on('credentials/reference-updated', (ref) => {
     if (String(ref) !== config.credentialRef) return
@@ -1121,8 +1273,24 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     kind: 'exact',
     path: AUTH_STATE_PATH,
     handler: async (request: IncomingMessage, response: ServerResponse) => {
+      // GET 读观察结果；POST 供**同一个进程里其它插件**上报它自己看到的 401。
+      // 驾驶舱（artifact-app）用自己的 client 调 DataOps，401 原先只在它内部变成
+      // 「渲染失败」文案，不触发登录弹窗；这条上报路径把两边的观察合并成同一个信号。
+      if (request.method === 'POST') {
+        const body = await readJson(request).catch(() => null) as { state?: unknown } | null
+        if (body?.state === 'expired') noteExpired()
+        else if (body?.state === 'valid') noteAccepted()
+        else {
+          response.writeHead(400, { 'content-length': '0' })
+          response.end()
+          return
+        }
+        response.writeHead(204, { 'cache-control': 'no-store' })
+        response.end()
+        return
+      }
       if (request.method !== 'GET') {
-        response.writeHead(405, { allow: 'GET', 'content-length': '0' })
+        response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' })
         response.end()
         return
       }
@@ -1181,6 +1349,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
             state.enabled = body.enabled
           }
           await writeConnectorState(state)
+          // Capability switches own whole tool groups: reconcile now so a disabled capability
+          // takes its tools out of the model's surface without waiting for the next role sync.
+          await aiTools.refreshCapabilities()
           writeJson(response, 200, { connectors: [buildConnectorView(aiTools.currentScope(), state)] })
           return
         }

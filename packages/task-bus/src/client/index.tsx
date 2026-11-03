@@ -16,21 +16,12 @@ import {
   type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { colors } from './theme.ts'
-import {
-  fetchConnectorState,
-  filterConnectorTasks,
-  saveConnectorState,
-  visibleCapabilities,
-  type ConnectorState,
-} from './connector-state.ts'
-import { ConnectorCard, ConnectorDisabledState } from './ConnectorCard.tsx'
 
-export const inject = ['slots', 'locale', 'uiWorkspace', 'sessions', 'sidebarRight', 'layout']
+export const inject = ['slots', 'locale', 'uiWorkspace', 'sessions', 'sidebarRight']
 
 interface TaskItem {
   id: string
@@ -146,18 +137,6 @@ const buttonStyle: CSSProperties = {
   cursor: 'pointer',
 }
 
-/** Capability filter chip; the active chip keeps the accent fill and stroke. */
-const filterChipStyle = (active: boolean): CSSProperties => ({
-  padding: '4px 10px',
-  borderRadius: 999,
-  border: '1px solid ' + (active ? colors.accent : colors.line),
-  background: active ? colors.accentSoft : 'transparent',
-  color: active ? colors.accent : colors.muted,
-  fontSize: 11,
-  lineHeight: 1.6,
-  cursor: 'pointer',
-})
-
 const statusTagTone = (status: string): TagTone => {
   if (status === 'completed') return 'success'
   if (status === 'cancelled') return 'neutral'
@@ -177,26 +156,62 @@ const relativeTime = (value: string) => {
   return String(Math.round(hours / 24)) + ' 天前'
 }
 
-const fetchJson = async <T,>(path: string): Promise<T> => {
+const fetchJson = async <T,>(path: string, options: { signal?: AbortSignal } = {}): Promise<T> => {
   const attempt = async () => {
-    const response = await fetch(ROUTE + path, { headers: { accept: 'application/json' } })
-    const payload = await response.json() as unknown
-    return { response, payload }
+    const response = await fetch(ROUTE + path, { headers: { accept: 'application/json' }, signal: options.signal })
+    // Read the body as text first: a 502 from the flow service may carry a JSON
+    // error object, plain text, or an empty body, and `response.json()` turns the
+    // last two into a parse error that hides the status from the caller.
+    let text = ''
+    let bodyFailure = false
+    try { text = await response.text() } catch { bodyFailure = true }
+    let payload: unknown = null
+    if (text.trim() !== '') {
+      try { payload = JSON.parse(text) as unknown } catch { payload = null }
+    }
+    return { response, status: response.status, payload, text, bodyFailure }
   }
-  let { response, payload } = await attempt()
+  // One retry covers a connection reset that drops the response body: the host
+  // proxy can lose the upstream 502 on the first connection while the next
+  // request reads the very same error. An abort from the caller never retries.
+  const request = async () => {
+    try {
+      const first = await attempt()
+      if (!first.bodyFailure) return first
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      return await attempt()
+    } catch (cause) {
+      if (options.signal?.aborted) throw cause
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      return await attempt()
+    }
+  }
+  let result = await request()
   // The managed session handshake runs in parallel with the panel mount; a 401
   // here is usually "the cookie is not set yet", not an authorization failure.
-  if (response.status === 401) {
+  if (result.status === 401) {
     await new Promise((resolve) => setTimeout(resolve, 900))
-    ;({ response, payload } = await attempt())
+    result = await request()
   }
-  if (!response.ok) {
-    const message = payload !== null && typeof payload === 'object' && 'error' in payload
-      ? String((payload as { error: unknown }).error)
-      : '任务中心请求失败（' + response.status + '）'
+  if (!result.response.ok) {
+    const serverMessage = result.payload !== null && typeof result.payload === 'object'
+      ? (typeof (result.payload as { error?: unknown }).error === 'string' ? (result.payload as { error: string }).error
+        : typeof (result.payload as { message?: unknown }).message === 'string' ? (result.payload as { message: string }).message
+          : '')
+      : ''
+    // A server answer that carries readable text always wins over the status
+    // fallback, so an explicit {"error":"…"} stays exactly as the server sent it.
+    const message = serverMessage !== ''
+      ? serverMessage
+      : result.bodyFailure
+        ? 'HTTP ' + result.status + '（响应体读取失败）'
+        : result.text.trim() !== ''
+          ? result.text.trim().slice(0, 200)
+          : 'HTTP ' + result.status
     throw new Error(message)
   }
-  return payload as T
+  if (result.bodyFailure) throw new Error('HTTP ' + result.status + '（响应体读取失败）')
+  return result.payload as T
 }
 
 
@@ -492,22 +507,57 @@ const FormDescriptions = ({ sections }: { sections: FormSectionData[] }) => {
   )
 }
 
+/** Detail requests fail after this long instead of leaving the panel waiting forever. */
+const DETAIL_TIMEOUT_MS = 15_000
+/** Show a secondary hint once the flow service is slow, so the panel never looks frozen. */
+const DETAIL_SLOW_HINT_MS = 5_000
+
+/** Turn a detail failure into the message the panel shows; the server text stays verbatim. */
+const describeDetailFailure = (cause: unknown, timedOut: boolean): string => {
+  if (timedOut) return '请求超时（15 秒无响应），流程服务可能暂时不可用，请重试。'
+  const raw = cause instanceof Error ? cause.message : String(cause)
+  if (/^(fetch failed|Failed to fetch|NetworkError|Load failed)/iu.test(raw)) {
+    return '无法连接服务（网络错误），请检查网络或稍后重试。'
+  }
+  return raw
+}
+
 const TaskDetail = ({ task, onBack }: { task: TaskItem; onBack: () => void }) => {
   const isApproval = task.sourceType === 'dataops_approval'
   const [detail, setDetail] = useState<TaskDetailPayload | null>(null)
   const [detailLoading, setDetailLoading] = useState(true)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [detailSlow, setDetailSlow] = useState(false)
+  const [detailAttempt, setDetailAttempt] = useState(0)
 
   useEffect(() => {
     let alive = true
+    const controller = new AbortController()
+    let timedOut = false
+    const timeout = window.setTimeout(() => { timedOut = true; controller.abort() }, DETAIL_TIMEOUT_MS)
+    const slowHint = window.setTimeout(() => { if (alive) setDetailSlow(true) }, DETAIL_SLOW_HINT_MS)
+    setDetail(null)
     setDetailLoading(true)
     setDetailError(null)
-    void fetchJson<{ detail?: TaskDetailPayload }>('/items/' + encodeURIComponent(task.id))
+    setDetailSlow(false)
+    void fetchJson<{ detail?: TaskDetailPayload }>('/items/' + encodeURIComponent(task.id), { signal: controller.signal })
       .then((payload) => { if (alive) setDetail(payload.detail ?? null) })
-      .catch((cause) => { if (alive) setDetailError(cause instanceof Error ? cause.message : String(cause)) })
-      .finally(() => { if (alive) setDetailLoading(false) })
-    return () => { alive = false }
-  }, [task.id])
+      .catch((cause) => { if (alive) setDetailError(describeDetailFailure(cause, timedOut)) })
+      .finally(() => {
+        window.clearTimeout(timeout)
+        window.clearTimeout(slowHint)
+        if (alive) {
+          setDetailLoading(false)
+          setDetailSlow(false)
+        }
+      })
+    return () => {
+      alive = false
+      controller.abort()
+      window.clearTimeout(timeout)
+      window.clearTimeout(slowHint)
+    }
+  }, [task.id, detailAttempt])
 
   const sections = isApproval ? approvalFormSections(detail) : detail?.form?.sections ?? []
   const attachments = detail?.attachments ?? []
@@ -529,8 +579,18 @@ const TaskDetail = ({ task, onBack }: { task: TaskItem; onBack: () => void }) =>
         <Tag tone={statusTagTone(task.status)}>{task.statusLabel}</Tag>
       </div>
 
-      {detailLoading ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>正在加载表单…</div> : null}
-      {detailError ? <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fef2f2', color: colors.danger, fontSize: 11 }}>{detailError}</div> : null}
+      {detailLoading ? (
+        <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12, display: 'grid', gap: 4 }}>
+          <span>正在加载表单…</span>
+          {detailSlow ? <span style={{ fontSize: 10 }}>流程服务响应较慢，正在继续等待…</span> : null}
+        </div>
+      ) : null}
+      {detailError ? (
+        <div role="alert" style={{ padding: '8px 10px', borderRadius: 8, background: '#fef2f2', color: colors.danger, fontSize: 11, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ flex: 1, minWidth: 0, lineHeight: 1.6 }}>{detailError}</span>
+          <Button size="sm" variant="outline" onClick={() => setDetailAttempt((value) => value + 1)}>重试</Button>
+        </div>
+      ) : null}
       {!detailLoading && detailError === null && sections.length > 0 ? <FormDescriptions sections={sections} /> : null}
       {!detailLoading && detailError === null && sections.length === 0 && !isApproval && task.description ? (
         <div style={{ border: '1px solid ' + colors.line, borderRadius: 10, background: colors.panel, padding: 14, fontSize: 12, lineHeight: 1.6, color: colors.text, whiteSpace: 'pre-wrap' }}>{task.description}</div>
@@ -571,11 +631,10 @@ const TaskDetail = ({ task, onBack }: { task: TaskItem; onBack: () => void }) =>
   )
 }
 
-type TaskTab = 'all' | 'mine' | 'personal' | 'group' | 'connectors'
+type TaskTab = 'all' | 'mine' | 'personal' | 'group'
 
-const TaskCenterButton = ({ openSession, openSkillCenter }: {
+const TaskCenterButton = ({ openSession }: {
   openSession: (sessionId: string) => void
-  openSkillCenter: () => boolean
 }) => {
   const [open, setOpen] = useState(false)
   const [tasks, setTasks] = useState<TaskItem[]>([])
@@ -584,20 +643,9 @@ const TaskCenterButton = ({ openSession, openSkillCenter }: {
   const [tab, setTab] = useState<TaskTab>('all')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [aiBusyId, setAiBusyId] = useState<string | null>(null)
-  const [creating, setCreating] = useState(false)
-  const [draftTitle, setDraftTitle] = useState('')
-  const [draftSource, setDraftSource] = useState('manual')
-  const [createBusy, setCreateBusy] = useState(false)
   const [selected, setSelected] = useState<TaskItem | null>(null)
   const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null)
-  const [connector, setConnector] = useState<ConnectorState | null>(null)
-  const [connectorLoading, setConnectorLoading] = useState(true)
-  const [connectorError, setConnectorError] = useState<string | null>(null)
-  const [connectorBusy, setConnectorBusy] = useState(false)
-  const [capabilityFilter, setCapabilityFilter] = useState('all')
-  const [skillCenterError, setSkillCenterError] = useState<string | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
-  const connectorEnabled = connector?.enabled === true
 
   useEffect(() => {
     if (document.getElementById(TASK_BUS_STYLE_ID) !== null) return
@@ -644,36 +692,7 @@ const TaskCenterButton = ({ openSession, openSkillCenter }: {
     }
   }, [])
 
-  const readConnector = async (): Promise<void> => {
-    setConnectorLoading(true)
-    setConnectorError(null)
-    try {
-      setConnector(await fetchConnectorState())
-    } catch (cause) {
-      setConnectorError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setConnectorLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    let alive = true
-    setConnectorLoading(true)
-    setConnectorError(null)
-    void fetchConnectorState()
-      .then((next) => { if (alive) setConnector(next) })
-      .catch((cause) => { if (alive) setConnectorError(cause instanceof Error ? cause.message : String(cause)) })
-      .finally(() => { if (alive) setConnectorLoading(false) })
-    return () => { alive = false }
-  }, [])
-
   const load = async (silent = false) => {
-    if (!connectorEnabled) {
-      setTasks([])
-      setLoading(false)
-      setError(null)
-      return
-    }
     if (!silent) setLoading(true)
     setError(null)
     try {
@@ -686,66 +705,14 @@ const TaskCenterButton = ({ openSession, openSkillCenter }: {
     }
   }
 
-  const setConnectorEnabled = async (enabled: boolean): Promise<void> => {
-    setConnectorBusy(true)
-    setConnectorError(null)
-    try {
-      setConnector(await saveConnectorState({ enabled }))
-      if (!enabled) {
-        setTasks([])
-        setCapabilityFilter('all')
-      }
-    } catch (cause) {
-      setConnectorError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setConnectorBusy(false)
-    }
-  }
-
-  const toggleCapability = async (capabilityId: string, enabled: boolean): Promise<void> => {
-    if (connector === null) return
-    setConnectorBusy(true)
-    setConnectorError(null)
-    try {
-      setConnector(await saveConnectorState({
-        enabled: connector.enabled,
-        capabilities: { [capabilityId]: enabled },
-      }))
-    } catch (cause) {
-      setConnectorError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setConnectorBusy(false)
-    }
-  }
-
-  const openSkillCenterFromPanel = (): void => {
-    if (openSkillCenter()) {
-      setSkillCenterError(null)
-      setOpen(false)
-      return
-    }
-    setSkillCenterError('技能中心未安装，无法打开连接器页面')
-  }
-
   useEffect(() => {
     if (!open) return
-    if (!connectorEnabled) {
-      setTab('connectors')
-      setTasks([])
-      setError(null)
-      setLoading(false)
-      return
-    }
     void load()
     const timer = window.setInterval(() => { void load(true) }, 60_000)
     return () => { window.clearInterval(timer) }
-  }, [open, connectorEnabled])
+  }, [open])
 
   useEffect(() => {
-    if (!connectorEnabled) {
-      setPendingCount(0)
-      return
-    }
     let alive = true
     const refresh = async () => {
       try {
@@ -758,18 +725,14 @@ const TaskCenterButton = ({ openSession, openSkillCenter }: {
     void refresh()
     const timer = window.setInterval(() => { void refresh() }, 300_000)
     return () => { alive = false; window.clearInterval(timer) }
-  }, [connectorEnabled])
-
+  }, [])
 
   const filtered = useMemo(() => {
-    if (tab === 'connectors') {
-      return connectorEnabled ? filterConnectorTasks(tasks, capabilityFilter) : []
-    }
     if (tab === 'group') return tasks.filter((task) => task.sourceType === 'task_bus' && task.source.type.includes('group'))
     if (tab === 'mine') return tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled')
     if (tab === 'personal') return tasks.filter((task) => task.sourceType === 'task_bus' && !task.source.type.includes('group'))
     return tasks
-  }, [tasks, tab, connectorEnabled, capabilityFilter])
+  }, [tasks, tab])
 
   const actionable = tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled').length
   const tabItems: [SegmentedTab<TaskTab>, ...SegmentedTab<TaskTab>[]] = [
@@ -777,7 +740,6 @@ const TaskCenterButton = ({ openSession, openSkillCenter }: {
     { value: 'mine', id: 'task-bus-tab-mine', panelId: 'task-bus-panel-mine', label: <span>待我处理 <span style={{ opacity: 0.55 }}>{actionable}</span></span> },
     { value: 'personal', id: 'task-bus-tab-personal', panelId: 'task-bus-panel-personal', label: <span>个人 <span style={{ opacity: 0.55 }}>{tasks.filter((task) => task.sourceType === 'task_bus' && !task.source.type.includes('group')).length}</span></span> },
     { value: 'group', id: 'task-bus-tab-group', panelId: 'task-bus-panel-group', label: <span>群聊 <span style={{ opacity: 0.55 }}>{tasks.filter((task) => task.sourceType === 'task_bus' && task.source.type.includes('group')).length}</span></span> },
-    { value: 'connectors', id: 'task-bus-tab-connectors', panelId: 'task-bus-panel-connectors', label: <span>连接器 <span style={{ opacity: 0.55 }}>{connector === null ? 0 : 1}</span></span> },
   ]
 
   const transition = async (task: TaskItem, action: string) => {
@@ -799,29 +761,6 @@ const TaskCenterButton = ({ openSession, openSkillCenter }: {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setBusyId(null)
-    }
-  }
-
-  const createTask = async () => {
-    const title = draftTitle.trim()
-    if (!title) return
-    setCreateBusy(true)
-    setError(null)
-    try {
-      const response = await fetch(ROUTE + '/generic', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ title, sourceType: draftSource }),
-      })
-      const payload = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(payload.error ?? '创建任务失败')
-      setDraftTitle('')
-      setCreating(false)
-      await load()
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setCreateBusy(false)
     }
   }
 
@@ -892,85 +831,20 @@ const TaskCenterButton = ({ openSession, openSkillCenter }: {
             <div style={{ flex: 1, minWidth: 0 }}>
               <h2 style={{ margin: 0, fontSize: 16, lineHeight: '24px', fontWeight: 500, color: colors.text }}>任务中心</h2>
             </div>
-            <Button size="sm" variant="outline" disabled={!connectorEnabled} onClick={() => setCreating((value) => !value)}>新建</Button>
             <Button size="sm" variant="ghost" onClick={() => void load()}>刷新</Button>
             <Button size="sm" variant="ghost" aria-label="关闭" title="关闭" onClick={() => setOpen(false)} icon={<IconCloseOutlineRegular size={14} />} style={{ width: 28, padding: 0 }} />
           </header>
           <div style={{ padding: '0 24px 14px', borderBottom: '1px solid ' + colors.line }}>
             <SegmentedTabs items={tabItems} value={tab} onChange={setTab} label="任务中心分类" />
           </div>
-          {creating ? (
-            <div style={{ margin: '0 24px 12px', padding: 12, border: '1px solid ' + colors.line, borderRadius: 9, display: 'grid', gap: 7 }}>
-              <input
-                value={draftTitle}
-                onChange={(event) => setDraftTitle(event.target.value)}
-                placeholder="任务标题，例如：整理演示材料"
-                autoFocus
-                style={{ ...buttonStyle, cursor: 'text', padding: '7px 9px' }}
-              />
-              <div style={{ display: 'flex', gap: 6 }}>
-                <select value={draftSource} onChange={(event) => setDraftSource(event.target.value)} style={{ ...buttonStyle, padding: '6px 8px' }}>
-                  <option value="manual">手工任务</option>
-                  <option value="session">会话任务</option>
-                  <option value="group">群聊任务</option>
-                </select>
-                <Button size="sm" variant="primary" disabled={createBusy || draftTitle.trim() === ''} onClick={() => void createTask()}>
-                  {createBusy ? '创建中…' : '创建'}
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setCreating(false)}>取消</Button>
-              </div>
-            </div>
-          ) : null}
           {error ? <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fef2f2', color: colors.danger, fontSize: 11, margin: '0 24px 12px' }}>{error}</div> : null}
           <div id={'task-bus-panel-' + tab} role="tabpanel" aria-labelledby={'task-bus-tab-' + tab} style={{ padding: '16px 24px 24px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', flex: 1 }}>
             {selected !== null ? (
               <TaskDetail task={selected} onBack={() => setSelected(null)} />
             ) : (
               <>
-                {tab === 'connectors' ? (
-                  <>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 10 }}>
-                      <ConnectorCard
-                        state={connector}
-                        loading={connectorLoading}
-                        error={connectorError}
-                        busy={connectorBusy}
-                        taskCount={filtered.length}
-                        onSetEnabled={(enabled) => { void setConnectorEnabled(enabled) }}
-                        onToggleCapability={(capabilityId, enabled) => { void toggleCapability(capabilityId, enabled) }}
-                        onReload={() => { void readConnector() }}
-                      />
-                    </div>
-                    {connectorEnabled ? (
-                      <div role="group" aria-label="连接器能力筛选" style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                        <button type="button" aria-pressed={capabilityFilter === 'all'} onClick={() => setCapabilityFilter('all')} style={filterChipStyle(capabilityFilter === 'all')}>全部</button>
-                        {visibleCapabilities(connector).map((capability) => (
-                          <button
-                            key={capability.id}
-                            type="button"
-                            data-capability-filter={capability.id}
-                            aria-pressed={capabilityFilter === capability.id}
-                            onClick={() => setCapabilityFilter(capability.id)}
-                            style={filterChipStyle(capabilityFilter === capability.id)}
-                          >
-                            {capability.label}
-                          </button>
-                        ))}
-                      </div>
-                    ) : connectorLoading ? null : (
-                      <>
-                        <ConnectorDisabledState onOpenSkillCenter={openSkillCenterFromPanel} />
-                        {skillCenterError === null ? null : (
-                          <div role="alert" style={{ textAlign: 'center', color: colors.danger, fontSize: 11 }}>{skillCenterError}</div>
-                        )}
-                      </>
-                    )}
-                  </>
-                ) : null}
                 {loading ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>正在加载…</div> : null}
-                {!loading && tab !== 'connectors' && filtered.length === 0 ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无任务</div> : null}
-                {!loading && tab === 'connectors' && connectorEnabled && filtered.length === 0 ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>{capabilityFilter === 'all' ? '暂无来自该连接器的任务' : '该能力下暂无任务'}</div> : null}
-                {!loading && tab === 'connectors' && filtered.length > 0 ? <div style={{ fontSize: 10, color: colors.muted }}>来自该连接器的任务</div> : null}
+                {!loading && filtered.length === 0 ? <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无任务</div> : null}
                 {!loading && filtered.map((task) => (
                   <TaskCard key={task.id} task={task} busy={busyId === task.id} aiBusy={aiBusyId === task.id} onTransition={(item, action) => void transition(item, action)} onAiAccept={(item) => void aiAccept(item)} onOpen={setSelected} />
                 ))}
@@ -1082,13 +956,6 @@ const sessionHistory = async (sessionId: string, sessions: unknown, t: HistoryTr
   }
 }
 
-const HistoryGlyph = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" strokeWidth="1.5">
-    <path d="M2.4 6.8A5.6 5.6 0 1 1 2.4 9.2" stroke="currentColor" strokeLinecap="round" />
-    <path d="M2.2 3.4v3.4h3.4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M8 5.4V8l1.9 1.2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-)
 
 
 interface FileAttachmentRef {
@@ -1149,6 +1016,37 @@ const sessionFileAttachment = async (sessionId: string, sessions: unknown, name:
     reference.release?.()
   }
 }
+
+/**
+ * The design system's standard 16-unit clock glyph, drawn locally.
+ *
+ * The client primitives package this runtime serves (0.2.2-alpha.2) exports
+ * `IconClockOutline`, `IconClockOutlineRegular`, and `IconClockOutlineMedium`,
+ * not the newer `IconClockOutline16` name. A missing named export resolves to
+ * `undefined`, so importing it crashed this header slot with React error #130
+ * and removed the button entirely; the standard geometry is inlined instead.
+ *
+ * Weight is 1, matching the shell's own header glyphs: those render 16x16 with
+ * `stroke-width="1"` on a `0 0 16 16` viewBox, so a 1.5 stroke read as a bold
+ * clock beside them. The glyph must also stay square inside the 28px button,
+ * hence its block display and disabled flex shrink.
+ */
+const MessageHistoryIcon = ({ size = 16 }: { size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 16 16"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    aria-hidden="true"
+    strokeWidth="1"
+    preserveAspectRatio="xMidYMid meet"
+    style={{ display: 'block', flexShrink: 0 }}
+  >
+    <circle cx="8" cy="8" r="6.375" stroke="currentColor" />
+    <path d="M8 4.4V8.3L10.7 9.85" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+)
 
 const HistoryButton = ({ sessionId, sessions, t }: { sessionId: string; sessions: unknown; t: HistoryTranslate }) => {
   const [open, setOpen] = useState(false)
@@ -1227,7 +1125,7 @@ const HistoryButton = ({ sessionId, sessions, t }: { sessionId: string; sessions
         onClick={() => setOpen(true)}
         style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, border: 'none', borderRadius: 6, background: 'transparent', color: 'inherit', cursor: 'pointer' }}
       >
-        <HistoryGlyph />
+        <MessageHistoryIcon size={16} />
       </button>
       <Modal open={open} onClose={() => setOpen(false)} title={t('title')} closeLabel={t('close')} className={TASK_BUS_HISTORY_CLASS}>
         <div style={{ width: '100%', maxHeight: 'min(68vh, 620px)', overflowY: 'auto', display: 'grid', gap: 10, padding: '4px 0 8px' }}>
@@ -1260,7 +1158,7 @@ const HistoryButton = ({ sessionId, sessions, t }: { sessionId: string; sessions
           {!loading && error === '' && needle === '' ? (
             <div style={{ display: 'grid', justifyItems: 'center', gap: 8, padding: '36px 20px 40px', color: colors.muted, textAlign: 'center' }}>
               <span style={{ display: 'inline-flex', width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18, background: colors.panelAlt, color: colors.muted }}>
-                <HistoryGlyph />
+                <MessageHistoryIcon size={16} />
               </span>
               <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>{t('initial')}</span>
               <span style={{ fontSize: 12, lineHeight: 1.6 }}>{t('initialHint')}</span>
@@ -1307,7 +1205,6 @@ export const apply = (ctx: Context) => {
       register(options: Record<string, unknown>, component: (props: never) => JSX.Element | null): () => void
     }
     uiWorkspace: { openSession(sessionId: string): void }
-    layout: { selectPanel(panelId: string): void }
   }
   const surfaceWithServices = surface as unknown as {
     sidebarRight?: { openResource?(address: string): void }
@@ -1353,21 +1250,9 @@ export const apply = (ctx: Context) => {
     document.addEventListener('click', onFileClick, true)
     return () => { document.removeEventListener('click', onFileClick, true) }
   }, 'task-bus: native file card preview')
-  // The connector state lives in the skill center; the task panel consumes it and links
-  // there when the connector is off. selectPanel throws when that panel is not installed,
-  // which is the one case the caller must report instead of silently doing nothing.
-  const openSkillCenter = (): boolean => {
-    try {
-      surface.layout.selectPanel('skill-center')
-      return true
-    } catch {
-      return false
-    }
-  }
   const Surface = () => (
     <TaskCenterButton
       openSession={(sessionId) => surface.uiWorkspace.openSession(sessionId)}
-      openSkillCenter={openSkillCenter}
     />
   )
   ctx.effect(() => surface.slots.inject('shell.overlay', () => surface.slots.register(
@@ -1375,13 +1260,24 @@ export const apply = (ctx: Context) => {
     Surface,
   )), 'task-bus: Task Center overlay')
 
-  // The native header's file-manager jump is the slot this product wants for session history.
-  // Hide that one button rather than replacing the whole header seat; every other native
-  // control keeps its position and behavior.
+  // The history seat replaces the host's open-in-app jump. That control is a split
+  // group: `[data-open-target="directory"]` wraps the primary button and an optional
+  // chevron. Hiding only the primary button left the wrapper's 1px left/right border
+  // as a 2px-wide, 24px-tall rule beside this button, so the entry that owns the
+  // split group is hidden instead.
+  //
+  // The slot renders every registered entry as one direct child of the
+  // `[data-slot="conversation.session.header.utilities"]` wrapper; this button is a
+  // sibling of that entry, so the selectors below never match its own container.
+  // They are scoped to the utilities slot so the file and directory launchers
+  // elsewhere in the shell keep working.
   ctx.effect(() => {
     const style = document.createElement('style')
     style.id = 'task-bus-history-replaces-file-manager'
-    style.textContent = 'button[aria-label="用 文件管理器 打开"] { display: none !important; }\n[data-message-attachments] > * { cursor: pointer; }'
+    style.textContent = [
+      '[data-slot="conversation.session.header.utilities"] > *:has([data-open-target]) { display: none !important; }',
+      '[data-message-attachments] > * { cursor: pointer; }',
+    ].join('\n')
     document.head.appendChild(style)
     return () => { style.remove() }
   }, 'task-bus: replace file manager header button')

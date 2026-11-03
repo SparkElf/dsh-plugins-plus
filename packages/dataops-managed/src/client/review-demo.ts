@@ -98,6 +98,7 @@ export function demoRbacOverview(): RbacOverview {
       { code: 'dept-rd', name: '研发部', parentCode: 'dept-root', path: [{ code: 'dept-root', name: '万相' }, { code: 'dept-rd', name: '研发部' }], memberCount: 2, deptAdmins: [{ userId: 'u2', username: 'lin', displayName: '林工' }] },
     ],
     resources: [
+      { kind: 'builtin', id: 1, name: 'Word 技能', ownerName: '平台内置', departmentCode: null, visibility: 'unshared', reviewStatus: 'unshared' },
       { kind: 'skill', id: 9101, name: 'SQL 取数助手', ownerName: '林工', departmentCode: 'dept-rd', visibility: 'department', reviewStatus: 'pending' },
       { kind: 'skill', id: 9102, name: '经营日报生成', ownerName: 'admin', departmentCode: null, visibility: 'global', reviewStatus: 'approved' },
       { kind: 'workflow', id: 'wf-1', name: '每日经营日报', ownerName: 'admin', departmentCode: null, visibility: 'global', reviewStatus: 'approved' },

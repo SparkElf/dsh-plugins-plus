@@ -17,7 +17,7 @@ import {
   type RoleMatrixRow,
 } from './review-client.ts'
 import type { PortalRole, ReviewContext } from './review-types.ts'
-import { canManagePermissions } from './review-types.ts'
+import { canEditResourceScopeRow, canManagePermissions } from './review-types.ts'
 import { canSeeManagedSettings, currentManagedSettingsRole } from './settings-gate.ts'
 import { demoRbacOverview } from './review-demo.ts'
 import styles from './PermissionCenterSection.module.css'
@@ -85,6 +85,9 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
   const departmentName = context?.departmentPath?.join(' / ') ?? '—'
   const actorRole: PortalRole = context?.role ?? (knownAdmin ? 'ADMIN' : 'APP_USER')
   const writable = context === null ? knownAdmin : (canManagePermissions(context) || demo)
+  // Resource scopes are delegated to department administrators by the backend policy, even
+  // though role/member writes stay administrator-only.
+  const resourceWritable = writable || actorRole === 'DEPT_ADMIN'
   const superAdmin = context === null ? knownAdmin : context.role === 'SUPER_ADMIN' || demo
   const canAssignDepartment = writable && (superAdmin || actorRole === 'ADMIN')
   const labels: { key: PermissionTab; label: string }[] = [
@@ -215,7 +218,7 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
           {tab === 'roles' ? <RoleMatrix roles={overview.matrix.roles} permissions={overview.matrix.permissions} writable={writable} actorRole={actorRole} busy={busy} t={t} onSaveAll={saveRoleChanges} /> : null}
           {tab === 'members' ? <Members members={overview.members} writable={writable} actorRole={actorRole} actorUserId={context?.userId} actorDepartmentCode={context?.departmentCode} busy={busy} t={t} onSave={(userId, roleCodes) => { void save('members', { userId, roleCodes }) }} /> : null}
           {tab === 'departments' ? <Departments departments={overview.departments} writable={writable} canAssign={canAssignDepartment} canWrite={writable && (superAdmin || actorRole === 'ADMIN')} t={t} onAssign={openDepartment} onAdd={(parentCode) => { setDeptForm({ mode: 'create', parentCode }) }} onEdit={(department) => { setDeptForm({ mode: 'edit', department }) }} onDelete={(department) => { void removeDepartment(department) }} /> : null}
-          {tab === 'resources' ? <Resources resources={overview.resources} departments={overview.departments} writable={writable} actorRole={actorRole} actorDepartmentCode={context?.departmentCode} busy={busy} t={t} onSave={(row, visibility, departmentCode) => save('resources', { kind: row.kind, id: row.id, visibility, departmentCode })} /> : null}
+          {tab === 'resources' ? <Resources resources={overview.resources} departments={overview.departments} writable={resourceWritable} actorRole={actorRole} actorDepartmentCode={context?.departmentCode} busy={busy} t={t} onSave={(row, visibility, departmentCode) => save('resources', { kind: row.kind, id: row.id, visibility, departmentCode })} /> : null}
         </>
       )}
 
@@ -684,10 +687,16 @@ function Resources({ resources, departments, writable, actorRole, actorDepartmen
   const valueOf = (row: ResourceScopeRow) => draft[keyOf(row)] ?? { visibility: row.visibility, departmentCode: row.departmentCode ?? null }
   const visibilityLabel = (visibility: ResourceScopeRow['visibility']): string => visibility === 'global'
     ? t('permGlobal')
-    : visibility === 'department' ? t('permDepartmentScope') : t('permPrivate')
+    : visibility === 'department' ? t('permDepartmentScope')
+      : visibility === 'unshared' ? t('permUnshared') : t('permPrivate')
+  const typeLabel = (kind: ResourceScopeRow['kind']): string => kind === 'builtin'
+    ? t('permResourceBuiltin')
+    : kind === 'skill' ? t('permResourceSkill') : t('permResourceWorkflow')
   const statusLabel = (status: ResourceScopeRow['reviewStatus']): string => status === 'pending'
     ? t('permStatusPending')
-    : status === 'approved' ? t('permStatusApproved') : status === 'rejected' ? t('permStatusRejected') : '—'
+    : status === 'approved' ? t('permStatusApproved')
+      : status === 'rejected' ? t('permStatusRejected')
+        : status === 'unshared' ? t('permUnshared') : '—'
   const departmentName = (code: string | null | undefined): string => code === null || code === undefined
     ? '—' : departments.find(department => department.code === code)?.name ?? code
   return (
@@ -708,10 +717,17 @@ function Resources({ resources, departments, writable, actorRole, actorDepartmen
             {visible.map(row => {
               const key = keyOf(row)
               const value = valueOf(row)
-              const visibilityOptions = actorRole === 'DEPT_ADMIN' ? ['department', 'private'] : ['global', 'department', 'private']
+              const edit = canEditResourceScopeRow({ kind: row.kind, visibility: row.visibility, departmentCode: row.departmentCode ?? null }, actorRole)
+              const editable = writable && !busy && edit.allowed
+              // Built-in skills expose the platform sharing decision; plaza rows only their scope.
+              const visibilityOptions: ResourceScopeRow['visibility'][] = row.kind === 'builtin'
+                ? (actorRole === 'SUPER_ADMIN' ? ['unshared', 'global', 'department'] : [row.visibility])
+                : actorRole === 'DEPT_ADMIN'
+                  ? [row.visibility]
+                  : ['global', 'department']
               return (
                 <tr key={key}>
-                  <td>{row.kind === 'skill' ? t('permResourceSkill') : t('permResourceWorkflow')}</td>
+                  <td>{typeLabel(row.kind)}</td>
                   <td><strong>{row.name}</strong></td>
                   <td>{ownerDisplay(row.ownerName)}</td>
                   <td>
@@ -720,8 +736,8 @@ function Resources({ resources, departments, writable, actorRole, actorDepartmen
                       value={value.visibility}
                       ariaLabel={t('permScope')}
                       placeholder={t('permSelect')}
-                      disabled={!writable || busy}
-                      options={visibilityOptions.map(option => ({ value: option, label: visibilityLabel(option as ResourceScopeRow['visibility']) }))}
+                      disabled={!editable}
+                      options={visibilityOptions.map(option => ({ value: option, label: visibilityLabel(option) }))}
                       onChange={(next) => {
                         const visibility = next as ResourceScopeRow['visibility']
                         setDraft(current => ({ ...current, [key]: { visibility, departmentCode: visibility === 'department' ? (current[key]?.departmentCode ?? row.departmentCode ?? actorDepartmentCode ?? null) : null } }))
@@ -734,7 +750,7 @@ function Resources({ resources, departments, writable, actorRole, actorDepartmen
                       value={value.departmentCode ?? ''}
                       ariaLabel={t('permDepartment')}
                       placeholder={t('permNone')}
-                      disabled={!writable || busy || value.visibility !== 'department' || actorRole === 'DEPT_ADMIN'}
+                      disabled={!editable || value.visibility !== 'department' || actorRole === 'DEPT_ADMIN'}
                       options={[{ value: '', label: t('permNone') }, ...departmentOptions.map(department => ({ value: department.code, label: department.name, hint: department.code }))]}
                       onChange={(next) => { setDraft(current => ({ ...current, [key]: { ...valueOf(row), departmentCode: next === '' ? null : next } })) }}
                     />
@@ -742,7 +758,7 @@ function Resources({ resources, departments, writable, actorRole, actorDepartmen
                   <td>
                     <div className={styles.rowActions}>
                       <Button variant="ghost" size="sm" onClick={() => { setDetail(row) }}>{t('permViewDetails')}</Button>
-                      <Button variant="outline" size="sm" disabled={!writable || busy} onClick={() => {
+                      <Button variant="outline" size="sm" disabled={!editable} title={edit.allowed ? undefined : edit.reason} onClick={() => {
                         setError(null)
                         if (window.confirm(t('permSave') + '？')) {
                           void onSave(row, value.visibility, value.departmentCode).then(result => { if (!result.ok) setError(result.reason ?? t('permSaveFailed')) })
@@ -769,7 +785,7 @@ function Resources({ resources, departments, writable, actorRole, actorDepartmen
       >
         {detail === null ? null : (
           <dl className={styles.detailGrid}>
-            <dt>{t('permDetailType')}</dt><dd>{detail.kind === 'skill' ? t('permResourceSkill') : t('permResourceWorkflow')}</dd>
+            <dt>{t('permDetailType')}</dt><dd>{typeLabel(detail.kind)}</dd>
             <dt>{t('permDetailName')}</dt><dd>{detail.name}</dd>
             <dt>{t('permDetailOwner')}</dt><dd>{ownerDisplay(detail.ownerName)}</dd>
             <dt>{t('permDetailScope')}</dt><dd>{visibilityLabel(detail.visibility)}</dd>
