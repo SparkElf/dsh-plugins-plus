@@ -210,7 +210,13 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
   const postFilter = useCallback((): void => {
     const frame = iframeRef.current?.contentWindow
     if (!frame) return
-    frame.postMessage({ source: 'dsh-host', type: 'filter', ...filter }, '*')
+    // The portal page understands the existing favorites/pinned/catalog/all shapes only. A
+    // folder node is resolved to its recursive resource ids through the Host bridge and sent
+    // with the ids shape, so no portal change is needed and the iframe never reloads.
+    const payload = filter.scope === 'catalogNode'
+      ? { scope: 'favorites', ids: filter.ids ?? [] }
+      : filter
+    frame.postMessage({ source: 'dsh-host', type: 'filter', ...payload }, '*')
   }, [filter])
 
   useEffect(() => { postFilter() }, [postFilter])
