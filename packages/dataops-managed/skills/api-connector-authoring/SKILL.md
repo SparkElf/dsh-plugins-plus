@@ -69,7 +69,7 @@ metadata:
 
 **认证**：`auth.mode` 取 `bearer` / `apiKey` / `basic` / `none`；真实密钥**不要写进 session.json**（`secretConfig` 留空），导入后由管理员在凭据页填写。
 
-## 五、用 GenUI 汇报预览（必须）
+## 五、用表格 + 文字汇报预览（必须）
 
 导入前必须给用户一份**可读的预览**，包含：
 
@@ -79,7 +79,7 @@ metadata:
 - 被跳过的接口及原因；
 - 一句话风险提示：**导入会创建资源并对授权范围内的人可见**。
 
-用 `dsh-ui` 围栏出预览（表格 + 关键信息），不要用 Markdown 表格。
+用表格 + 文字汇报预览，不要生成按钮/表单；确认靠用户回一句话。
 
 ## 六、等用户确认
 
@@ -105,7 +105,7 @@ curl -sS -X POST "$DATAOPS_API_BASE/api/resources/connectors/import-package" \
   -F "file=@<dir>/connector.zip"
 ```
 
-- 导入返回 `connectorKey` 与资源数后，用 GenUI 汇报**结果**（连接器、资源数、需要补密钥的提示）；
+- 导入返回 `connectorKey` 与资源数后，用表格 + 文字汇报**结果**（连接器、资源数、需要补密钥的提示），不要生成按钮/表单；
 - 失败时把**后端原始错误**给用户（常见：`session.json 与 preview.manifest.json 的 connectorKey 不一致`、`preview.resources.json 至少需要包含 1 条资源`），不要自己改写错误信息。
 
 ## 八、禁止

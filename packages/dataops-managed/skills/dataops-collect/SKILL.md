@@ -40,6 +40,7 @@ description: 把表格 / Excel / CSV 建成可问数的数据资源，或把新�
 2. **有引用 = 追加；无引用 = 先问，不默认新建。** 用户话里已经说清“新建”或“追加”的，跳过这一问；没说清又没引用，必须先出「新建资源 / 选择已有资源」二选一，不能直接出新建计划。
 3. **计划确认是唯一硬闸。** 用户明确回复「确认」「开始吧」「可以」等之前，绝不调用 `dataops_collect_execute`，绝不建表、绝不写数。预览和计划工具本身不建表，可以放心调用。
 4. **执行走原生工具流。** 不要自己造执行卡、进度卡；工具参数、结果、耗时、失败原因都在原生工具卡里。你只在旁边说人话。
+5. **汇报不是交互。** 计划、结果、候选项用表格 + 文字说，不要生成按钮/表单；确认靠用户回一句话。
 
 ## 三、主流程
 
@@ -66,12 +67,9 @@ description: 把表格 / Excel / CSV 建成可问数的数据资源，或把新�
 - 当前会话里有 `resource-ref` 引用块 → 追加到该资源；
 - 用户说“新建 / 建个新资源 / 不要加到已有的” → 新建；
 - 用户说“追加 / 加到 / 并到 / 合到” → 追加；没有具体资源时先让用户选；
-- 都没有 → 出「新建资源 / 选择已有资源」GenUI，等用户选。
-
-选择已有资源时：
-1. 调用 `dataops_collect_resources({ query, limit: 8 })`；
-2. 用 `choices` 或 `list` + 按钮列出最多 8 个候选（资源名 + 表名 + 行数）；
-3. 用户选中后，把该资源作为本次目标，进入计划。
+- 都没有 → 用文字问一句「新建资源，还是追加到已有资源？」。选择已有资源时，调用 `dataops_collect_resources({ query, limit: 8 })`，用编号清单列最多 8 个候选（资源名、表名、行数），用户回序号或名字即可。
+- `preview` 返回多个数据源时也一样：编号文字清单（名称 + 库名 + 一句适合放什么），用户回序号即可。
+- 上面两处都不要调用提问工具（`ask_user_question`）出选项卡，也不要出 GenUI 选择卡：文字问、文字答。
 
 ### 4. 生成计划，不要执行
 
@@ -86,42 +84,28 @@ description: 把表格 / Excel / CSV 建成可问数的数据资源，或把新�
 - 新建表：`plan.mode === 'CREATE_TABLE'`，有 `plan.createTable`、`plan.createSql`；
 - 追加：`plan.mode === 'EXISTING_TABLE'`，有 `plan.mappings`，并在计划里多一行映射摘要（匹配 N 个字段、新增 N 个、N 个类型不兼容）。
 
-### 5. 出计划 GenUI（只读预览，语言确认）
+### 5. 汇报计划
 
-计划是主确认点，但**只读**：卡上不放 `input` / `textarea` / 下拉 / `submit`，也不放「开始导入」「再调整」按钮。用户看完卡后，直接用自然语言回复「确认」「开始吧」才执行。
+导入计划用 GenUI 的表格 + 文字汇报，不要生成按钮/表单。确认靠用户回一句话。
 
-必须包含（全部纯展示）：
-
-- 资源名（AI 起草）
-- 去向（新建资源 / 追加到「已有资源名」）
-- 目标表（库.表）
-- 导入数据源
-- 行数 / 字段数
-- **表头映射**：原表头 → 目标字段 → 类型；低置信度类型写「需确认」，并用 warning callout 再列一遍（GenUI 表格单元格不支持单独标黄）
-- 默认权限
-
-计划 GenUI 示例（把 `<...>` 换成真实值；注意没有任何输入控件）：
+> 看了下，明细 sheet 共 <行数> 行、<列数> 列；我打算建成资源「<资源名>」，写到 `<schema>.<table>`，默认仅自己可见。
 
 ```dsh-ui
-{"title":"导入计划","items":[{"type":"text","size":"body","content":"看了下，明细 sheet 共 <行数> 行、<列数> 列；我先按明细建资源。"},{"type":"card","title":"<资源名>","items":[{"type":"keyvalue","pairs":[{"key":"资源名","value":"<资源名>"},{"key":"去向","value":"新建资源"},{"key":"目标表","value":"<schema.table>"},{"key":"导入数据源","value":"<数据源名>"},{"key":"行数 / 字段数","value":"<行数> 行 / <字段数> 列"},{"key":"默认权限","value":"仅自己可见"}]},{"type":"table","columns":["原表头","目标字段","类型"],"rows":[["<原表头1>","<目标字段1>","<类型1>"],["<原表头2>","<目标字段2>","⚠️ 需确认"]]},{"type":"callout","tone":"warning","content":"以下类型需要确认：<列出低置信度字段>。"},{"type":"callout","tone":"info","content":"确认无误请直接回复「确认」或「开始吧」；要改表名、类型或资源名，直接说，我会重新出计划，不会执行。"}]}]}
+{"title":"导入计划","items":[{"type":"keyvalue","pairs":[{"key":"去向","value":"新建资源"},{"key":"导入数据源","value":"<数据源名>"}]},{"type":"table","columns":["原表头","目标字段","类型"],"rows":[["<原表头1>","<目标字段1>","<类型1>"],["<原表头2>","<目标字段2>","⚠️ 需确认"]]}]}
 ```
 
-规则：
-
-- 用户提出修改（「表名换成 xxx」「金额按文本存」「资源名改成 xxx」）→ 只在对话里改参数，然后重新调用 `dataops_collect_plan` / 调整计划，**重新出只读计划卡，不要执行**；
-- 用户确认后，计划折叠成一行“已按此计划执行”的回执，把屏幕让给工具流；
-- 确认后如果要改参数，先停，再出新计划。
+确认无误请回复「确认」或「开始吧」；要改表名、类型或资源名，直接说，我会重新出计划，不会执行。卡片 JSON 写不出来就直接发上面的文字，不要重试。
 
 ### 6. 执行
 
-用户明确回复「确认」「开始吧」「可以」后，使用计划卡上展示的资源名/目标表/描述调用：
+用户明确回复「确认」「开始吧」「可以」后，使用计划里展示、用户确认过的资源名/目标表/描述调用：
 
 `dataops_collect_execute({ session_id, data_source_urn, mode, target_schema?, target_table?, create_plan_json, mappings_json, resource_name, resource_description, resource_tags?, ai_visible?, access_level? })`
 
 - `mode` 用 `plan.mode`；
 - 新建表：`create_plan_json` 传 `JSON.stringify(plan.createTable)`，`mappings_json` 传 `"[]"`；
 - 追加：`mappings_json` 传 `JSON.stringify(plan.mappings)`；
-- `resource_name` 用计划卡上展示、用户确认过的资源名；
+- `resource_name` 用计划里展示、用户确认过的资源名；
 - `access_level` 默认 `PRIVATE`；`ai_visible` 默认 `true`。
 
 执行期间只说阶段小结，例如：
@@ -135,20 +119,14 @@ description: 把表格 / Excel / CSV 建成可问数的数据资源，或把新�
 - 字段问题 → 调整映射 / 改类型；
 - 系统问题 → 重试。
 
-### 7. 结果 GenUI + 打开资源页签
+### 7. 汇报结果 + 打开资源页签
 
 执行成功后：
 
 1. 调用 `dataops_open_resource_tab({ resource_id, resource_name, mode: 'focus' })`，让右侧栏自动打开 `dataops-resources` 页签并定位新资源；
-2. 出结果 GenUI，必须包含资源名、目标表、行数、字段数、“已可问数”、当前可见范围（默认“仅自己可见”），以及三个动作：**分配权限 / 去问数 / 查看详情**，外加一条 **查看操作记录** 文字链。
+2. 用表格 + 文字汇报资源名、目标表、行数、字段数、「已可问数」、可见范围（默认「仅自己可见」），并说明接下来可以回「分配权限」「问数」「详情」「操作记录」。不要生成按钮/表单。
 
-结果 GenUI 示例：
-
-```dsh-ui
-{"title":"导入完成","items":[{"type":"callout","tone":"success","title":"已可问数","content":"资源已建成，可以开始问数。"},{"type":"keyvalue","pairs":[{"key":"资源名","value":"<资源名>"},{"key":"目标表","value":"<schema.table>"},{"key":"行数","value":"<行数>"},{"key":"字段数","value":"<字段数>"},{"key":"可见范围","value":"仅自己可见"}]},{"type":"row","items":[{"type":"button","label":"分配权限","tone":"primary","action":"dataops_open_grant"},{"type":"button","label":"去问数","action":"dataops_ask"},{"type":"button","label":"查看详情","action":"dataops_open_detail"}]},{"type":"button","label":"查看操作记录 →","tone":"ghost","small":true,"action":"dataops_open_audit"}]}
-```
-
-三个动作的处理：
+用户接着说哪个，就做哪个：
 
 - 分配权限 → `dataops_open_resource_tab({ resource_id, mode: 'grant' })`，侧栏资源卡定位并自动打开授权弹窗；
 - 去问数 → 不要跳页，直接在对话里给 2-3 个可以问的问题示例，并说明资源已可被检索；
