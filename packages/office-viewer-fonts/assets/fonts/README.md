@@ -15,9 +15,16 @@ converter therefore resolves them without a fontconfig alias.
 | File | Family name | Original family |
 |---|---|---|
 | `FZXiaoBiaoSong.ttf` | `方正小标宋简体` | `FZXiaoBiaoSong-B05S` |
+| `FZXiaoBiaoSong-JT.ttf` | `方正小标宋简体` (JT) | `FZXiaoBiaoSong-B05S-JT` |
 | `FangSongGB2312.ttf` | `仿宋` | `FangSong_GB2312` |
+| `FangSong.ttf` | `仿宋` (FangSong) | `FangSong` |
 | `KaiTiGB2312.ttf` | `楷体` | `KaiTi_GB2312` |
+| `KaiTi.ttf` | `楷体` (KaiTi) | `KaiTi` |
 | `SimHei.ttf` | `黑体` | `SimHei` |
+| `Arial.ttf` | `Arial` | `ArialMT` |
+| `Arial-Bold.ttf` | `Arial` | `Arial-BoldMT` |
+| `Arial-Italic.ttf` | `Arial` | `Arial-ItalicMT` |
+| `Arial-BoldItalic.ttf` | `Arial` | `Arial-BoldItalicMT` |
 | `Calibri.ttf` | `Calibri` | `Calibri` |
 | `Calibri-Bold.ttf` | `Calibri` | `Calibri Bold` |
 | `Calibri-Italic.ttf` | `Calibri` | `Calibri Italic` |

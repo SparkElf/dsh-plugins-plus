@@ -54,6 +54,37 @@ const FONT_FILES = [
     file: 'Calibri-LightItalic.ttf',
     families: ['Calibri Light'],
   },
+  // 下面三个文件的内部 family 与上面同源的字面（方正小标宋简体、仿宋、楷体）重复，
+  // 而浏览器按注册顺序取同名的最后一份；因此这里只发布它们各自的拼写，让文档写
+  // 方正小标宋简体 / 仿宋 / 楷体 时仍命中上面那一份，不因别名顺序而换字体。
+  {
+    file: 'FZXiaoBiaoSong-JT.ttf',
+    families: ['FZXiaoBiaoSong-JT', 'FZXiaoBiaoSong-B05S-JT'],
+  },
+  {
+    file: 'FangSong.ttf',
+    families: ['FangSong'],
+  },
+  {
+    file: 'KaiTi.ttf',
+    families: ['KaiTi'],
+  },
+  {
+    file: 'Arial.ttf',
+    families: ['Arial'],
+  },
+  {
+    file: 'Arial-Bold.ttf',
+    families: ['Arial'],
+  },
+  {
+    file: 'Arial-Italic.ttf',
+    families: ['Arial'],
+  },
+  {
+    file: 'Arial-BoldItalic.ttf',
+    families: ['Arial'],
+  },
 ] as const
 
 export const name = 'office-viewer-fonts'

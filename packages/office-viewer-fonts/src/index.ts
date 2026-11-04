@@ -26,6 +26,15 @@ const FONT_ROUTES = [
   { file: 'Calibri-BoldItalic.ttf', path: '/office-viewer-fonts/Calibri-BoldItalic.ttf' },
   { file: 'Calibri-Light.ttf', path: '/office-viewer-fonts/Calibri-Light.ttf' },
   { file: 'Calibri-LightItalic.ttf', path: '/office-viewer-fonts/Calibri-LightItalic.ttf' },
+  // 政务文档常见的其余字体：补齐到 17 个，使镜像只从本包安装一次字体，
+  // base 层不再重复安装一份相同的字体。
+  { file: 'FZXiaoBiaoSong-JT.ttf', path: '/office-viewer-fonts/FZXiaoBiaoSong-JT.ttf' },
+  { file: 'FangSong.ttf', path: '/office-viewer-fonts/FangSong.ttf' },
+  { file: 'KaiTi.ttf', path: '/office-viewer-fonts/KaiTi.ttf' },
+  { file: 'Arial.ttf', path: '/office-viewer-fonts/Arial.ttf' },
+  { file: 'Arial-Bold.ttf', path: '/office-viewer-fonts/Arial-Bold.ttf' },
+  { file: 'Arial-Italic.ttf', path: '/office-viewer-fonts/Arial-Italic.ttf' },
+  { file: 'Arial-BoldItalic.ttf', path: '/office-viewer-fonts/Arial-BoldItalic.ttf' },
 ] as const
 
 /**
