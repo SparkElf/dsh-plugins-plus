@@ -84,6 +84,7 @@ describe('apply', () => {
       '/integrations/dataops/open-resource/events',
       '/integrations/dataops/rbac',
       '/integrations/dataops/resource-tab/config',
+      '/integrations/dataops/resources',
       '/integrations/dataops/review',
       '/integrations/dataops/review-context',
       '/integrations/dataops/review-notifications',
@@ -113,6 +114,7 @@ describe('apply', () => {
       '/integrations/dataops/review-context',
       '/integrations/dataops/review-notifications',
       '/integrations/dataops/resource-tab/config',
+      '/integrations/dataops/resources',
       '/integrations/dataops/review-settings',
       '/integrations/dataops/skill-plaza',
       '/integrations/dataops/tool-timeout',
@@ -131,7 +133,8 @@ describe('apply', () => {
 
     await apply(context as never, CONFIG)
 
-    expect(registered).toHaveLength(2)
+    expect((registered as Array<{ name: string }>).map((item) => item.name).sort())
+      .toEqual(['api-connector-authoring', 'dataops-collect', 'dataops-query'])
     const provider = (registered as Array<{ name: string }>).find((item) => item.name === 'dataops-query') as unknown as {
       name: string
       list: () => Promise<{ name: string; locator: URL }[]>
