@@ -4795,48 +4795,54 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             if (!isContainedRelPath(relPath)) {
               return writeJson(res, 400, { error: 'path escapes the knowledge root', refused: [relPath] })
             }
+            // The tree speaks the caller's VIEW path (`global/…`, `personal/…`), while
+            // the queue and the filesystem speak the AUTHORITATIVE path. Resolve by inode
+            // before touching the disk: the view's `global` bucket can hardlink a file
+            // that actually lives at the actual root, and a personal row hides the owner
+            // segment. Without this a right-click answered `404 no such file`.
+            const actualRelPath = await actualRelPathForView(host, config, relPath).catch(() => relPath)
             // A Markdown document is already the thing an extraction produces, so there is
             // nothing to run. This is checked BEFORE the "no extractor" branch: `.md` is
             // not in `EXTRACTABLE_EXTENSIONS`, so it used to fall through and be reported
             // as an unreadable format, which told a reader their own Markdown file could
             // not be read.
-            if (isAlreadyMarkdown(relPath)) {
+            if (isAlreadyMarkdown(actualRelPath)) {
               // Recorded as a task so the progress panel shows the request and its
               // outcome: a click that leaves no trace reads as a broken button. The queue
               // resolves it immediately at `already-markdown` because there is no work to
               // do -- this is a terminal success, not a failure.
               // No parser settings needed: nothing will be run for this task.
-              extractionQueue.enqueue(relPath, '')
+              extractionQueue.enqueue(actualRelPath, '')
               return writeJson(res, 200, {
                 outcome: 'already-markdown',
-                relPath,
+                relPath: actualRelPath,
                 message: 'this document is already Markdown',
               })
             }
             // No reader for this format is a definite answer, not a failure: the caller
             // asked and the honest reply is that this file type is never extractable.
-            if (!isExtractable(relPath)) {
+            if (!isExtractable(actualRelPath)) {
               return writeJson(res, 200, {
                 outcome: 'unsupported',
-                relPath,
+                relPath: actualRelPath,
                 message: 'this file type has no extractor',
               })
             }
             const localRoot = localConfig(config)
-            const target = join(localRoot.actualRoot, relPath)
+            const target = join(localRoot.actualRoot, actualRelPath)
             const source = await stat(target).catch(() => undefined)
             if (source === undefined || !source.isFile()) {
               return writeJson(res, 404, { error: 'no such file' })
             }
-            if (!await canWritePath(host, config, relPath)) {
+            if (!await canWritePath(host, config, actualRelPath)) {
               return writeJson(res, 403, { error: 'write access is required to extract here', refused: [relPath] })
             }
             // Already extracted: report it instead of overwriting. A sibling the reader
             // may have edited by hand must not be silently replaced by a retry.
-            const sibling = markdownSiblingOf(relPath)
+            const sibling = markdownSiblingOf(actualRelPath)
             const existing = await stat(join(localRoot.actualRoot, sibling)).catch(() => undefined)
             if (existing !== undefined && existing.isFile()) {
-              return writeJson(res, 200, { outcome: 'exists', relPath, markdown: sibling })
+              return writeJson(res, 200, { outcome: 'exists', relPath: actualRelPath, markdown: sibling })
             }
             const viewDir = viewPathFor({
               actualRoot: localRoot.actualRoot,
@@ -4853,13 +4859,13 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // `extract.status` reported the other. `settled(relPath)` is what keeps a
             // single truth -- the state this route returns IS the state the status
             // surface shows for that path.
-            const accepted = extractionQueue.enqueue(relPath, settings.mineruBaseUrl)
+            const accepted = extractionQueue.enqueue(actualRelPath, settings.mineruBaseUrl)
             // `wait` lets the menu be a single call for the common case while still
             // allowing a caller to fire-and-poll when the parse is long.
             if (body.wait === false) {
-              return writeJson(res, 202, { outcome: 'queued', relPath, extraction: accepted })
+              return writeJson(res, 202, { outcome: 'queued', relPath: actualRelPath, extraction: accepted })
             }
-            const settled = await extractionQueue.settled(relPath)
+            const settled = await extractionQueue.settled(actualRelPath)
             // Unreachable in practice (`enqueue` above always records a task), but a
             // route must not dereference a missing task: an unknown outcome is reported
             // as a failure with a reason rather than as a success.
