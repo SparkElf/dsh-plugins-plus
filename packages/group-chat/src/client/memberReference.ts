@@ -17,6 +17,7 @@
 
 import { MEMBER_MENTION_SOURCE } from '../reference-ids.ts'
 import { listMembers } from './api.ts'
+import { mentionSourceOf } from './mentionSource.ts'
 import type { RoomStore } from './store.ts'
 import type { InputTriggersLike } from './messageReference.ts'
 
@@ -47,6 +48,8 @@ export const registerMemberSource = (inputTriggers: InputTriggersLike, store: Ro
       const roomId = store.getState().activeRoomId
       if (roomId === undefined) return []
       const members = await listMembers(roomId)
+      const roster = mentionSourceOf(members)
+      const owners = new Set(members.filter(member => member.owner).map(member => member.userId))
       const needle = request.query.trim().toLowerCase()
       const out: {
         name: string
@@ -54,16 +57,15 @@ export const registerMemberSource = (inputTriggers: InputTriggersLike, store: Ro
         icon: string
         value: string
       }[] = []
-      for (const member of members) {
+      for (const member of roster) {
         if (request.signal.aborted) break
-        const name = member.displayName
-        if (needle.length > 0 && !name.toLowerCase().includes(needle)) continue
-        names.set(member.userId, name)
+        if (needle.length > 0 && !member.displayName.toLowerCase().includes(needle)) continue
+        names.set(member.id, member.displayName)
         out.push({
-          name,
-          ...member.owner ? { description: '群主' } : {},
+          name: member.displayName,
+          ...owners.has(member.id) ? { description: '群主' } : {},
           icon: 'mention',
-          value: member.userId,
+          value: member.id,
         })
         if (out.length >= MAX_CANDIDATES) break
       }
