@@ -160,101 +160,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Visual stepper: one node per stage, connector drawn by the node's ::after. */
-.steps {
-  display: flex;
-  align-items: flex-start;
-  width: 100%;
-  padding: 2px 2px 0;
-  gap: 0;
-}
-
-.step {
-  position: relative;
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-}
-
-/* Connector between nodes: from this dot's right edge to the next dot's left edge. */
-.step:not(:last-child)::after {
-  content: '';
-  position: absolute;
-  top: 5px;
-  left: calc(50% + 7px);
-  right: calc(-50% + 7px);
-  height: 1px;
-  background: var(--dsw-alias-border-l2);
-}
-
-.stepDone:not(:last-child)::after {
-  background: var(--dsw-alias-state-success-primary);
-}
-
-.stepDot {
-  position: relative;
-  z-index: 1;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  background: var(--dsw-alias-bg-layer-3);
-  color: var(--dsw-alias-label-primary-foreground);
-  font-size: 8px;
-  line-height: 1;
-  font-weight: 700;
-}
-
-.stepLabel {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dsw-alias-label-caption);
-  font-size: 9px;
-  line-height: 12px;
-}
-
-.stepTodo .stepDot {
-  background: var(--dsw-alias-bg-layer-3);
-  opacity: .6;
-}
-
-.stepActive .stepDot {
-  background: var(--dsw-alias-state-business-primary);
-  animation: stepPulse 1.4s ease-in-out infinite;
-}
-
-.stepActive .stepLabel {
-  color: var(--dsw-alias-label-primary);
-  font-weight: 600;
-}
-
-.stepDone .stepDot {
-  background: var(--dsw-alias-state-success-primary);
-}
-
-.stepDone .stepLabel {
-  color: var(--dsw-alias-state-success-primary);
-}
-
-.stepFailed .stepDot {
-  background: var(--dsw-alias-state-error-primary);
-}
-
-.stepFailed .stepLabel {
-  color: var(--dsw-alias-state-error-primary);
-}
-
-@keyframes stepPulse {
-  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 22%, transparent); }
-  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent); }
-}
-
 /* Row two: the destination. Secondary ink, its own line, and it truncates rather than
    wrapping the card to three lines. */
 .cardPath {
@@ -309,7 +214,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-left: 23px;
+  width: 100%;
+  margin-top: 2px;
 }
 
 .progressTrack {
@@ -329,6 +235,16 @@
   background: linear-gradient(90deg, var(--dsw-alias-brand-primary), var(--dsw-alias-state-business-primary));
   box-shadow: 0 0 8px color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
   transition: width 120ms linear;
+}
+
+.progressRow[data-stage='done'] .progressFill {
+  background: var(--dsw-alias-state-success-primary);
+  box-shadow: none;
+}
+
+.progressFillFailed {
+  background: var(--dsw-alias-state-error-primary);
+  box-shadow: none;
 }
 
 /* The unknown-total fill: a short bar sliding across the track. */

@@ -245,10 +245,6 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     name: string
     path: string
     stage: 'uploading' | 'uploaded' | 'extracting' | 'done' | 'failed'
-    /** 可视化步骤条：上传任务四节点，右键提取两节点。 */
-    steps: readonly string[]
-    /** 当前节点索引；之前的节点视为完成。 */
-    stepIndex: number
     percent?: number
     reason?: string
     rawReason?: string
@@ -259,8 +255,6 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
   }
   const basename = (value: string): string => value.slice(value.lastIndexOf('/') + 1)
   const dirname = (value: string): string => value.slice(0, value.lastIndexOf('/'))
-  const uploadSteps = [t('progressStepUploading'), t('progressStepUploaded'), t('progressStepExtracting'), t('progressStepExtracted')]
-  const extractSteps = [t('progressStepExtracting'), t('progressStepExtracted')]
   const queueRows = useMemo<QueueRow[]>(() => {
     const rows: QueueRow[] = []
     const byPath = new Map(merged.rows.map(task => [task.relPath, task]))
@@ -273,15 +267,11 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
       const stage = task.state === 'pending' || task.state === 'running'
         ? 'extracting'
         : task.state === 'succeeded' || task.state === 'already-markdown' ? 'done' : 'failed'
-      const steps = withUpload ? uploadSteps : extractSteps
-      const stepIndex = stage === 'extracting' ? (withUpload ? 2 : 0) : stage === 'done' ? steps.length - 1 : (withUpload ? 2 : 0)
       return {
         key: 'extract:' + task.relPath,
         name: basename(task.relPath),
         path: dirname(task.relPath),
         stage,
-        steps,
-        stepIndex,
         at: task.queuedAt ?? task.startedAt ?? task.finishedAt,
         markdown: task.markdown,
         ...(failure === undefined ? {} : { reason: failure.text, ...(failure.raw === undefined ? {} : { rawReason: failure.raw }) }),
@@ -291,11 +281,11 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     for (const task of props.uploads) {
       const relPath = task.dir === '' ? task.name : task.dir + '/' + task.name
       if (task.state === 'waiting' || task.state === 'uploading') {
-        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploading', steps: uploadSteps, stepIndex: 0, percent: task.percent, at: task.at })
+        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploading', percent: task.percent, at: task.at })
         continue
       }
       if (task.state === 'failed') {
-        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'failed', steps: uploadSteps, stepIndex: 0, reason: task.reason, at: task.at })
+        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'failed', reason: task.reason, at: task.at })
         continue
       }
       const extractionTask = byPath.get(relPath) ?? byName.get(basename(relPath))
@@ -306,7 +296,7 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
       } else {
         // Uploaded and no extraction task reported yet: the file itself is in place, so
         // the row settles at "uploaded" instead of holding the badge open forever.
-        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploaded', steps: uploadSteps, stepIndex: 1, at: task.at })
+        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploaded', at: task.at })
       }
     }
     // 只保留最近 10 分钟的提取任务：Host 的 extract.status 会返回历史任务，
@@ -322,7 +312,7 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
       rows.push(extractionRow(task, false))
     }
     for (const entry of merged.queued) {
-      rows.push({ key: 'queued:' + entry.relPath, name: basename(entry.relPath), path: dirname(entry.relPath), stage: 'extracting', steps: extractSteps, stepIndex: 0, at: new Date(entry.requestedAt).toISOString() })
+      rows.push({ key: 'queued:' + entry.relPath, name: basename(entry.relPath), path: dirname(entry.relPath), stage: 'extracting', at: new Date(entry.requestedAt).toISOString() })
     }
     for (const failure of clientFailures) {
       const readable = readFailureReason(failure.reason, t)
@@ -332,8 +322,6 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
         name: basename(failure.relPath),
         path: dirname(failure.relPath),
         stage: 'failed',
-        steps: extractSteps,
-        stepIndex: 0,
         reason: readable.text,
         ...(readable.raw === undefined ? {} : { rawReason: readable.raw }),
         ...(missingFile ? {} : { retryPath: failure.relPath, retryable: true }),
@@ -452,42 +440,28 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
                       {time !== '' && <span className={styles.cardTime}>{time}</span>}
                       <span className={tone}>{stageLabel}</span>
                     </span>
-                    <span className={styles.steps} data-steps={row.steps.length} aria-label={row.steps.join(' → ')}>
-                      {row.steps.map((label, index) => {
-                        const state = index < row.stepIndex ? 'done'
-                          : index === row.stepIndex ? (row.stage === 'failed' ? 'failed' : 'active')
-                            : 'todo'
-                        return (
-                          <span
-                            key={label}
-                            className={styles.step + ' ' + (state === 'done' ? styles.stepDone : state === 'active' ? styles.stepActive : state === 'failed' ? styles.stepFailed : styles.stepTodo)}
-                          >
-                            <span className={styles.stepDot} aria-hidden="true">{state === 'done' ? '✓' : ''}</span>
-                            <span className={styles.stepLabel}>{label}</span>
-                          </span>
-                        )
-                      })}
-                    </span>
-                    {row.path !== '' && <span className={styles.cardPath}>{row.path}</span>}
-                    {row.markdown !== undefined && <span className={styles.cardPath}>{row.markdown}</span>}
-                    {row.stage === 'uploading' && (
-                      <span className={styles.progressRow}>
+                    <span className={styles.progressRow} data-stage={row.stage}>
+                      <span
+                        className={styles.progressTrack}
+                        role="progressbar"
+                        aria-label={row.name}
+                        {...(row.stage === 'uploading' && row.percent !== undefined
+                          ? { 'aria-valuenow': row.percent, 'aria-valuemin': 0, 'aria-valuemax': 100 }
+                          : {})}
+                      >
                         <span
-                          className={styles.progressTrack}
-                          role="progressbar"
-                          aria-label={row.name}
-                          {...(row.percent === undefined ? {} : { 'aria-valuenow': row.percent, 'aria-valuemin': 0, 'aria-valuemax': 100 })}
-                        >
-                          <span
-                            className={row.percent === undefined ? styles.progressFillIndeterminate : styles.progressFill}
-                            {...(row.percent === undefined ? {} : { style: { width: String(row.percent) + '%' } })}
-                          />
-                        </span>
-                        {row.percent !== undefined && (
-                          <span className={styles.progressPercent}>{String(row.percent) + '%'}</span>
-                        )}
+                          className={row.stage === 'extracting' || (row.stage === 'uploading' && row.percent === undefined)
+                            ? styles.progressFillIndeterminate
+                            : row.stage === 'failed' ? styles.progressFill + ' ' + styles.progressFillFailed : styles.progressFill}
+                          {...(row.stage === 'extracting' || (row.stage === 'uploading' && row.percent === undefined)
+                            ? {}
+                            : { style: { width: row.stage === 'uploading' ? String(row.percent ?? 0) + '%' : '100%' } })}
+                        />
                       </span>
-                    )}
+                      {row.stage === 'uploading' && row.percent !== undefined && (
+                        <span className={styles.progressPercent}>{String(row.percent) + '%'}</span>
+                      )}
+                    </span>
                     {row.reason !== undefined && <span className={styles.cardReason}>{row.reason}</span>}
                     {row.rawReason !== undefined && row.rawReason !== row.reason && (
                       <span className={styles.cardRawReason}>{t('progressRawReason').replace('{reason}', row.rawReason)}</span>
