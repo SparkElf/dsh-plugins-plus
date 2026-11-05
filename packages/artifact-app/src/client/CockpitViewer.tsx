@@ -24,6 +24,20 @@ interface RuntimeMessage {
   resourceRef?: string
 }
 
+/**
+ * Render routes are served by this DSH host, so the iframe must stay on the same origin.
+ * A stale absolute base (`http://localhost:<port>/dsh-artifact-app/render` behind a proxy)
+ * would point the frame at a port the browser cannot reach; keep only the pathname.
+ */
+const renderBase = (value: string): string => {
+  try {
+    const base = new URL(value, window.location.origin)
+    return base.pathname.replace(/\/+$/u, '')
+  } catch {
+    return value.replace(/\/+$/u, '')
+  }
+}
+
 const frameStyle: CSSProperties = {
   width: '100%',
   height: '100%',
@@ -114,7 +128,7 @@ export function CockpitViewer({ artifactId, reloadToken }: { artifactId: string;
   if (config === null || token === null) {
     return <div style={{ padding: 18, color: 'var(--dsw-alias-label-secondary, #6b7280)', fontSize: 12 }}>正在准备驾驶舱…</div>
   }
-  const src = config.renderBaseUrl.replace(/\/+$/u, '') + '/' + encodeURIComponent(artifactId) + (reloadToken === undefined ? '' : '?r=' + String(reloadToken))
+  const src = renderBase(config.renderBaseUrl) + '/' + encodeURIComponent(artifactId) + (reloadToken === undefined ? '' : '?r=' + String(reloadToken))
   return (
     <iframe
       ref={frameRef}
