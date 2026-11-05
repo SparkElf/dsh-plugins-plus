@@ -814,3 +814,62 @@ tr[data-locked='true'] td {
   color: var(--dsw-alias-label-primary);
   overflow-wrap: anywhere;
 }
+
+/* Member role cell: current roles as tags with per-role revoke, then a grant control. */
+.roleCell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.roleTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.roleTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.roleRevoke {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.roleRevoke:hover {
+  background: rgba(255, 255, 255, .08);
+  color: var(--dsw-alias-state-danger, #b91c1c);
+}
+
+.roleGrant {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.roleGrant select {
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+}

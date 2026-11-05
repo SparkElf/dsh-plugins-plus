@@ -357,3 +357,54 @@ async function resultOf(response: Response): Promise<RbacSaveResult> {
     return { ok: false }
   }
 }
+
+/** One role the caller may delegate, as `roles/visible` returns it. */
+export interface VisibleRoleRow {
+  code: string
+  name: string
+  systemKey?: string | null
+  departmentScoped: boolean
+  displayOrder: number
+  level: number
+}
+
+/** The caller's delegation scope and the roles inside it. */
+export interface VisibleRolesView {
+  actorLevel: number
+  departmentCodes: readonly string[]
+  roles: readonly VisibleRoleRow[]
+}
+
+/** Roles the caller may grant or revoke. */
+export async function fetchVisibleRoles(): Promise<VisibleRolesView | null> {
+  return readJson<VisibleRolesView>(RBAC_PATH + '?section=visible-roles')
+}
+
+
+/** Write one RBAC mutation, surfacing the backend's reason on refusal. */
+async function mutateRbac(section: string, value: Record<string, unknown>): Promise<RbacSaveResult> {
+  if (reviewDemoMode()) return { ok: true }
+  const response = await fetch(RBAC_PATH, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ section, value }),
+  })
+  if (response.ok && response.status !== 503) return { ok: true }
+  try {
+    const body = await response.json() as { message?: unknown; code?: unknown; details?: { reason?: unknown } }
+    const reason = body.details?.reason ?? body.message ?? body.code
+    return { ok: false, ...(typeof reason === 'string' ? { reason } : {}) }
+  } catch {
+    return { ok: false }
+  }
+}
+
+/** Grant one role to a member (level/department rules are enforced by the backend). */
+export async function grantMemberRole(userId: string, roleCode: string, departmentCode?: string | null): Promise<RbacSaveResult> {
+  return mutateRbac('member-grant', { userId, roleCode, ...(departmentCode === undefined ? {} : { departmentCode }) })
+}
+
+/** Revoke one role from a member. */
+export async function revokeMemberRole(userId: string, roleCode: string): Promise<RbacSaveResult> {
+  return mutateRbac('member-revoke', { userId, roleCode })
+}

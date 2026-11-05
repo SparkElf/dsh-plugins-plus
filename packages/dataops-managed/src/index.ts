@@ -990,6 +990,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         if (request.method === 'GET') {
           const url = new URL(request.url ?? '/', 'http://localhost')
           const section = url.searchParams.get('section') ?? 'matrix'
+          if (section === 'visible-roles') {
+            const result = await api.request('/api/system/permission-center/roles/visible')
+            writeJson(response, result.status, result.body)
+            return
+          }
           const suffix = section === 'members'
             ? '?q=' + encodeURIComponent(url.searchParams.get('q') ?? '') + '&departmentCode=' + encodeURIComponent(url.searchParams.get('departmentCode') ?? '')
             : section === 'resources'
@@ -1017,6 +1022,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         }
         if (section === 'members' && typeof value.userId === 'string') {
           const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(value.userId) + '/roles', { method: 'PUT', body: JSON.stringify({ roleCodes: value.roleCodes }) })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (section === 'member-grant' && typeof body?.userId === 'string' && typeof body?.roleCode === 'string') {
+          const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(body.userId) + '/role-grants', {
+            method: 'PUT',
+            body: JSON.stringify({
+              roleCode: body.roleCode,
+              departmentCode: typeof body.departmentCode === 'string' ? body.departmentCode : null,
+            }),
+          })
+          writeJson(response, result.status, result.body)
+          return
+        }
+        if (section === 'member-revoke' && typeof body?.userId === 'string' && typeof body?.roleCode === 'string') {
+          const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(body.userId) + '/role-grants/' + encodeURIComponent(body.roleCode), { method: 'DELETE' })
           writeJson(response, result.status, result.body)
           return
         }

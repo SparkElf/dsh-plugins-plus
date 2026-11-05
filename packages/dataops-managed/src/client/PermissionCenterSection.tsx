@@ -6,6 +6,9 @@ import {
   createDepartment,
   deleteDepartment,
   fetchRbacOverview,
+  fetchVisibleRoles,
+  grantMemberRole,
+  revokeMemberRole,
   fetchReviewContext,
   reviewDemoMode,
   saveRbacSection,
@@ -13,6 +16,8 @@ import {
   type DepartmentRow,
   type MemberRow,
   type RbacOverview,
+  type VisibleRoleRow,
+  type VisibleRolesView,
   type ResourceScopeRow,
   type RoleMatrixRow,
 } from './review-client.ts'
@@ -45,6 +50,7 @@ const PAGE_SIZE = 10
 export function PermissionCenterSection({ t }: PermissionCenterSectionProps): ReactNode {
   const [context, setContext] = useState<ReviewContext | null | undefined>(undefined)
   const [overview, setOverview] = useState<RbacOverview | null | undefined>(undefined)
+  const [visibleRoles, setVisibleRoles] = useState<VisibleRolesView | null>(null)
   const [tab, setTab] = useState<PermissionTab>('roles')
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -61,7 +67,12 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
     setContext(nextContext)
     if (nextContext === null && !demo) { setOverview(null); return }
     try {
-      setOverview(demo ? demoRbacOverview() : await fetchRbacOverview())
+      const [nextOverview, nextVisible] = await Promise.all([
+        demo ? Promise.resolve(demoRbacOverview()) : fetchRbacOverview(),
+        demo ? Promise.resolve(null) : fetchVisibleRoles().catch(() => null),
+      ])
+      setOverview(nextOverview)
+      setVisibleRoles(nextVisible)
     } catch {
       setOverview(null)
     }
@@ -137,6 +148,30 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
     } catch {
       setNotice(t('permSaveFailed'))
       return { ok: false, reason: t('permSaveFailed') }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const grantRole = async (userId: string, roleCode: string, departmentCode?: string): Promise<void> => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const result = await grantMemberRole(userId, roleCode, departmentCode)
+      setNotice(result.ok ? t('permSaved') : (result.reason ?? t('permSaveFailed')))
+      if (result.ok) await load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const revokeRole = async (userId: string, roleCode: string): Promise<void> => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const result = await revokeMemberRole(userId, roleCode)
+      setNotice(result.ok ? t('permSaved') : (result.reason ?? t('permSaveFailed')))
+      if (result.ok) await load()
     } finally {
       setBusy(false)
     }
@@ -230,7 +265,7 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
       {overview === null ? <p className={styles.waiting}>{t('permWaiting')}</p> : (
         <>
           {tab === 'roles' ? <RoleMatrix roles={overview.matrix.roles} permissions={overview.matrix.permissions} writable={writable} actorRole={actorRole} busy={busy} t={t} onSaveAll={saveRoleChanges} /> : null}
-          {tab === 'members' ? <Members members={overview.members} writable={writable} actorRole={actorRole} actorUserId={context?.userId} actorDepartmentCode={context?.departmentCode} busy={busy} t={t} onSave={(userId, roleCodes) => { void save('members', { userId, roleCodes }) }} /> : null}
+          {tab === 'members' ? <Members members={overview.members} writable={writable} actorRole={actorRole} actorUserId={context?.userId} actorDepartmentCode={context?.departmentCode} visibleRoles={visibleRoles} busy={busy} t={t} onSave={(userId, roleCodes) => { void save('members', { userId, roleCodes }) }} onGrant={(userId, roleCode, departmentCode) => { void grantRole(userId, roleCode, departmentCode) }} onRevoke={(userId, roleCode) => { void revokeRole(userId, roleCode) }} /> : null}
           {tab === 'departments' ? <Departments departments={overview.departments} writable={writable} canAssign={canAssignDepartment} canWrite={writable && (superAdmin || actorRole === 'ADMIN')} t={t} onAssign={openDepartment} onAdd={(parentCode) => { setDeptForm({ mode: 'create', parentCode }) }} onEdit={(department) => { setDeptForm({ mode: 'edit', department }) }} onDelete={(department) => { void removeDepartment(department) }} /> : null}
           {tab === 'resources' ? <Resources resources={overview.resources} departments={overview.departments} writable={resourceWritable} actorRole={actorRole} actorDepartmentCode={context?.departmentCode} busy={busy} t={t} onSave={(row, visibility, departmentCode) => save('resources', { kind: row.kind, id: row.id, visibility, departmentCode })} /> : null}
         </>
@@ -520,15 +555,81 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
   )
 }
 
-function Members({ members, writable, actorRole, actorUserId, actorDepartmentCode, busy, t, onSave }: {
+function MemberRoleCell({ member, visibleRoles, locked, busy, t, onGrant, onRevoke }: {
+  member: MemberRow
+  visibleRoles: VisibleRolesView | null
+  locked: boolean
+  busy: boolean
+  t: (key: keyof typeof en) => string
+  onGrant: (userId: string, roleCode: string, departmentCode?: string) => void
+  onRevoke: (userId: string, roleCode: string) => void
+}): ReactNode {
+  const [selected, setSelected] = useState('')
+  const roles = visibleRoles?.roles ?? []
+  const canGrant = (role: VisibleRoleRow): boolean => {
+    if (visibleRoles === null || visibleRoles.actorLevel >= role.level) return false
+    if (!role.departmentScoped) return true
+    return member.departmentCode !== undefined && visibleRoles.departmentCodes.includes(member.departmentCode)
+  }
+  const grantable = roles.filter(canGrant)
+  return (
+    <div className={styles.roleCell}>
+      <span className={styles.roleTags}>
+        {member.roleCodes.map(code => {
+          const role = roles.find(item => item.code === code)
+          const revocable = role !== undefined && canGrant(role)
+          return (
+            <span key={code} className={styles.roleTag}>
+              {role?.name ?? code}
+              {revocable && !locked ? (
+                <button
+                  type="button"
+                  className={styles.roleRevoke}
+                  title={t('permRevoke')}
+                  aria-label={t('permRevoke') + ' ' + (role?.name ?? code)}
+                  disabled={busy}
+                  onClick={() => { onRevoke(member.userId, code) }}
+                >
+                  ×
+                </button>
+              ) : null}
+            </span>
+          )
+        })}
+      </span>
+      <span className={styles.roleGrant}>
+        <select value={selected} disabled={locked || busy || grantable.length === 0} onChange={(event) => { setSelected(event.target.value) }}>
+          <option value="">{t('permGrantSelect')}</option>
+          {grantable.map(role => <option key={role.code} value={role.code}>{role.name}</option>)}
+        </select>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={locked || busy || selected === ''}
+          onClick={() => {
+            onGrant(member.userId, selected, member.departmentCode)
+            setSelected('')
+          }}
+        >
+          {t('permGrant')}
+        </Button>
+      </span>
+    </div>
+  )
+}
+
+function Members({ members, writable, actorRole, actorUserId, actorDepartmentCode, visibleRoles, busy, t, onSave, onGrant, onRevoke }: {
   members: readonly MemberRow[]
   writable: boolean
   actorRole: PortalRole
   actorUserId?: string
   actorDepartmentCode?: string
+  visibleRoles: VisibleRolesView | null
   busy: boolean
   t: (key: keyof typeof en) => string
   onSave: (userId: string, roleCodes: string[]) => void
+  onGrant: (userId: string, roleCode: string, departmentCode?: string) => void
+  onRevoke: (userId: string, roleCode: string) => void
 }): ReactNode {
   const [page, setPage] = useState(0)
   const protectedMember = (member: MemberRow): boolean => member.roleCodes.some(code => {
@@ -559,17 +660,15 @@ function Members({ members, writable, actorRole, actorUserId, actorDepartmentCod
                   <td><strong>{member.displayName}</strong><span className={styles.muted}> @{member.username}</span>{isProtected && actorRole !== 'SUPER_ADMIN' ? <span className={styles.protected}>受保护</span> : null}{isSelf ? <span className={styles.protected}>本人</span> : null}{lastSuper ? <span className={styles.protected}>最后一个超管</span> : null}{!scoped ? <span className={styles.protected}>越界</span> : null}</td>
                   <td>{member.departmentPath?.map(entry => entry.name).join(' / ') ?? '—'}</td>
                   <td>
-                    <select
-                      value={member.roleCodes[0] ?? 'APP_USER'}
-                      disabled={locked || busy}
-                      onChange={(event) => {
-                        if (window.confirm('确认修改该成员的角色？')) onSave(member.userId, [event.target.value])
-                      }}
-                    >
-                      {(actorRole === 'SUPER_ADMIN'
-                        ? ['超级管理员', '管理员', '部门管理员', '运营人员', '应用人员']
-                        : ['部门管理员', '运营人员', '应用人员']).map(role => <option key={role} value={role}>{role}</option>)}
-                    </select>
+                    <MemberRoleCell
+                      member={member}
+                      visibleRoles={visibleRoles}
+                      locked={locked}
+                      busy={busy}
+                      t={t}
+                      onGrant={onGrant}
+                      onRevoke={onRevoke}
+                    />
                   </td>
                 </tr>
               )
