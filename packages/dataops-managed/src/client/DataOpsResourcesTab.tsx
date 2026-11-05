@@ -129,20 +129,27 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
         if (!response.ok) throw new Error('HTTP ' + response.status.toString())
         const body = await response.json() as ResourceTabConfig
         if (!live) return
-        // 单一凭据来源：优先用 host 下发的 workspace JWT；同源代理部署里 host 没拿到时，
-        // 回退到 DSH 页面 sessionStorage 中同一份 DataOps JWT（不引入第二种凭据）。
+        // 凭据来源顺序固定：host config token → （仅同源代理）DSH sessionStorage → 报错。
+        // 回退只用同一份 DataOps JWT，不引入第二种凭据；独立 origin 模式 host 一定带 token，
+        // 所以 sessionStorage 回退加了 sameOrigin 守卫，避免以后被误用。
+        const sameOrigin = body.sameOrigin === true
+        const hostToken = typeof body.token === 'string' && body.token !== '' ? body.token : undefined
         let sessionToken: string | undefined
-        try {
-          const stored = window.sessionStorage.getItem('dataops_auth_token')
-          if (stored !== null && stored !== '') sessionToken = stored
-        } catch { /* private mode */ }
+        if (hostToken === undefined && sameOrigin) {
+          try {
+            const stored = window.sessionStorage.getItem('dataops_auth_token')
+            if (stored !== null && stored !== '') sessionToken = stored
+          } catch { /* private mode */ }
+        }
+        const token = hostToken ?? sessionToken
+        if (token === undefined) {
+          throw new Error('缺少 DataOps 登录凭证，请重新登录工作区')
+        }
         const next: ResourceTabConfig = {
           embedBaseUrl: body.embedBaseUrl,
-          sameOrigin: body.sameOrigin === true,
+          sameOrigin,
           tabType: body.tabType,
-          ...(typeof body.token === 'string' && body.token !== ''
-            ? { token: body.token }
-            : sessionToken === undefined ? {} : { token: sessionToken }),
+          token,
         }
         // Same-origin embeds share this origin's sessionStorage, so seeding the portal's own
         // token key makes the iframe open already authenticated instead of showing its login page.
