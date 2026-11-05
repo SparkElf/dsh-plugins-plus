@@ -1025,19 +1025,19 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           writeJson(response, result.status, result.body)
           return
         }
-        if (section === 'member-grant' && typeof body?.userId === 'string' && typeof body?.roleCode === 'string') {
-          const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(body.userId) + '/role-grants', {
+        if (section === 'member-grant' && typeof value.userId === 'string' && typeof value.roleCode === 'string') {
+          const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(value.userId) + '/role-grants', {
             method: 'PUT',
             body: JSON.stringify({
-              roleCode: body.roleCode,
-              departmentCode: typeof body.departmentCode === 'string' ? body.departmentCode : null,
+              roleCode: value.roleCode,
+              departmentCode: typeof value.departmentCode === 'string' ? value.departmentCode : null,
             }),
           })
           writeJson(response, result.status, result.body)
           return
         }
-        if (section === 'member-revoke' && typeof body?.userId === 'string' && typeof body?.roleCode === 'string') {
-          const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(body.userId) + '/role-grants/' + encodeURIComponent(body.roleCode), { method: 'DELETE' })
+        if (section === 'member-revoke' && typeof value.userId === 'string' && typeof value.roleCode === 'string') {
+          const result = await api.request('/api/system/permission-center/members/' + encodeURIComponent(value.userId) + '/role-grants/' + encodeURIComponent(value.roleCode), { method: 'DELETE' })
           writeJson(response, result.status, result.body)
           return
         }
