@@ -129,11 +129,20 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
         if (!response.ok) throw new Error('HTTP ' + response.status.toString())
         const body = await response.json() as ResourceTabConfig
         if (!live) return
+        // 单一凭据来源：优先用 host 下发的 workspace JWT；同源代理部署里 host 没拿到时，
+        // 回退到 DSH 页面 sessionStorage 中同一份 DataOps JWT（不引入第二种凭据）。
+        let sessionToken: string | undefined
+        try {
+          const stored = window.sessionStorage.getItem('dataops_auth_token')
+          if (stored !== null && stored !== '') sessionToken = stored
+        } catch { /* private mode */ }
         const next: ResourceTabConfig = {
           embedBaseUrl: body.embedBaseUrl,
           sameOrigin: body.sameOrigin === true,
           tabType: body.tabType,
-          ...(typeof body.token === 'string' && body.token !== '' ? { token: body.token } : {}),
+          ...(typeof body.token === 'string' && body.token !== ''
+            ? { token: body.token }
+            : sessionToken === undefined ? {} : { token: sessionToken }),
         }
         // Same-origin embeds share this origin's sessionStorage, so seeding the portal's own
         // token key makes the iframe open already authenticated instead of showing its login page.
