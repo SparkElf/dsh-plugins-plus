@@ -76,20 +76,13 @@
   flex: none;
 }
 
-.tabGroupLabel {
-  margin-right: 2px;
-  color: var(--dsw-alias-label-caption);
-  font-size: 11px;
-  line-height: 16px;
-  white-space: nowrap;
-}
-
 .tabDivider {
   width: 1px;
-  height: 16px;
+  height: 14px;
   margin: 0 12px;
-  background: var(--dsw-alias-border-l2);
+  background: rgba(255, 255, 255, .12);
   flex: none;
+  align-self: center;
 }
 
 .tab {
@@ -173,11 +166,34 @@
   gap: 12px;
 }
 
-.roleSearch {
+.roleSearchWrap {
+  position: relative;
+  display: inline-flex;
   width: 240px;
   max-width: 100%;
+  flex: none;
+}
+
+.roleSearchIcon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
+  color: #8ea6c6;
+  pointer-events: none;
+  transition: color 120ms ease;
+}
+
+.roleSearchWrap:focus-within .roleSearchIcon {
+  color: #2563eb;
+}
+
+.roleSearch {
+  width: 100%;
   height: 30px;
-  padding: 0 10px;
+  padding: 0 10px 0 34px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
   background: var(--dsw-alias-bg-layer-2);

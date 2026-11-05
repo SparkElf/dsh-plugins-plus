@@ -209,7 +209,6 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
         {tabGroups.map((group, groupIndex) => (
           <div className={styles.tabGroup} key={group.group}>
             {groupIndex > 0 ? <span className={styles.tabDivider} aria-hidden="true" /> : null}
-            <span className={styles.tabGroupLabel}>{group.group}</span>
             {group.items.map(item => (
               <button
                 key={item.key}
@@ -373,13 +372,19 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
     <div className={styles.panel}>
       <div className={styles.matrixHead}>
         <h2 className={styles.sectionTitle}>{t('permRoleMatrix')}</h2>
-        <input
-          className={styles.roleSearch}
-          value={roleQuery}
-          placeholder={t('permRoleSearch')}
-          aria-label={t('permRoleSearch')}
-          onChange={(event) => { setRoleQuery(event.target.value) }}
-        />
+        <span className={styles.roleSearchWrap}>
+          <svg className={styles.roleSearchIcon} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" strokeWidth="1.4" />
+            <path d="m10.5 10.5 3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+          <input
+            className={styles.roleSearch}
+            value={roleQuery}
+            placeholder={t('permRoleSearch')}
+            aria-label={t('permRoleSearch')}
+            onChange={(event) => { setRoleQuery(event.target.value) }}
+          />
+        </span>
       </div>
       {shownRoles.length === 0 ? (
         <p className={styles.empty}>{t('permRoleEmpty')}</p>
