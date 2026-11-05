@@ -15,6 +15,7 @@
  *   has read the whole conversation. Execution is gated; visibility is not.
  */
 import type { RoomEvent, RoomMember } from './backend.ts'
+import { MEMBER_MENTION_SOURCE } from './reference-ids.ts'
 
 /** Identifies a member mentioned by an event. */
 export interface MentionTarget {
@@ -56,6 +57,30 @@ export const messageId = (event: RoomEvent): string | undefined => {
  * message text. Parsing text would misread a code sample containing `@`, and it
  * would let any message smuggle itself into an execution path.
  */
+/**
+ * Member ids a prompt's sender declared on its source, in pick order.
+ *
+ * The composer's roster source inserts chips with `appearance: 'mention'`, and the reference
+ * pipeline hands those ids to the Host on the prompt; this reads them back. Only ids that source
+ * owns qualify — another source's chip is a file, a session, or a quoted message, never a member.
+ */
+export const declaredMentions = (source: { readonly mentions?: unknown } | undefined): readonly string[] => {
+  const raw = source?.mentions
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as { readonly sourceId?: unknown; readonly itemId?: unknown }
+    if (record.sourceId !== MEMBER_MENTION_SOURCE) continue
+    const memberId = record.itemId
+    if (typeof memberId !== 'string' || memberId.length === 0 || seen.has(memberId)) continue
+    seen.add(memberId)
+    out.push(memberId)
+  }
+  return out
+}
+
 export const mentionsOf = (event: RoomEvent): readonly MentionTarget[] => {
   const raw = eventSource(event)?.['mentions']
   if (!Array.isArray(raw)) return []

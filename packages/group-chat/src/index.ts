@@ -44,7 +44,7 @@ import {
   resolveWorkspaceRoot,
   type ServerTarget,
 } from './identity.ts'
-import { mentionedMemberIds, shouldTriggerAgent, speakerPrefix, textOfContent, withSpeakerPrefix, type AgentTriggerPolicy } from './routing.ts'
+import { declaredMentions, mentionedMemberIds, shouldTriggerAgent, speakerPrefix, textOfContent, withSpeakerPrefix, type AgentTriggerPolicy } from './routing.ts'
 import { cleanupRoomSessions, type SessionPersistenceView, type WorkspaceArchiveView } from './session-maintenance.ts'
 import { openRoomStream } from './stream.ts'
 
@@ -1200,11 +1200,18 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       // source kind is what makes it recognizable here; publishing it would put the raw snapshot
       // in the room's history under the member's name.
       if ((data as { source?: { kind?: unknown } }).source?.kind === QUOTE_CONTEXT_KIND) return
-      // The member ids an `@显示名` in the text resolves to. The composer's own mention menu
-      // lists files and sessions, not the roster, so the roster is addressed in the text and
-      // resolved here — which is also where the room's members are already at hand.
+      // Member ids the composer declared, in the order the user picked them. A picked roster entry
+      // rides the prompt's `mentions` (the chip carries `appearance: 'mention'`), so routing reads
+      // identity and never parses `@name` out of the text.
+      //
+      // The text pass stays as a fallback for a draft composed before the roster source existed
+      // (or from a cached bundle): those prompts carry the words alone. Delete it once every
+      // served client declares ids.
       const content = (data as { content: UserContent }).content
-      const mentions = mentionedMemberIds(textOfContent(content), runtimes.get(roomId)?.members ?? [])
+      const declared = declaredMentions((data as { source?: { mentions?: unknown } }).source)
+      const mentions = declared.length > 0
+        ? declared
+        : mentionedMemberIds(textOfContent(content), runtimes.get(roomId)?.members ?? [])
       // The quote the browser registered, consumed here so it attaches to exactly one reply.
       // Read, never consume: the step hook is what consumes the entry, and taking it here
       // would leave the model with nothing to attach when the step runs after this publish.

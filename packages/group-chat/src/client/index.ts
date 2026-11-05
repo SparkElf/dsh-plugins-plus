@@ -45,6 +45,7 @@ import { createRoomStore, type RoomStore } from './store.ts'
 import { createQuoteStore } from './quote.ts'
 import { PendingQuoteBar } from './QuoteComposer.tsx'
 import { registerMessageSource, type InputTriggersLike } from './messageReference.ts'
+import { registerMemberSource } from './memberReference.ts'
 import { PRESET_LOCALE_NS } from './rows.ts'
 import { roomSessionId } from '../session-id.ts'
 import { readRoomState } from './api.ts'
@@ -651,6 +652,9 @@ export function apply(ctx: ClientContext): void {
   const inputTriggers = ctx.get('inputTriggers') as InputTriggersLike | undefined
   if (inputTriggers !== undefined) {
     ctx.effect(() => registerMessageSource(inputTriggers, store))
+    // Members are a second group in the same menu. Only a room answers it, and a pick declares
+    // `appearance: 'mention'`, which is what carries the member ids to the Host as prompt.mentions.
+    ctx.effect(() => registerMemberSource(inputTriggers, store))
   }
 
   ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
