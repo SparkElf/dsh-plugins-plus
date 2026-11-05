@@ -166,6 +166,51 @@
   gap: 12px;
 }
 
+.matrixHeadLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.matrixTool {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  display: inline-grid;
+  place-items: center;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.matrixTool:hover {
+  background: rgba(255, 255, 255, .06);
+  color: var(--dsw-alias-label-primary);
+}
+
+.matrixToolActive {
+  background: rgba(37, 99, 235, .16);
+  border-color: #2563eb;
+  color: #2563eb;
+}
+
+.matrixPermHead {
+  min-width: 116px;
+  max-width: 140px;
+  text-align: left;
+  font-weight: 500;
+  white-space: normal;
+}
+
+.matrixRoleHead,
+.matrixRoleCell {
+  white-space: nowrap;
+}
+
 .roleSearchWrap {
   position: relative;
   display: inline-flex;

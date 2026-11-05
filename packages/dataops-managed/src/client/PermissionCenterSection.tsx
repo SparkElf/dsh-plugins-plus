@@ -368,10 +368,34 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
     return globalScope(point) && (isDepartmentRole(roleCode) || isAppRole(roleCode))
   }
 
+  const [transposed, setTransposed] = useState(false)
+  const toggle = (roleCode: string, pointKey: string, checked: boolean): void => {
+    setDraft(current => {
+      const next = new Set(current[roleCode] ?? [])
+      if (checked) next.add(pointKey)
+      else next.delete(pointKey)
+      return { ...current, [roleCode]: next }
+    })
+    setDirty(current => new Set(current).add(roleCode))
+  }
+
   return (
     <div className={styles.panel}>
       <div className={styles.matrixHead}>
-        <h2 className={styles.sectionTitle}>{t('permRoleMatrix')}</h2>
+        <span className={styles.matrixHeadLeft}>
+          <h2 className={styles.sectionTitle}>{t('permRoleMatrix')}</h2>
+          <button
+            type="button"
+            className={transposed ? styles.matrixTool + ' ' + styles.matrixToolActive : styles.matrixTool}
+            data-matrix-transpose=""
+            aria-pressed={transposed}
+            title={t('permTranspose')}
+            aria-label={t('permTranspose')}
+            onClick={() => { setTransposed(value => !value) }}
+          >
+            ⇄
+          </button>
+        </span>
         <span className={styles.roleSearchWrap}>
           <svg className={styles.roleSearchIcon} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
             <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" strokeWidth="1.4" />
@@ -388,9 +412,41 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
       </div>
       {shownRoles.length === 0 ? (
         <p className={styles.empty}>{t('permRoleEmpty')}</p>
+      ) : transposed ? (
+      <div className={styles.matrixScroll}>
+        <table className={styles.matrix} data-matrix-orientation="transposed">
+          <thead>
+            <tr>
+              <th className={styles.matrixRoleHead}>{t('permRoleColumn')}</th>
+              {visiblePermissions.map(point => (
+                <th key={point.key} className={styles.matrixPermHead} title={point.key}>{point.name}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {shownRoles.map(role => (
+              <tr key={role.code}>
+                <th scope="row" className={styles.matrixRoleCell}>{role.name}</th>
+                {visiblePermissions.map(point => (
+                  <td key={point.key}>
+                    <label className={styles.permission}>
+                      <input
+                        type="checkbox"
+                        checked={draft[role.code]?.has(point.key) === true}
+                        disabled={locked(role.code, point) || busy}
+                        onChange={(event) => { toggle(role.code, point.key, event.target.checked) }}
+                      />
+                    </label>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       ) : (
       <div className={styles.matrixScroll}>
-        <table className={styles.matrix}>
+        <table className={styles.matrix} data-matrix-orientation="normal">
           <thead>
             <tr>
               <th>{t('permPermissionModule')}</th>
@@ -423,15 +479,7 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
                               type="checkbox"
                               checked={draft[role.code]?.has(point.key) === true}
                               disabled={locked(role.code, point) || busy}
-                              onChange={(event) => {
-                                setDraft(current => {
-                                  const next = new Set(current[role.code] ?? [])
-                                  if (event.target.checked) next.add(point.key)
-                                  else next.delete(point.key)
-                                  return { ...current, [role.code]: next }
-                                })
-                                setDirty(current => new Set(current).add(role.code))
-                              }}
+                              onChange={(event) => { toggle(role.code, point.key, event.target.checked) }}
                             />
                             {global && (isDepartmentRole(role.code) || isAppRole(role.code))
                               ? <span className={styles.onlyAdmin}>仅管理员</span>
