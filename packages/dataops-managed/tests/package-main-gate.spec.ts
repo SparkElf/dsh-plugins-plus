@@ -66,12 +66,28 @@ describe('verify-package-main', () => {
     expect(verifyTarball(file)).toEqual({ name: '@sparkelf/dsh-demo', version: '1.0.0' })
   })
 
-  it('names the missing main entry, which is the published-broken-package case', () => {
-    // The 0.3.34 incident: the build emptied lib/ before failing, and the tarball shipped
-    // without it. `main` is the file the launcher imports first.
-    const file = tarball(MANIFEST, { 'lib/client.js': 'export {}\n' })
-    expect(() => verifyTarball(file)).toThrow(/lib\/index\.js/)
-    expect(() => verifyTarball(file)).toThrow(/from package\.json main/)
+  it('rejects the 0.3.34 tarball shape: types and skills, no runtime entry', () => {
+    // The published 0.3.34 carried exactly this shape: the build had emptied lib/ before
+    // failing, and `npm pack --ignore-scripts` shipped skills plus type declarations. The
+    // gate must fail on the file the launcher imports first.
+    const file = tarball(MANIFEST, {
+      'lib/types/index.d.ts': 'export {}\n',
+      'lib/types/client/index.d.ts': 'export {}\n',
+      'skills/dataops-collect/SKILL.md': '# collect\n',
+    })
+    const message = (() => {
+      try {
+        verifyTarball(file)
+        return ''
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    })()
+    expect(message).toContain('missing lib/index.js (from package.json main)')
+    expect(message).toContain('missing lib/client.js (from package.json exports["./client"].default)')
+    // The diagnostic lists what lib/ actually holds, so a maintainer sees types-only at once.
+    expect(message).toContain('lib/ contains:')
+    expect(message).toContain('package/lib/types/index.d.ts')
   })
 
   it('names a missing exports default even when main exists', () => {
