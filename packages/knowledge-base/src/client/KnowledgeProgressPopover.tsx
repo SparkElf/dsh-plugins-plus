@@ -312,7 +312,11 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     // 只保留最近 10 分钟的提取任务：Host 的 extract.status 会返回历史任务，
     // 全部堆进「任务队列」会淹掉读者刚发起的那一条。
     const recentCutoff = Date.now() - 10 * 60_000
+    // `.md` 是派生产物：源文件已经在队列里时不再单独显示一行，提取状态挂在源文件行上。
+    const sourceNames = new Set([...props.uploads.map(task => basename(task.name)), ...merged.rows.map(task => basename(task.relPath))])
     for (const task of byPath.values()) {
+      const name = basename(task.relPath)
+      if (name.endsWith('.md') && sourceNames.has(name.slice(0, -3))) continue
       const at = Date.parse(task.queuedAt ?? task.startedAt ?? task.finishedAt ?? '')
       if (!Number.isFinite(at) || at < recentCutoff) continue
       rows.push(extractionRow(task, false))

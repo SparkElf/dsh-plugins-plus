@@ -315,9 +315,9 @@
 .progressTrack {
   position: relative;
   flex: 1 1 auto;
-  height: 4px;
+  height: 6px;
   border-radius: 999px;
-  background: var(--dsw-alias-border-l2);
+  background: rgba(255, 255, 255, .08);
   overflow: hidden;
 }
 
@@ -326,7 +326,8 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--dsw-alias-brand-primary);
+  background: linear-gradient(90deg, var(--dsw-alias-brand-primary), var(--dsw-alias-state-business-primary));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
   transition: width 120ms linear;
 }
 
@@ -348,7 +349,7 @@
 /* Tabular figures so the number does not jitter the layout as it climbs. */
 .progressPercent {
   flex: none;
-  min-width: 34px;
+  min-width: 38px;
   text-align: right;
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xxxs-11);

@@ -365,7 +365,7 @@ export function KnowledgeAudit(props: KnowledgeAuditProps) {
                     the tooltip preserves both without widening the column. An entry
                     written before labels were recorded falls back to its id.
                   */}
-                  <td title={entry.actor}>{entry.actorLabel ?? entry.actor}</td>
+                  <td title={entry.actor}>{entry.actorLabel ?? actorLabel(entry.actor, c)}</td>
                   {/* The action word comes from the locale table, so a new action the
                       Host adds later shows its raw value instead of a blank cell. */}
                   <td>{actionLabel(entry.action, c)}</td>
@@ -452,9 +452,27 @@ export function KnowledgeAudit(props: KnowledgeAuditProps) {
  * @returns The localized action name.
  */
 function actionLabel(action: string, c: (key: string) => string): string {
-  const key = 'auditAction' + action.charAt(0).toUpperCase() + action.slice(1)
+  // `external-change` and any future `foo_bar` value must resolve to a camel-case key
+  // (`auditActionExternalChange`) instead of leaking the raw enum into the table.
+  const normalized = action.replace(/[-_]([a-z])/gu, (_match, letter: string) => letter.toUpperCase())
+  const key = 'auditAction' + normalized.charAt(0).toUpperCase() + normalized.slice(1)
   const label = c(key)
   // The resolver answers the key itself when it has no entry; showing that would be
   // no more readable than the raw action, so the raw value wins.
   return label === key ? action : label
+}
+
+/**
+ * The localized name for a recorded actor.
+ *
+ * `external-change` is the file watcher's actor id; older entries were written before
+ * the Host recorded a display label, so the raw id would otherwise reach the table.
+ * @param actor - the actor id as the Host records it.
+ * @param c - copy resolver.
+ * @returns The localized name, or the id when it is not a known actor.
+ */
+function actorLabel(actor: string, c: (key: string) => string): string {
+  if (actor === 'external-change' || actor === 'externalChange') return c('auditActorExternalChange')
+  if (actor === 'system') return c('auditActorSystem')
+  return actor
 }
