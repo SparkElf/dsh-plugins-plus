@@ -59,7 +59,13 @@ const readMeta = (value: unknown): ResourceTabMeta => {
   }
 }
 
-const buildEmbedUrl = (config: ResourceTabConfig, meta: ResourceTabMeta): string => {
+/** Host color scheme; DSH marks a dark document on `<body data-ds-dark-theme>`. */
+type HostTheme = 'dark' | 'light'
+
+const readHostTheme = (): HostTheme =>
+  document.body.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light'
+
+const buildEmbedUrl = (config: ResourceTabConfig, meta: ResourceTabMeta, theme: HostTheme): string => {
   const base = config.embedBaseUrl.replace(/\/+$/u, '')
   // The workspace JWT travels in the fragment: a URL hash is never sent to the server and does
   // not appear in access logs. The embed page consumes it before its first request, stores it
@@ -69,11 +75,11 @@ const buildEmbedUrl = (config: ResourceTabConfig, meta: ResourceTabMeta): string
   // search/view switch, pagination and the product card (checkbox, icon, 已启用, tag chips,
   // icon group). It is embedded whole — no extra chrome is added around it.
   if (meta.resourceId !== undefined && (meta.mode === 'detail' || meta.mode === 'audit')) {
-    const params = new URLSearchParams({ assetTab: 'resources', prototype: 'resource-detail', resourceId: String(meta.resourceId), embed: '1' })
+    const params = new URLSearchParams({ assetTab: 'resources', prototype: 'resource-detail', resourceId: String(meta.resourceId), embed: '1', theme })
     if (meta.mode === 'audit') params.set('tab', 'audit')
     return `${base}/assets?${params.toString()}${hash}`
   }
-  return `${base}/assets?assetTab=resources&embed=1${hash}`
+  return `${base}/assets?assetTab=resources&embed=1&theme=${theme}${hash}`
 }
 
 const frameStyle: CSSProperties = {
@@ -108,9 +114,12 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
   const [notice, setNotice] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
   const [filter, setFilter] = useState<ResourceFilter>({ scope: 'all' })
+  // Captured once per mount: the URL carries the initial palette, later switches arrive as
+  // messages so a theme change never remounts (and reloads) the frame.
+  const [theme] = useState<HostTheme>(readHostTheme)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const meta = readMeta(tab.meta)
-  const src = useMemo(() => config === null ? '' : buildEmbedUrl(config, meta), [config, meta.resourceId, meta.mode, meta.nonce, reloadKey])
+  const src = useMemo(() => config === null ? '' : buildEmbedUrl(config, meta, theme), [config, meta.resourceId, meta.mode, meta.nonce, theme, reloadKey])
 
   useEffect(() => {
     let live = true
@@ -219,6 +228,29 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
     frame.postMessage({ source: 'dsh-host', type: 'filter', ...payload }, '*')
   }, [filter])
 
+  const postTheme = useCallback((value: HostTheme): void => {
+    iframeRef.current?.contentWindow?.postMessage(
+      { source: 'dsh-host', type: 'dataops-theme', theme: value },
+      '*',
+    )
+  }, [])
+
+  // DSH switches palette by toggling `data-ds-dark-theme` on <body>. The portal iframe is a
+  // separate document and cannot inherit that attribute, so mirror it into a message: the URL
+  // parameter covers the first load and this observer covers every switch after it, without
+  // reloading the frame.
+  useEffect(() => {
+    let current = readHostTheme()
+    const observer = new MutationObserver(() => {
+      const next = readHostTheme()
+      if (next === current) return
+      current = next
+      postTheme(next)
+    })
+    observer.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+    return () => observer.disconnect()
+  }, [postTheme])
+
   useEffect(() => { postFilter() }, [postFilter])
   useEffect(() => {
     if (!notice) return undefined
@@ -255,7 +287,7 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"
           referrerPolicy="no-referrer"
           style={{ ...frameStyle, display: loading ? 'none' : 'block' }}
-          onLoad={() => { setLoading(false); postFilter() }}
+          onLoad={() => { setLoading(false); postFilter(); postTheme(readHostTheme()) }}
           onError={() => {
             setLoading(false)
             setError('数据资源页加载失败')
