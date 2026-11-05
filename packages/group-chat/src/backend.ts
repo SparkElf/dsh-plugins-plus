@@ -68,6 +68,10 @@ export interface RoomSummary {
   readonly reasoningEffort: string | null
   readonly memberCount: number
   readonly joined: boolean
+  /** Unread messages for this account; computed by the room server. */
+  readonly unreadCount?: number
+  /** The subset of {@link unreadCount} that mention this account. */
+  readonly mentionCount?: number
   readonly createdAt: string
   readonly updatedAt: string
 }

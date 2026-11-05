@@ -265,7 +265,15 @@ export function createRoomStore(): RoomStore {
       }
     },
     open: (roomId) => {
-      set({ activeRoomId: roomId })
+      // Opening a room is the reader's acknowledgement: clear the mention/unread badge
+      // immediately rather than waiting for the next room-list refresh, which is also what
+      // makes the badge disappear the moment the conversation is on screen.
+      set({
+        activeRoomId: roomId,
+        ...(state.rooms === undefined
+          ? {}
+          : { rooms: state.rooms.map(room => room.id === roomId ? { ...room, unreadCount: 0, mentionCount: 0 } : room) }),
+      })
       // Read on open rather than on every side-bar refresh: the roster changes rarely, and the
       // side bar refreshes every few seconds — fetching it there would be a steady stream of
       // requests for data that almost never differs.
