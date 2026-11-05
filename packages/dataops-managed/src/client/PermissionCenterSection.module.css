@@ -12,15 +12,26 @@
 
 .head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
+.headText {
+  min-width: 0;
+}
+
+.headActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
 .title {
   margin: 0;
-  font-size: 18px;
-  line-height: 26px;
+  font-size: 20px;
+  line-height: 28px;
   font-weight: 600;
   color: var(--dsw-alias-label-primary);
 }
@@ -45,25 +56,82 @@
 
 .tabs {
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 0;
   border-bottom: 1px solid var(--dsw-alias-border-l1);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tabGroup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.tabGroupLabel {
+  margin-right: 2px;
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.tabDivider {
+  width: 1px;
+  height: 16px;
+  margin: 0 12px;
+  background: var(--dsw-alias-border-l2);
+  flex: none;
 }
 
 .tab {
-  height: 32px;
-  padding: 0 12px;
+  height: 34px;
+  padding: 0 10px;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-secondary, #8ea6c6);
   font-size: 13px;
+  font-weight: 400;
   cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 4px 4px 0 0;
+}
+
+.tab:hover {
+  background: rgba(255, 255, 255, .04);
 }
 
 .tabActive {
-  color: var(--dsw-alias-state-business-primary);
-  border-bottom-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-label-primary, #fff);
+  border-bottom-color: var(--dsw-alias-brand-primary, #2563eb);
+  font-weight: 600;
+}
+
+.tabBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-caption);
+  font-size: 10px;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .notice,
@@ -96,6 +164,42 @@
   margin: 0;
   font-size: 13px;
   font-weight: 600;
+}
+
+.matrixHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.roleSearch {
+  width: 240px;
+  max-width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  outline: none;
+}
+
+.roleSearch::placeholder {
+  color: var(--dsw-alias-label-caption);
+}
+
+.roleSearch:focus {
+  border-color: var(--dsw-alias-brand-primary, #2563eb);
+}
+
+.empty {
+  margin: 0;
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
 }
 
 .matrixScroll,

@@ -90,12 +90,18 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
   const resourceWritable = writable || actorRole === 'DEPT_ADMIN'
   const superAdmin = context === null ? knownAdmin : context.role === 'SUPER_ADMIN' || demo
   const canAssignDepartment = writable && (superAdmin || actorRole === 'ADMIN')
-  const labels: { key: PermissionTab; label: string }[] = [
-    { key: 'roles', label: t('permTabRoles') },
-    { key: 'members', label: t('permTabMembers') },
-    { key: 'departments', label: t('permTabDepartments') },
-    { key: 'resources', label: t('permTabResources') },
+  const tabs: { key: PermissionTab; label: string; group: string; count: number }[] = [
+    { key: 'roles', label: t('permTabRoles'), group: t('permGroupRoles'), count: overview?.matrix.roles.length ?? 0 },
+    { key: 'members', label: t('permTabMembers'), group: t('permGroupRoles'), count: overview?.members.length ?? 0 },
+    { key: 'departments', label: t('permTabDepartments'), group: t('permGroupOrg'), count: overview?.departments.length ?? 0 },
+    { key: 'resources', label: t('permTabResources'), group: t('permGroupResources'), count: overview?.resources.length ?? 0 },
   ]
+  const tabGroups = tabs.reduce<{ group: string; items: typeof tabs }[]>((groups, item) => {
+    const existing = groups.find(group => group.group === item.group)
+    if (existing === undefined) groups.push({ group: item.group, items: [item] })
+    else existing.items.push(item)
+    return groups
+  }, [])
 
   const save = async (section: PermissionTab, value: unknown): Promise<{ ok: boolean; reason?: string }> => {
     setBusy(true)
@@ -187,28 +193,37 @@ export function PermissionCenterSection({ t }: PermissionCenterSectionProps): Re
   return (
     <section className={styles.page} data-permission-center="">
       <header className={styles.head}>
-        <div>
+        <div className={styles.headText}>
           <h1 className={styles.title}>{t('permTitle')}</h1>
           <p className={styles.subtitle}>
             {roleName} · {departmentName}
             {demo ? <span className={styles.demo}>{t('permDemo')}</span> : null}
           </p>
         </div>
-        <Button variant="outline" size="sm" icon={<IconRefreshOutlineRegular size={16} />} onClick={() => { void load() }}>刷新</Button>
+        <div className={styles.headActions}>
+          <Button variant="outline" size="sm" icon={<IconRefreshOutlineRegular size={16} />} onClick={() => { void load() }}>{t('permRefresh')}</Button>
+        </div>
       </header>
 
       <div className={styles.tabs} role="tablist" aria-label={t('permTitle')}>
-        {labels.map(item => (
-          <button
-            key={item.key}
-            type="button"
-            role="tab"
-            aria-selected={tab === item.key}
-            className={tab === item.key ? styles.tab + ' ' + styles.tabActive : styles.tab}
-            onClick={() => { setTab(item.key) }}
-          >
-            {item.label}
-          </button>
+        {tabGroups.map((group, groupIndex) => (
+          <div className={styles.tabGroup} key={group.group}>
+            {groupIndex > 0 ? <span className={styles.tabDivider} aria-hidden="true" /> : null}
+            <span className={styles.tabGroupLabel}>{group.group}</span>
+            {group.items.map(item => (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.key}
+                className={tab === item.key ? styles.tab + ' ' + styles.tabActive : styles.tab}
+                onClick={() => { setTab(item.key) }}
+              >
+                {item.label}
+                <span className={styles.tabBadge}>{item.count}</span>
+              </button>
+            ))}
+          </div>
         ))}
       </div>
 
@@ -284,10 +299,25 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
   t: (key: keyof typeof en) => string
   onSaveAll: (changes: readonly { roleCode: string; permissionKeys: string[] }[]) => Promise<{ ok: boolean; reason?: string }>
 }): ReactNode {
-  const visibleRoles = useMemo(() => roles
-    .filter(role => role.systemKey === 'SUPER_ADMIN' || role.systemKey === 'ADMIN' || role.systemKey === 'DEPT_ADMIN' || role.systemKey === 'APP_USER'
-      || role.code === '超级管理员' || role.code === '管理员' || role.code === '部门管理员' || role.code === '应用人员' || role.code === '普通用户')
-    .map(role => (role.systemKey === 'APP_USER' || role.code === '应用人员' || role.code === '普通用户') ? { ...role, name: '普通用户' } : role), [roles])
+  // 全部角色：内置角色按固定顺序在前，自定义角色（systemKey === null）追加在后。
+  const visibleRoles = useMemo(() => {
+    const builtinOrder = ['SUPER_ADMIN', 'ADMIN', 'DEPT_ADMIN', 'APP_USER']
+    const rank = (role: RoleMatrixRow): number => {
+      const systemKey = role.systemKey ?? null
+      if (systemKey === null) return 100
+      const index = builtinOrder.indexOf(systemKey)
+      return index < 0 ? 50 : index
+    }
+    return [...roles]
+      .map(role => (role.systemKey === 'APP_USER' || role.code === '应用人员' || role.code === '普通用户') ? { ...role, name: '普通用户' } : role)
+      .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name, 'zh-CN'))
+  }, [roles])
+  const [roleQuery, setRoleQuery] = useState('')
+  const shownRoles = useMemo(() => {
+    const needle = roleQuery.trim().toLowerCase()
+    if (needle === '') return visibleRoles
+    return visibleRoles.filter(role => role.name.toLowerCase().includes(needle) || role.code.toLowerCase().includes(needle))
+  }, [visibleRoles, roleQuery])
   const groups = useMemo(() => {
     const hasSkill = permissions.some(point => point.group === 'skill' || point.group === '技能中心')
     const keyOf = (group: string): 'kb' | 'skill' | 'workflow' | 'automation' | null => {
@@ -341,14 +371,26 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
 
   return (
     <div className={styles.panel}>
-      <h2 className={styles.sectionTitle}>{t('permRoleMatrix')}</h2>
+      <div className={styles.matrixHead}>
+        <h2 className={styles.sectionTitle}>{t('permRoleMatrix')}</h2>
+        <input
+          className={styles.roleSearch}
+          value={roleQuery}
+          placeholder={t('permRoleSearch')}
+          aria-label={t('permRoleSearch')}
+          onChange={(event) => { setRoleQuery(event.target.value) }}
+        />
+      </div>
+      {shownRoles.length === 0 ? (
+        <p className={styles.empty}>{t('permRoleEmpty')}</p>
+      ) : (
       <div className={styles.matrixScroll}>
         <table className={styles.matrix}>
           <thead>
             <tr>
               <th>{t('permPermissionModule')}</th>
               <th>{t('permPermissionPoint')}</th>
-              {visibleRoles.map(role => <th key={role.code}>{role.name}</th>)}
+              {shownRoles.map(role => <th key={role.code}>{role.name}</th>)}
             </tr>
           </thead>
           <tbody>
@@ -369,7 +411,7 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
                         </button>
                         {point.description === undefined ? null : <span className={styles.permDescription}>{point.description}</span>}
                       </th>
-                      {visibleRoles.map(role => (
+                      {shownRoles.map(role => (
                         <td key={role.code}>
                           <label className={styles.permission}>
                             <input
@@ -400,6 +442,7 @@ function RoleMatrix({ roles, permissions, writable, actorRole, busy, t, onSaveAl
           </tbody>
         </table>
       </div>
+      )}
       <div className={styles.panelFoot}>
         {error === null ? null : <span className={styles.error}>{error}</span>}
         {actorRole !== 'SUPER_ADMIN' ? <span className={styles.readOnly}>{t('permSuperAdminOnly')}</span> : null}
