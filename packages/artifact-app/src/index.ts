@@ -349,11 +349,22 @@ export function apply(ctx: Context, config: ConfigValues): void {
         const effectiveAuth = bodyToken !== undefined && bodyToken !== ''
           ? `Bearer ${bodyToken}`
           : authorization
+        // 兜底：调用方没有带 token 时用本工作区的同一份 credential 补 Authorization。
+        // 门户 /api/artifact-apps/<id>/query 的 AuthGuard 只认 Bearer；缺头会 401。
+        let gatewayAuth = typeof effectiveAuth === 'string' && effectiveAuth.trim() !== ''
+          ? effectiveAuth
+          : undefined
+        if (gatewayAuth === undefined) {
+          try {
+            gatewayAuth = 'Bearer ' + await api.token()
+            ctx.logger.warn('artifact-app: gateway used the workspace credential for ' + upstream)
+          } catch { /* 无 credential 时交给 DataOps 返回 401 */ }
+        }
         const init: RequestInit = {
           method: request.method,
           ...(rawBody !== undefined ? { body: JSON.stringify(rawBody) } : {}),
         }
-        const result = await api.gateway(upstream, init, typeof effectiveAuth === 'string' ? effectiveAuth : undefined)
+        const result = await api.gateway(upstream, init, gatewayAuth)
         response.writeHead(result.status, {
           ...cors,
           'content-type': result.contentType,
