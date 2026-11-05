@@ -227,7 +227,12 @@ export function survivingOptimistic(
   now: number,
 ): OptimisticExtraction[] {
   const known = new Set(reported.map(task => task.relPath))
-  return pending.filter(entry => !known.has(entry.relPath) && optimisticAlive(entry, now))
+  // The host reports the AUTHORITATIVE path while the click named the VIEW path
+  // (`global/…` vs the actual top-level folder). Match the basename too, otherwise the
+  // optimistic row survives its own result and the card shows both forever.
+  const knownNames = new Set(reported.map(task => task.relPath.slice(task.relPath.lastIndexOf('/') + 1)))
+  const basename = (value: string): string => value.slice(value.lastIndexOf('/') + 1)
+  return pending.filter(entry => !known.has(entry.relPath) && !knownNames.has(basename(entry.relPath)) && optimisticAlive(entry, now))
 }
 
 /**
