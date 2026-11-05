@@ -1767,17 +1767,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
           {/* The header covers only the content column now, so the rail keeps its
               own top-left corner. It still states what this surface is and which
               tree it governs, once for the page. */}
-          <header className={styles.header}>
+          {scope === 'graph' ? null : <header className={styles.header}>
             <h2 className={styles.headerTitle}>
-              {scope === 'graph'
-                ? t('scopeGraph') + (activeGraph === undefined
-                  ? ''
-                  : ' / ' + (activeGraph.group === ''
-                    ? t(activeGraph.scope === 'global'
-                      ? 'bucketGlobal'
-                      : activeGraph.scope === 'department' ? 'bucketDepartment' : 'bucketPersonal')
-                    : activeGraph.group) + ' / ' + activeGraph.name)
-                : sectionTitle(t, rendered)}
+              {sectionTitle(t, rendered)}
             </h2>
             {/* The fact is the second item on the title's own line, not a line under it:
                 the page names itself and says how big the tree is in one glance. It is
@@ -1808,7 +1800,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   setProgressRefresh(n => n + 1)
                 }}
               />
-              {scope === 'graph' ? null : pageAction}
+              {pageAction}
             </div>
             {/* Only for the state the reader can act on: the pointer resolves itself,
                 and saying so keeps them from hunting for the rebuild button. Its own
@@ -1816,7 +1808,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
             {status.mountState === 'pointer-missing' && (
               <p className={styles.headerHint}>{t('viewNotBuiltHint')}</p>
             )}
-          </header>
+          </header>}
           <section
             className={styles.content}
             // The canvas owns the whole column: its pan surface must not be inset by
@@ -1833,6 +1825,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 {...(activeGraphId === undefined ? {} : { activeGraphId })}
                 {...(activeTopicId === undefined ? {} : { activeTopicId })}
                 onRetry={() => { void graph.reload() }}
+                onOpenDocument={(path) => { void openDocument(path) }}
               />
             )}
             {scope !== 'graph' && rendered.kind === 'home' && (

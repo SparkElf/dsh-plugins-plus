@@ -33,6 +33,8 @@ export interface KnowledgeGraphViewProps {
   activeTopicId?: string
   /** Retry a failed read. */
   onRetry: () => void
+  /** Open one document (view-relative path) in the right sidebar. */
+  onOpenDocument?: (path: string) => void
 }
 
 /** One message the canvas page accepts. */
@@ -204,6 +206,10 @@ export function KnowledgeGraphView(props: KnowledgeGraphViewProps) {
       if (message.type === 'kg:ready') {
         sendTheme()
         if (!sentDataRef.current && graphs.length > 0) sendAllRef.current()
+      }
+      if (message.type === 'kg:open-document') {
+        const path = (message as { path?: unknown }).path
+        if (typeof path === 'string' && path !== '') props.onOpenDocument?.(path)
       }
     }
     window.addEventListener('message', onMessage)
