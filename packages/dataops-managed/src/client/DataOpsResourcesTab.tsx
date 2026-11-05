@@ -59,11 +59,22 @@ const readMeta = (value: unknown): ResourceTabMeta => {
   }
 }
 
-/** Host color scheme; DSH marks a dark document on `<body data-ds-dark-theme>`. */
+/** Host color scheme. */
 type HostTheme = 'dark' | 'light'
 
-const readHostTheme = (): HostTheme =>
-  document.body.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light'
+/**
+ * 读 DSH 当前明暗。不同 DSH 版本/主题实现落点不同，按优先级兜底：
+ * 1. `html.dark`（部分版本只切根节点 class）；
+ * 2. `html[data-theme="dark"]`；
+ * 3. `body[data-ds-dark-theme]`（0.2.4 的官方 boot-theme 落点）。
+ * 不能只看 body 属性：版本只切 html class 时 body 会一直保留首屏值。
+ */
+const readHostTheme = (): HostTheme => {
+  const root = document.documentElement
+  if (root.classList.contains('dark')) return 'dark'
+  if (root.dataset.theme === 'dark') return 'dark'
+  return document.body.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light'
+}
 
 /**
  * 门户 origin 归一化：同源代理部署（DSH 挂在门户路径前缀下，如 `/dsh/`）里，host config
@@ -275,20 +286,28 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
     )
   }, [])
 
-  // DSH switches palette by toggling `data-ds-dark-theme` on <body>. The portal iframe is a
-  // separate document and cannot inherit that attribute, so mirror it into a message: the URL
-  // parameter covers the first load and this observer covers every switch after it, without
-  // reloading the frame.
+  // DSH switches palette by changing document-level marks (`html.dark`, `data-theme`, or
+  // `body[data-ds-dark-theme]` depending on version). The portal iframe is a separate document,
+  // so mirror the resolved value into a message: the URL parameter covers the first load and
+  // these observers cover every switch after it, without reloading the frame.
+  // 必须同时观察 documentElement 的 class/theme 和 body 属性：只看 body 会在只切 html 的
+  // 版本上永远不触发。
   useEffect(() => {
     let current = readHostTheme()
-    const observer = new MutationObserver(() => {
+    const check = (): void => {
       const next = readHostTheme()
       if (next === current) return
       current = next
       postTheme(next)
-    })
-    observer.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
-    return () => observer.disconnect()
+    }
+    const rootObserver = new MutationObserver(check)
+    rootObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
+    const bodyObserver = new MutationObserver(check)
+    bodyObserver.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+    return () => {
+      rootObserver.disconnect()
+      bodyObserver.disconnect()
+    }
   }, [postTheme])
 
   useEffect(() => { postFilter() }, [postFilter])
