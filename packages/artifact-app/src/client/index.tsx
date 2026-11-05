@@ -11,11 +11,33 @@
 
 import { useEffect } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import { CockpitTab } from './CockpitTab.tsx'
+import { CockpitTab, type CockpitReferenceInput } from './CockpitTab.tsx'
 import { ArtifactFileViewer, isArtifactFile } from './ArtifactFileViewer.tsx'
 
 /** Client services this plugin reads; `slots` owns the always-mounted bridge seat. */
 export const inject = ['slots']
+
+/** Minimal composer surface used by the "添加到对话" hand-off. */
+interface SessionInputLike {
+  insertReference?: (ref: unknown, span: { start: number; end: number; draftRev: number }) => boolean
+  state?: { getSnapshot?: () => { draft: string; draftRev: number } }
+}
+
+/** Services the reference hand-off resolves lazily, mirroring the managed resource tab. */
+interface ConversationLike {
+  input?: { for?: (scope: unknown) => SessionInputLike | undefined }
+}
+
+interface SessionsLike {
+  scope?: (sessionId: string) => unknown | undefined
+}
+
+interface InputTriggersLike {
+  registerSource?: (source: unknown) => () => void
+}
+
+/** Reference source id shared by the chip codec and the inserted reference. */
+const REFERENCE_SOURCE = 'dataops-artifact-app'
 
 /** Tab id shared by registration, the bridge and the tools. */
 export const ARTIFACT_TAB_TYPE = 'dataops-artifact-apps'
@@ -90,12 +112,69 @@ export function apply(ctx: ClientContext): void {
     let disposeBridge: (() => void) | undefined
     let betterSidebarService: BetterSidebarLike | undefined
     const inject = (ctx as unknown as {
-      inject?: (names: readonly string[], callback: (injected: { betterSidebar?: BetterSidebarLike }) => void) => unknown
+      inject?: (names: readonly string[], callback: (injected: {
+        betterSidebar?: BetterSidebarLike
+        conversation?: ConversationLike
+        sessions?: SessionsLike
+        inputTriggers?: InputTriggersLike
+      }) => void) => unknown
     }).inject
-    inject?.(['betterSidebar'], (injected) => {
+    inject?.(['betterSidebar', 'conversation', 'sessions', 'inputTriggers'], (injected) => {
       const service = injected.betterSidebar
       if (service?.registerTab === undefined) return
       betterSidebarService = service
+
+      // The composer resolves this source's codec on submit and asks it for the model text.
+      // Same protocol as the DataOps resource tab: chip in the draft, readable block on send.
+      if (injected.inputTriggers?.registerSource !== undefined) {
+        const source = {
+          trigger: '@',
+          name: REFERENCE_SOURCE,
+          showGroupTitle: false,
+          candidates: async () => [],
+          codec: {
+            clipboardText: (ref: string) => {
+              try { return '@' + String((JSON.parse(ref) as { name?: unknown }).name ?? '驾驶舱') } catch { return '@驾驶舱' }
+            },
+            serialize: async (ref: string) => {
+              try {
+                const parsed = JSON.parse(ref) as { assetKind?: unknown; id?: unknown; name?: unknown; catalog?: unknown }
+                return '引用驾驶舱：\n\n```cockpit-ref\n' + JSON.stringify({
+                  kind: REFERENCE_SOURCE,
+                  assetKind: parsed.assetKind === 'template' ? 'template' : 'app',
+                  id: parsed.id,
+                  name: parsed.name,
+                  catalog: parsed.catalog ?? null,
+                }, null, 2) + '\n```\n'
+              } catch { return ref }
+            },
+          },
+        }
+        try { injected.inputTriggers.registerSource(source) } catch { /* HMR / duplicate source: keep the existing owner */ }
+      }
+
+      const insertArtifactReference = (item: CockpitReferenceInput, sessionId?: string): void => {
+        if (sessionId === undefined) throw new Error('no active session')
+        const input = injected.conversation?.input?.for?.(injected.sessions?.scope?.(sessionId))
+        if (input?.insertReference === undefined || input.state?.getSnapshot === undefined) throw new Error('composer is unavailable')
+        const state = input.state.getSnapshot()
+        const span = { start: state.draft.length, end: state.draft.length, draftRev: state.draftRev }
+        const inserted = input.insertReference({
+          source: REFERENCE_SOURCE,
+          ref: JSON.stringify({
+            kind: REFERENCE_SOURCE,
+            assetKind: item.kind,
+            id: item.id,
+            name: item.name,
+            catalog: item.catalog ?? null,
+          }),
+          label: item.name,
+          appearance: 'resource',
+          clipboardText: '@' + item.name,
+        } as never, span)
+        if (!inserted) throw new Error('输入框正忙，请稍后再试')
+      }
+
       disposeTab = service.registerTab({
         id: ARTIFACT_TAB_TYPE,
         title: '驾驶舱',
@@ -110,7 +189,10 @@ export function apply(ctx: ClientContext): void {
         description: 'DataOps 驾驶舱资产、预览与发布',
         order: 62,
         single: true,
-        component: ((props: Record<string, unknown>) => CockpitTab(props as never)) as never,
+        component: ((props: Record<string, unknown>) => CockpitTab({
+          ...(props as { tab: { meta?: unknown }; scope?: { sessionId?: string } }),
+          insertArtifactReference,
+        })) as never,
       })
       disposeViewer = service.registerFileViewer?.({
         id: ARTIFACT_VIEWER_ID,

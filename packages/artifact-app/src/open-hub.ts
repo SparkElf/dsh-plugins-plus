@@ -20,6 +20,8 @@ export const CONFIG_PATH = '/dsh-artifact-app/config'
 export const TOKEN_PATH = '/dsh-artifact-app/token'
 /** Same-origin app-list proxy used by the sidebar tab. */
 export const APPS_PATH = '/dsh-artifact-app/apps'
+/** Same-origin cockpit-template list proxy used by the sidebar tab. */
+export const TEMPLATES_PATH = '/dsh-artifact-app/templates'
 /** Same-origin preview creation used by the HTML file viewer. */
 export const PREVIEW_PATH = '/dsh-artifact-app/preview'
 /** Render route prefix; `:id` follows it. */

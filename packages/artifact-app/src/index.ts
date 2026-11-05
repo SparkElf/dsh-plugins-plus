@@ -31,6 +31,7 @@ import {
   OpenCockpitHub,
   PREVIEW_PATH,
   RENDER_PATH,
+  TEMPLATES_PATH,
   TOKEN_PATH,
 } from './open-hub.ts'
 import { assertCockpitHtml, cockpitCsp, injectCockpitRuntime } from './templates.ts'
@@ -158,7 +159,7 @@ export function apply(ctx: Context, config: ConfigValues): void {
         renderBaseUrl: RENDER_PATH,
         gatewayBaseUrl: GATEWAY_PATH + '/api/artifact-apps',
         tabType: ARTIFACT_TAB_TYPE,
-        dataopsWebBaseUrl: config.webBaseUrl.trim() || origin,
+        dataopsWebBaseUrl: config.webBaseUrl.trim() || requestOrigin(request),
       })
     },
   }), 'artifact-app: config route')
@@ -203,6 +204,21 @@ export function apply(ctx: Context, config: ConfigValues): void {
     },
   }), 'artifact-app: apps route')
 
+  // Cockpit templates for the same tab. Reads go through the workspace credential, like the
+  // app list, so the browser never needs a DataOps token to browse what it can instantiate.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: TEMPLATES_PATH,
+    handler: async (_request, response) => {
+      try {
+        const rows = await api.listTemplates()
+        writeJson(response, 200, { items: rows })
+      } catch (error) {
+        writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }), 'artifact-app: templates route')
+
   // File viewer drafts: one draft per workspace path, updated as the file changes.
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -243,18 +259,27 @@ export function apply(ctx: Context, config: ConfigValues): void {
         const url = new URL(request.url ?? '/', 'http://dsh.internal')
         const rest = url.pathname.slice(RENDER_PATH.length).replace(/^\/+/u, '')
         const id = decodeURIComponent(rest)
-        if (id === '' || id.includes('/')) { writeJson(response, 400, { error: '缺少驾驶舱 id' }); return }
-        const body = await api.getAppHtml(id)
+        // Two address forms: `<appId>` renders a published cockpit and `template/<id>` renders a
+        // template skeleton. Reject anything else so neither branch can read outside its id.
+        const templatePrefix = 'template/'
+        const templateId = id.startsWith(templatePrefix) ? id.slice(templatePrefix.length) : undefined
+        const targetId = templateId ?? id
+        if (targetId === '' || targetId.includes('/') || targetId.includes('\\') || targetId.includes('..') || targetId.startsWith('.')) {
+          writeJson(response, 400, { error: '缺少驾驶舱 id' }); return
+        }
+        const body = templateId === undefined
+          ? await api.getAppHtml(targetId)
+          : { html: (await api.getTemplateHtml(targetId)).html, templateId }
         assertCockpitHtml(body.html, config.htmlMaxBytes)
         // 把 asset://<逻辑名> 解析成素材 URL（shared 优先，模板素材需模板 id；当前应用没记模板时退化为 shared）
         const logicalNames = [...new Set([...body.html.matchAll(/asset:\/\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,62})/gu)].map((m) => m[1]))]
         let resolvedHtml = body.html
         if (logicalNames.length > 0) {
           // 解析顺序：模板素材优先（模板包里的 assets/），再用 shared 兜底。
-          const templateId = (body as { templateId?: string | null }).templateId ?? undefined
-          const templateUrls = templateId === undefined
+          const assetTemplateId = (body as { templateId?: string | null }).templateId ?? undefined
+          const templateUrls = assetTemplateId === undefined
             ? {}
-            : await api.resolveAssets(logicalNames, 'template', templateId).catch(() => ({} as Record<string, string>))
+            : await api.resolveAssets(logicalNames, 'template', assetTemplateId).catch(() => ({} as Record<string, string>))
           const rest = logicalNames.filter((name) => templateUrls[name] === undefined)
           const sharedUrls = rest.length === 0 ? {} : await api.resolveAssets(rest, 'shared').catch(() => ({} as Record<string, string>))
           for (const [name, url] of Object.entries({ ...sharedUrls, ...templateUrls })) {
