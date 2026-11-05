@@ -54,6 +54,21 @@ const readCockpitHtml = async (config: Config, htmlPath: string): Promise<string
 }
 
 /** Shape one app row for a tool answer. */
+/**
+ * 组件 HTML 里内联的可信 vendor 包（echarts-gl 等）不返回给模型。
+ * 与后端 `stripVendorBundles` 同一约定：只认 `data-vendor` 标记，不是用户输入。
+ */
+const stripVendorBundles = (html: string): string =>
+  html.replace(/<script\b[^>]*\bdata-vendor\b[^>]*>[\s\S]*?<\/script>/giu, '<!-- vendor bundle omitted -->')
+
+/** 组件契约（contract 是 Json，读时做窄化）。 */
+const componentMeta = (contract: unknown) => {
+  const record = typeof contract === 'object' && contract !== null ? contract as Record<string, unknown> : {}
+  const strings = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '') : []
+  return { tags: strings(record.tags), capabilities: strings(record.capabilities), requires: strings(record.requires) }
+}
+
 const appSummary = (app: { id: string; name: string; description?: string | null; catalog?: string | null; status: string; currentVersion: number; publishedVersion: number; refreshIntervalSeconds?: number; keepConnection?: boolean; canManage?: boolean; updatedAt: string }) => ({
   id: app.id,
   name: app.name,
@@ -142,11 +157,75 @@ export function registerCockpitTools(deps: ToolDeps): void {
         catalog: meta.catalog ?? null,
         slots: meta.contract?.slots ?? [],
         question: meta.contract?.question ?? null,
-        version: body.version,
+        // 模板 HTML 接口只返回 { id, html }；版本取元数据，避免输出里出现 undefined。
+        version: meta.currentVersion ?? body.version ?? 1,
         html: body.html,
       })
     },
   })), 'artifact-app: template get tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'component_search',
+    description:
+      '优先复用模板里已有的组件实现（直接改数据/文案/样式）。\n'
+      + '只有当模板中没有该组件、或模板里的实现达不到需求，且你自己不确定怎么写时，才检索组件库获取参考实现。\n'
+      + '适用：已选定模板/正在改模板，但其中某个组件（图表、地图、交互控件）不知道怎么落地。\n'
+      + '不适用：还没选模板（先看模板库）；或自己完全会写。',
+    parameters: {
+      query: { type: 'string', description: '关键词：能力、图表类型或业务名，如 geo3d / 南宁 / 3D 地图。' },
+      tags: { type: 'string', description: '逗号分隔的能力标签，如 geo3d,3d-map,echarts-gl。' },
+      limit: { type: 'number', description: '最大条数，默认 10，最多 20。' },
+    },
+    output: { schema: open, render: textOutput },
+    execute: async (args: { query?: string; tags?: string; limit?: number }) => {
+      const tags = args.tags === undefined ? undefined : args.tags.split(',').map((tag) => tag.trim()).filter((tag) => tag !== '')
+      const items = await api.searchComponents({ q: args.query, tags, limit: args.limit })
+      return toolJson({
+        ok: true,
+        total: items.length,
+        items: items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          description: item.description ?? null,
+          tags: item.tags ?? [],
+          capabilities: item.capabilities ?? [],
+          requires: item.requires ?? [],
+          version: item.currentVersion ?? 1,
+          snippet: item.snippet ?? '',
+        })),
+      })
+    },
+  })), 'artifact-app: component search tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'component_read',
+    description:
+      '读取一个组件参考实现的完整 HTML（内联 vendor 库已省略，依赖见 requires）与元数据。'
+      + '改造模板已有组件时，优先在模板实现上改，不要整段替换。',
+    parameters: {
+      id: { type: 'string', required: true, description: 'component_search 返回的组件 id，如 nanning-geo3d。' },
+      part: { type: 'string', description: "meta | html | all（默认 all）。" },
+    },
+    output: { schema: open, render: textOutput },
+    execute: async (args: { id: string; part?: string }) => {
+      const [meta, body] = await Promise.all([api.getTemplate(args.id), api.getTemplateHtml(args.id)])
+      const contract = componentMeta(meta.contract)
+      const part = args.part === 'meta' || args.part === 'html' ? args.part : 'all'
+      return toolJson({
+        ok: true,
+        id: meta.id,
+        name: meta.name,
+        description: meta.description ?? null,
+        catalog: meta.catalog ?? null,
+        tags: contract.tags,
+        capabilities: contract.capabilities,
+        requires: contract.requires,
+        version: meta.currentVersion ?? body.version ?? 1,
+        note: '若是改造模板已有组件，优先在模板实现上改，不要整段替换；内联 vendor 库已省略（见 requires）。',
+        html: part === 'meta' ? null : stripVendorBundles(body.html),
+      })
+    },
+  })), 'artifact-app: component read tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'cockpit_list',

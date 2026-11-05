@@ -204,14 +204,16 @@ export function apply(ctx: Context, config: ConfigValues): void {
     },
   }), 'artifact-app: apps route')
 
-  // Cockpit templates for the same tab. Reads go through the workspace credential, like the
-  // app list, so the browser never needs a DataOps token to browse what it can instantiate.
+  // Cockpit templates/components for the same tab. Reads go through the workspace credential,
+  // like the app list, so the browser never needs a DataOps token to browse either library.
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: TEMPLATES_PATH,
-    handler: async (_request, response) => {
+    handler: async (request, response) => {
       try {
-        const rows = await api.listTemplates()
+        const url = new URL(request.url ?? '/', 'http://dsh.internal')
+        const appType = url.searchParams.get('appType') === 'COMPONENT' ? 'COMPONENT' : 'COCKPIT'
+        const rows = await api.listTemplates(appType)
         writeJson(response, 200, { items: rows })
       } catch (error) {
         writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
@@ -267,10 +269,17 @@ export function apply(ctx: Context, config: ConfigValues): void {
         if (targetId === '' || targetId.includes('/') || targetId.includes('\\') || targetId.includes('..') || targetId.startsWith('.')) {
           writeJson(response, 400, { error: '缺少驾驶舱 id' }); return
         }
-        const body = templateId === undefined
-          ? await api.getAppHtml(targetId)
-          : { html: (await api.getTemplateHtml(targetId)).html, templateId }
-        assertCockpitHtml(body.html, config.htmlMaxBytes)
+        let body: { html: string; templateId?: string | null }
+        let isComponent = false
+        if (templateId === undefined) {
+          body = await api.getAppHtml(targetId)
+        } else {
+          const meta = await api.getTemplate(targetId)
+          isComponent = meta.appType === 'COMPONENT'
+          body = { html: (await api.getTemplateHtml(targetId)).html, templateId }
+        }
+        // 组件是参考实现，没有 artifactApp 契约标记；只有应用/驾驶舱模板才校验。
+        if (!isComponent) assertCockpitHtml(body.html, config.htmlMaxBytes)
         // 把 asset://<逻辑名> 解析成素材 URL（shared 优先，模板素材需模板 id；当前应用没记模板时退化为 shared）
         const logicalNames = [...new Set([...body.html.matchAll(/asset:\/\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,62})/gu)].map((m) => m[1]))]
         let resolvedHtml = body.html

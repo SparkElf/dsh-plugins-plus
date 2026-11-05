@@ -131,9 +131,24 @@ export class ArtifactApi {
     return this.request('/api/auth/me')
   }
 
-  /** List published cockpit templates. */
-  listTemplates(): Promise<ArtifactTemplateRow[]> {
-    return this.request('/api/artifact-templates?appType=COCKPIT')
+  /** List published templates or components (`appType=COCKPIT|COMPONENT`). */
+  listTemplates(appType: 'COCKPIT' | 'COMPONENT' = 'COCKPIT'): Promise<ArtifactTemplateRow[]> {
+    return this.request('/api/artifact-templates?appType=' + appType)
+  }
+
+  /**
+   * Search the component reference library.
+   * @param query - keyword matched against name/description/tags and the HTML body.
+   * @param tags - capability tags, e.g. `geo3d,3d-map`.
+   * @param limit - max hits (1..20).
+   */
+  searchComponents(query: { q?: string; tags?: string[]; limit?: number } = {}): Promise<Array<ArtifactTemplateRow & { snippet?: string; tags?: string[]; capabilities?: string[]; requires?: string[] }>> {
+    const params = new URLSearchParams()
+    if (query.q !== undefined && query.q.trim() !== '') params.set('q', query.q.trim())
+    if (query.tags !== undefined && query.tags.length > 0) params.set('tags', query.tags.join(','))
+    if (query.limit !== undefined) params.set('limit', String(query.limit))
+    const suffix = params.toString()
+    return this.request('/api/artifact-templates/components/search' + (suffix === '' ? '' : '?' + suffix))
   }
 
   /** Read one template's metadata and contract. */

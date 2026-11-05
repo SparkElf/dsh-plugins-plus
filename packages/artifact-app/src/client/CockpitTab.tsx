@@ -57,7 +57,7 @@ interface TemplateRow {
 }
 
 interface SelectedCockpit {
-  kind: 'app' | 'template'
+  kind: 'app' | 'template' | 'component'
   /** Address the render route understands: `<appId>` or `template/<templateId>`. */
   viewerId: string
   name: string
@@ -221,6 +221,10 @@ const CSS = `
 .dsh-ac__badge.is-app {
   color: var(--dsw-alias-state-business-primary, #7aaaff);
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #7aaaff) 15%, transparent);
+}
+.dsh-ac__badge.is-component {
+  color: var(--dsw-alias-state-success-primary, #22c55e);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 15%, transparent);
 }
 .dsh-ac__badge.is-template {
   /* 模板用「蓝 × 红」两个既有 token 混出紫色，不引入新的硬编码色值。 */
@@ -420,9 +424,11 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
   const meta = readMeta(tab.meta)
   const [apps, setApps] = useState<AppRow[]>([])
   const [templates, setTemplates] = useState<TemplateRow[]>([])
+  const [components, setComponents] = useState<TemplateRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [templateError, setTemplateError] = useState<string | null>(null)
+  const [componentError, setComponentError] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [selected, setSelected] = useState<SelectedCockpit | null>(
     meta.cockpitId === undefined
@@ -435,24 +441,29 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
     setLoading(true)
     setError(null)
     setTemplateError(null)
-    const [appsResult, templatesResult] = await Promise.allSettled([
+    setComponentError(null)
+    const fetchList = (url: string) => fetch(url, { headers: { accept: 'application/json' } })
+      .then(async (response) => {
+        const payload = await response.json() as { items?: TemplateRow[]; error?: string }
+        if (!response.ok) throw new Error(payload.error ?? 'HTTP ' + String(response.status))
+        return readItems<TemplateRow>(payload)
+      })
+    const [appsResult, templatesResult, componentsResult] = await Promise.allSettled([
       fetch('/dsh-artifact-app/apps?pageSize=50', { headers: { accept: 'application/json' } })
         .then(async (response) => {
           const payload = await response.json() as { items?: AppRow[]; error?: string }
           if (!response.ok) throw new Error(payload.error ?? 'HTTP ' + String(response.status))
           return payload.items ?? []
         }),
-      fetch('/dsh-artifact-app/templates', { headers: { accept: 'application/json' } })
-        .then(async (response) => {
-          const payload = await response.json() as { items?: TemplateRow[]; error?: string }
-          if (!response.ok) throw new Error(payload.error ?? 'HTTP ' + String(response.status))
-          return readItems<TemplateRow>(payload)
-        }),
+      fetchList('/dsh-artifact-app/templates'),
+      fetchList('/dsh-artifact-app/templates?appType=COMPONENT'),
     ])
     if (appsResult.status === 'fulfilled') setApps(appsResult.value)
     else setError(appsResult.reason instanceof Error ? appsResult.reason.message : String(appsResult.reason))
     if (templatesResult.status === 'fulfilled') setTemplates(templatesResult.value)
     else setTemplateError(templatesResult.reason instanceof Error ? templatesResult.reason.message : String(templatesResult.reason))
+    if (componentsResult.status === 'fulfilled') setComponents(componentsResult.value)
+    else setComponentError(componentsResult.reason instanceof Error ? componentsResult.reason.message : String(componentsResult.reason))
     setLoading(false)
   }, [])
 
@@ -474,8 +485,9 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
     () => [...new Set([
       ...apps.map((app) => app.catalog),
       ...templates.map((template) => template.catalog),
+      ...components.map((component) => component.catalog),
     ].filter((value): value is string => typeof value === 'string' && value !== ''))],
-    [apps, templates],
+    [apps, templates, components],
   )
 
   const openApp = (app: AppRow): void => setSelected({ kind: 'app', viewerId: app.id, name: app.name })
@@ -483,6 +495,11 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
     kind: 'template',
     viewerId: 'template/' + template.id,
     name: template.name,
+  })
+  const openComponent = (component: TemplateRow): void => setSelected({
+    kind: 'component',
+    viewerId: 'template/' + component.id,
+    name: component.name,
   })
 
   const addToConversation = (item: CockpitReferenceInput): void => {
@@ -567,8 +584,8 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
         <div className="dsh-ac-viewer">
           <div className="dsh-ac-viewer__head">
             <button type="button" className="dsh-ac-viewer__back" onClick={() => setSelected(null)}>← 列表</button>
-            <span className={`dsh-ac__badge ${selected.kind === 'template' ? 'is-template' : 'is-app'}`}>
-              {selected.kind === 'template' ? '模板' : '应用'}
+            <span className={`dsh-ac__badge ${selected.kind === 'component' ? 'is-component' : selected.kind === 'template' ? 'is-template' : 'is-app'}`}>
+              {selected.kind === 'component' ? '组件' : selected.kind === 'template' ? '模板' : '应用'}
             </span>
             <div className="dsh-ac-viewer__title">{selected.name}</div>
             <button
@@ -679,7 +696,7 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
         <div className="dsh-ac__heading">
           <div className="dsh-ac__name">驾驶舱</div>
           <div className="dsh-ac__sub">
-            {apps.length} 个应用 · {templates.length} 个模板
+            {apps.length} 个应用 · {templates.length} 个模板 · {components.length} 个组件
             {catalogs.length > 0 ? ' · ' + catalogs.join(' / ') : ''}
           </div>
         </div>
@@ -787,6 +804,53 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
                           data-action="insert"
                           onClick={() => addToConversation({ kind: 'template', id: template.id, name: template.name, catalog: template.catalog })}
                         >添加到对话</button>
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {!loading ? (
+          <section className="dsh-ac__section">
+            <div className="dsh-ac__section-head">
+              <span>组件</span>
+              <span className="dsh-ac__count">{components.length}</span>
+            </div>
+            {componentError !== null ? <div className="dsh-ac__error" role="alert">组件加载失败：{componentError}</div> : null}
+            {componentError === null && components.length === 0 ? <div className="dsh-ac__state">暂无组件参考</div> : null}
+            {components.length > 0 ? (
+              <div className="dsh-ac__list">
+                {components.map((component) => {
+                  const tags = Array.isArray((component.contract as { tags?: unknown } | null)?.tags)
+                    ? ((component.contract as { tags: string[] }).tags)
+                    : []
+                  return (
+                    <article
+                      key={component.id}
+                      className="dsh-ac__card"
+                      data-component-id={component.id}
+                      tabIndex={0}
+                      onClick={() => openComponent(component)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openComponent(component) }
+                      }}
+                    >
+                      <div className="dsh-ac__card-top">
+                        <span className="dsh-ac__badge is-component">组件</span>
+                        <span className="dsh-ac__status">{versionLabel(component)}</span>
+                      </div>
+                      <h3 className="dsh-ac__card-title" title={component.name}>{component.name}</h3>
+                      <p className="dsh-ac__card-desc">{component.description || '可预览、供 AI 参考的组件实现。'}</p>
+                      <div className="dsh-ac__meta">
+                        <span>{component.catalog ?? '未分类'}</span>
+                        {tags.length > 0 ? <span className="dot" /> : null}
+                        {tags.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}
+                      </div>
+                      <div className="dsh-ac__actions" onClick={(event) => event.stopPropagation()}>
+                        <button type="button" className="dsh-ac__btn is-primary" data-action="view" onClick={() => openComponent(component)}>查看</button>
                       </div>
                     </article>
                   )

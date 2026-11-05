@@ -37,6 +37,14 @@ metadata:
 8. **格式化用 `artifactApp.format.number/percent/currency/date`**；配置从 `artifactApp.config` 读；启动时调 `artifactApp.ready()`。
 9. **发布必须用户明确确认。** 先让用户看到预览，问「确认发布吗？」；只有用户明确说「发布 / 确认」后才调用 `cockpit_publish`。
 
+## 二·补、组件参考库（component_search / component_read）
+
+- **先判断模板能否覆盖。** 如果模板里已经把这个图表、地图或交互控件实现得很好，直接在模板实现上改数据/文案/样式，**没有必要**再查组件库。
+- 只有当「模板中没有该组件、或模板里的实现达不到需求，且你自己不确定怎么写」时，才调用 `component_search`（按 tags/能力/关键词）检索，再用 `component_read` 读参考实现。
+- 还没选模板时不要查组件库——先 `artifact_template_list` 看模板库。
+- 组件是**参考代码**，不是可实例化模板：不要把组件 id 当 `template_id` 传给 `cockpit_publish` / `cockpit_preview`。
+- 改造模板已有组件时，优先在模板实现上改，不要整段替换。
+
 ## 三、禁止
 
 - 直接 `fetch('/api/...')`、手写 `Authorization`、读取或打印 token。
