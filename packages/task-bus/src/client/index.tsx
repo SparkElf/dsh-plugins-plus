@@ -631,7 +631,106 @@ const TaskDetail = ({ task, onBack }: { task: TaskItem; onBack: () => void }) =>
   )
 }
 
-type TaskTab = 'all' | 'mine' | 'personal' | 'group'
+type TaskTab = 'all' | 'mine' | 'personal' | 'group' | 'notifications'
+
+/** One KB task record, as the knowledge-base plugin persists it. */
+interface KbTaskRecord {
+  id: string
+  fileName: string
+  kind: 'upload' | 'extract'
+  stage: 'uploading' | 'uploaded' | 'extracting' | 'done' | 'failed'
+  progress?: number
+  startedAt: number
+  finishedAt?: number
+  error?: string
+}
+
+const KB_TASK_QUEUE_KEY = 'dataops-kb-task-queue-v1'
+const KB_TASK_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const KB_TASK_MAX = 200
+const KB_STAGE_LABEL: Record<KbTaskRecord['stage'], string> = {
+  uploading: '上传中',
+  uploaded: '上传完成',
+  extracting: '提取中',
+  done: '提取完成',
+  failed: '失败',
+}
+
+/** Read the KB task queue from the shared localStorage key. */
+function readKbTasks(now: number = Date.now()): KbTaskRecord[] {
+  try {
+    const raw = window.localStorage.getItem(KB_TASK_QUEUE_KEY)
+    if (raw === null || raw === '') return []
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    const records: KbTaskRecord[] = []
+    for (const entry of parsed) {
+      if (entry === null || typeof entry !== 'object') continue
+      const row = entry as Record<string, unknown>
+      if (typeof row.id !== 'string' || row.id === '') continue
+      if (typeof row.fileName !== 'string' || row.fileName === '') continue
+      if (row.kind !== 'upload' && row.kind !== 'extract') continue
+      if (typeof row.stage !== 'string' || !(row.stage in KB_STAGE_LABEL)) continue
+      if (typeof row.startedAt !== 'number' || !Number.isFinite(row.startedAt)) continue
+      if (now - row.startedAt > KB_TASK_TTL_MS) continue
+      records.push({
+        id: row.id,
+        fileName: row.fileName,
+        kind: row.kind,
+        stage: row.stage as KbTaskRecord['stage'],
+        ...(typeof row.progress === 'number' && Number.isFinite(row.progress) ? { progress: row.progress } : {}),
+        startedAt: row.startedAt,
+        ...(typeof row.finishedAt === 'number' && Number.isFinite(row.finishedAt) ? { finishedAt: row.finishedAt } : {}),
+        ...(typeof row.error === 'string' && row.error !== '' ? { error: row.error } : {}),
+      })
+    }
+    return records.sort((a, b) => b.startedAt - a.startedAt).slice(0, KB_TASK_MAX)
+  } catch {
+    return []
+  }
+}
+
+/** The "notifications" tab: the KB task queue, read from the shared key. */
+function KbNotificationPanel({ tasks, onClear }: {
+  tasks: readonly KbTaskRecord[]
+  onClear: () => void
+}) {
+  const done = tasks.filter(task => task.stage === 'done' || task.stage === 'uploaded').length
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>任务队列</span>
+          {tasks.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{done}/{tasks.length}</span> : null}
+        </div>
+        <Button size="sm" variant="ghost" disabled={tasks.length === 0} onClick={onClear}>清空记录</Button>
+      </div>
+      {tasks.length === 0 ? (
+        <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无通知</div>
+      ) : tasks.map(task => {
+        const percent = Math.max(0, Math.min(100, Math.round(task.progress ?? (task.stage === 'done' ? 100 : task.stage === 'uploaded' ? 25 : 0))))
+        const tone = task.stage === 'failed' ? colors.danger
+          : task.stage === 'done' || task.stage === 'uploaded' ? colors.success : colors.accent
+        return (
+          <div key={task.id} style={{ padding: '10px 12px', border: '1px solid ' + colors.line, borderRadius: 8, background: colors.panelAlt, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 500, color: colors.text }}>{task.fileName}</span>
+              <span style={{ fontSize: 10, color: colors.muted }}>{new Date(task.startedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+              <span style={{ fontSize: 10, color: tone, whiteSpace: 'nowrap' }}>{KB_STAGE_LABEL[task.stage]}</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, height: 6, borderRadius: 999, background: 'rgba(255,255,255,.08)', overflow: 'hidden' }}>
+                <div style={{ width: String(percent) + '%', height: '100%', borderRadius: 999, background: tone, transition: 'width 120ms linear' }} />
+              </div>
+              <span style={{ minWidth: 34, textAlign: 'right', fontSize: 11, color: colors.muted, fontVariantNumeric: 'tabular-nums' }}>{String(percent) + '%'}</span>
+            </div>
+            {task.error !== undefined ? <div style={{ fontSize: 11, color: colors.danger }}>{task.error}</div> : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 const TaskCenterButton = ({ openSession }: {
   openSession: (sessionId: string) => void
@@ -646,6 +745,7 @@ const TaskCenterButton = ({ openSession }: {
   const [selected, setSelected] = useState<TaskItem | null>(null)
   const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
+  const [kbTasks, setKbTasks] = useState<KbTaskRecord[]>(() => readKbTasks())
 
   useEffect(() => {
     if (document.getElementById(TASK_BUS_STYLE_ID) !== null) return
@@ -727,6 +827,24 @@ const TaskCenterButton = ({ openSession }: {
     return () => { alive = false; window.clearInterval(timer) }
   }, [])
 
+  useEffect(() => {
+    let alive = true
+    const sync = (): void => { if (alive) setKbTasks(readKbTasks()) }
+    const timer = window.setInterval(sync, 1000)
+    const onStorage = (event: StorageEvent): void => { if (event.key === KB_TASK_QUEUE_KEY) sync() }
+    window.addEventListener('storage', onStorage)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
+
+  const clearKbTasks = (): void => {
+    try { window.localStorage.removeItem(KB_TASK_QUEUE_KEY) } catch { /* private mode */ }
+    setKbTasks([])
+  }
+
   const filtered = useMemo(() => {
     if (tab === 'group') return tasks.filter((task) => task.sourceType === 'task_bus' && task.source.type.includes('group'))
     if (tab === 'mine') return tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled')
@@ -735,11 +853,13 @@ const TaskCenterButton = ({ openSession }: {
   }, [tasks, tab])
 
   const actionable = tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled').length
+  const kbPending = kbTasks.filter(task => task.stage === 'uploading' || task.stage === 'extracting').length
   const tabItems: [SegmentedTab<TaskTab>, ...SegmentedTab<TaskTab>[]] = [
     { value: 'all', id: 'task-bus-tab-all', panelId: 'task-bus-panel-all', label: <span>全部 <span style={{ opacity: 0.55 }}>{tasks.length}</span></span> },
     { value: 'mine', id: 'task-bus-tab-mine', panelId: 'task-bus-panel-mine', label: <span>待我处理 <span style={{ opacity: 0.55 }}>{actionable}</span></span> },
     { value: 'personal', id: 'task-bus-tab-personal', panelId: 'task-bus-panel-personal', label: <span>个人 <span style={{ opacity: 0.55 }}>{tasks.filter((task) => task.sourceType === 'task_bus' && !task.source.type.includes('group')).length}</span></span> },
     { value: 'group', id: 'task-bus-tab-group', panelId: 'task-bus-panel-group', label: <span>群聊 <span style={{ opacity: 0.55 }}>{tasks.filter((task) => task.sourceType === 'task_bus' && task.source.type.includes('group')).length}</span></span> },
+    { value: 'notifications', id: 'task-bus-tab-notifications', panelId: 'task-bus-panel-notifications', label: <span>通知 <span style={{ opacity: 0.55 }}>{kbPending}</span></span> },
   ]
 
   const transition = async (task: TaskItem, action: string) => {
@@ -817,9 +937,9 @@ const TaskCenterButton = ({ openSession }: {
             <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
             <path d="M13.7 21a2 2 0 0 1-3.4 0" />
           </svg>
-          {pendingCount > 0 ? (
+          {pendingCount + kbPending > 0 ? (
             <span style={{ position: 'absolute', bottom: -2, right: -2, minWidth: 14, height: 14, padding: '0 3px', boxSizing: 'border-box', borderRadius: 999, background: '#2563eb', color: '#fff', fontSize: 9, lineHeight: '14px', textAlign: 'center' }}>
-              {pendingCount > 99 ? '99+' : pendingCount}
+              {pendingCount + kbPending > 99 ? '99+' : pendingCount + kbPending}
             </span>
           ) : null}
         </button>
@@ -839,7 +959,9 @@ const TaskCenterButton = ({ openSession }: {
           </div>
           {error ? <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fef2f2', color: colors.danger, fontSize: 11, margin: '0 24px 12px' }}>{error}</div> : null}
           <div id={'task-bus-panel-' + tab} role="tabpanel" aria-labelledby={'task-bus-tab-' + tab} style={{ padding: '16px 24px 24px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', flex: 1 }}>
-            {selected !== null ? (
+            {tab === 'notifications' ? (
+              <KbNotificationPanel tasks={kbTasks} onClear={clearKbTasks} />
+            ) : selected !== null ? (
               <TaskDetail task={selected} onBack={() => setSelected(null)} />
             ) : (
               <>
