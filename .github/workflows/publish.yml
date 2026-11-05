@@ -99,7 +99,10 @@ jobs:
             directory=$(dirname "$manifest")
             name=$(node -p "require('./$manifest').name")
             version=$(node -p "require('./$manifest').version")
-            npm view "$name@$version" version >/dev/null 2>&1 || pnpm --dir "$directory" publish --no-git-checks --access public
+            # The wrapper packs, verifies that the tarball carries every declared entry
+            # (main and exports defaults), and only then publishes. A build cannot hide an
+            # empty lib/ behind a successful publish step.
+            npm view "$name@$version" version >/dev/null 2>&1 || node scripts/publish-package.mjs --dir "$directory" --access public
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

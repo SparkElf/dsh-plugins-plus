@@ -28,6 +28,7 @@
 
 - CI（`ci.yml`）：每次 push 和 PR 都执行 pnpm install、`tsc --noEmit`、Vitest 单元测试和可发布制品构建。
 - CD（`publish.yml`）：`v*` tag 触发后，重新执行 typecheck、测试和构建，再使用 `NPM_TOKEN` secret 将包发布到 npm。
+- 发布门禁：每个 workspace 包通过 `scripts/publish-package.mjs` 发布。它先 `npm pack`，再读取 tarball 内 `package/package.json` 的 `main` 和每个 `exports` 的 `default`，确认这些文件真实存在于 tarball 中；缺失即失败并点名路径，不会进入 publish。门禁本身不跑构建（避免 `rm -rf lib` 这类副作用进入发布路径）；包的 `prepublishOnly` 守卫会拒绝绕过该脚本的直接 `npm publish` / `pnpm publish`。
 - UI 系统测试只断言可操作交互和可见状态变化；间距、对齐、像素几何、计算样式和截图由人在目标视口审查，截图不作通过条件。真实DataOps取数、分析、图表和刷新回放用例要求已配置且已连接的profile及显式业务prompt/marker；缺少输入时只记为skip，不作为验收通过。
 
 ### 添加插件
@@ -35,7 +36,7 @@
 1. 创建 `packages/<name>`，按照 Cordis 插件模式实现 `name`、`inject` 和 `apply`；上游 dsh 的 `@deepseek-ai/dsh-command-compact` 可作为参考。
 2. 在包旁添加不需要密钥的单元测试。
 3. 插件不得依赖 `deepseek-harness-plus`；只能依赖已发布的上游包（`@deepseek-ai/cordis`、`@deepseek-ai/dsh-*`）。
-4. 更新包版本，并通过 `v<repo-version>` tag 发布。
+4. 更新包版本，并用 `pnpm run publish:package -- --dir packages/<name>` 发布（或由 `v<repo-version>` tag 触发 CD）。
 5. 根文档和面向用户的包 README 必须在同一 `README.md` 中维护“中文”和“English”两个对应章节，内容变更时同步更新。
 
 ## English
@@ -65,6 +66,7 @@ This repository contains independent [DeepSeek Harness](https://github.com/deeps
 
 - CI (`ci.yml`): runs pnpm install, `tsc --noEmit`, Vitest unit tests, and publishable artifact builds on every push and PR.
 - CD (`publish.yml`): on `v*` tags, repeats typecheck, tests, and builds before publishing packages to npm with the `NPM_TOKEN` secret.
+- Publish gate: every workspace package publishes through `scripts/publish-package.mjs`. It runs `npm pack`, reads `package/package.json` out of the tarball, and requires `main` and every `exports` default target to exist as files in that tarball; a missing file fails the run and names the path before anything reaches npm. The gate never builds (that would put the `rm -rf lib` side effect on the publish path), and each package's `prepublishOnly` guard rejects a direct `npm publish` / `pnpm publish` that bypasses the script.
 - UI system tests assert only operable interactions and visible state changes. Humans review spacing, alignment, pixel geometry, computed CSS, and screenshots at target viewports; screenshots are not pass criteria. The real DataOps query, analysis, chart, and reload-replay case requires a configured connected profile plus explicit business prompt/markers; missing inputs produce only a skip and never acceptance evidence.
 
 ### Adding a plugin
@@ -72,5 +74,5 @@ This repository contains independent [DeepSeek Harness](https://github.com/deeps
 1. Create `packages/<name>` and implement `name`, `inject`, and `apply` following the Cordis plugin pattern; upstream dsh's `@deepseek-ai/dsh-command-compact` is the reference.
 2. Add keyless unit tests beside the package.
 3. Keep the plugin independent of `deepseek-harness-plus`; depend only on published upstream packages (`@deepseek-ai/cordis`, `@deepseek-ai/dsh-*`).
-4. Bump the package version and publish through a `v<repo-version>` tag.
+4. Bump the package version and publish with `pnpm run publish:package -- --dir packages/<name>` (or let a `v<repo-version>` tag drive CD).
 5. Root-facing and user-facing package documentation must keep matching “中文” and “English” sections in the same `README.md`, updated together whenever the content changes.

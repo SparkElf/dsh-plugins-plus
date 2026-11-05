@@ -40,7 +40,8 @@
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
-    "prepack": "pnpm run build"
+    "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/prepublish-guard.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

@@ -9,7 +9,9 @@
     "test": "vitest run packages && pnpm --dir packages/supervisor run test",
     "test:system": "playwright test --config=playwright.config.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "verify:published-peers": "node scripts/verify-published-peers.mjs"
+    "verify:published-peers": "node scripts/verify-published-peers.mjs",
+    "verify:package-main": "node scripts/verify-package-main.mjs",
+    "publish:package": "node scripts/publish-package.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
