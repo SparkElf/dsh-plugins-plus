@@ -1381,6 +1381,32 @@ export async function indexStats(indexPath: string): Promise<{ docs: number; chu
  * few unreadable descendants cannot starve the result; the returned list is still
  * capped at `topK`.
  */
+/**
+ * 把一段连续中文切成长度 3 的滑动窗口（去重，最多 `limit` 个，默认 12）。
+ *
+ * trigram FTS 只能匹配长度 ≥3 的片段：整句中文当 phrase 查通常 0 命中，
+ * 而窗口化之后「加油站」这样的 trigram 就能命中索引，再按 chunk 合并回来。
+ *
+ * 成本上限（有意为之，别去掉）：只有在「整句 phrase 查询返回 0 行」时才会走到这里，
+ * 且最多展开 `limit` 个窗口 → 最多多跑 `limit` 次 FTS 查询；每个窗口仍受原来的
+ * `candidateWindow`（topK*4）限制，所以单次检索的 SQL 次数与返回量都是常数级的。
+ * 12 个窗口足够覆盖一句 14 字左右的中文提问里最有信息量的前缀片段；再长也不会增加开销。
+ */
+export function trigramWindows(text: string, limit = 12): string[] {
+  const chars = [...text].filter(char => /[\p{Script=Han}A-Za-z0-9]/u.test(char))
+  if (chars.length < 3) return []
+  const windows: string[] = []
+  const seen = new Set<string>()
+  for (let i = 0; i + 3 <= chars.length; i += 1) {
+    const window = chars.slice(i, i + 3).join('')
+    if (seen.has(window)) continue
+    seen.add(window)
+    windows.push(window)
+    if (windows.length >= limit) break
+  }
+  return windows
+}
+
 export async function searchIndex(options: {
   indexPath: string
   query: string
@@ -1435,15 +1461,16 @@ async function searchIndexUnlocked(options: {
   try {
     ensureSchema(db)
     ensureChunkColumns(db)
+    // 可检索范围 = 全局 ∪ 自己的 personal ∪ 自己所属部门。
+    // 管理员（caller.global=true）同样有自己的个人空间，不能因为 global 就整体排除；
+    // 也不能反过来把所有人的 personal 都放进来——别人的 personal 永远不在并集里。
     const clauses = ["d.scope = 'global'"]
     const params: Array<string | number> = []
-    if (!options.caller.global) {
-      clauses.push("(d.scope = 'personal' AND d.owner_id = ?)")
-      params.push(options.caller.callerId)
-      if (options.caller.departmentCodes.length > 0) {
-        clauses.push(`(d.scope = 'department' AND d.department_code IN (${options.caller.departmentCodes.map(() => '?').join(',')}))`)
-        params.push(...options.caller.departmentCodes)
-      }
+    clauses.push("(d.scope = 'personal' AND d.owner_id = ?)")
+    params.push(options.caller.callerId)
+    if (options.caller.departmentCodes.length > 0) {
+      clauses.push(`(d.scope = 'department' AND d.department_code IN (${options.caller.departmentCodes.map(() => '?').join(',')}))`)
+      params.push(...options.caller.departmentCodes)
     }
     const narrowed = options.scope === 'personal' || options.scope === 'department' || options.scope === 'global'
       ? options.scope
@@ -1488,7 +1515,11 @@ async function searchIndexUnlocked(options: {
     // fewer than two rows, search each token and merge: the reader still gets the
     // chunk that matches part of the question instead of an empty answer.
     const tokens = query.split(/\s+/u).map(token => token.trim()).filter(token => token !== '')
-    const relaxed = tokens.length > 1 && rows.length < 2
+    // 中文没有空格：整句当 phrase 去 MATCH 时 trigram 往往匹配不上（「投资一个加油站立项流程」
+    // 这种整句 0 命中），而 tokens 只有一个、走不到上面的 relaxed 分支。这里按 3 字窗口展开，
+    // 逐窗检索后合并，等价于「用 query 自己的 trigram 去命中索引里的 trigram」。
+    const cjkWindows = tokens.length === 1 && rows.length === 0 ? trigramWindows(query) : []
+    const relaxed = (tokens.length > 1 && rows.length < 2) || cjkWindows.length > 0
     const merged = new Map<string, Row>()
     const addRows = (candidates: Row[]): void => {
       for (const row of candidates) {
@@ -1497,7 +1528,9 @@ async function searchIndexUnlocked(options: {
         if (existing === undefined || row.score < existing.score) merged.set(key, row)
       }
     }
-    const queries = relaxed ? tokens.slice(0, 8) : [query]
+    const queries = relaxed
+      ? (cjkWindows.length > 0 ? cjkWindows : tokens.slice(0, 8))
+      : [query]
     if (relaxed) {
       for (const token of queries) addRows(runTerm(token))
     } else {
