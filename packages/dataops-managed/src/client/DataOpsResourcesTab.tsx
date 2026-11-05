@@ -65,6 +65,29 @@ type HostTheme = 'dark' | 'light'
 const readHostTheme = (): HostTheme =>
   document.body.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light'
 
+/**
+ * 门户 origin 归一化：同源代理部署（DSH 挂在门户路径前缀下，如 `/dsh/`）里，host config
+ * 可能仍返回本机开发 origin（如 `http://127.0.0.1:3000`）。iframe 必须落在**当前门户
+ * origin** 上，否则跨 origin 拿不到 sessionStorage token，页面会卡在「正在恢复会话」。
+ *
+ * 只在「DSH 页面不在根路径」且 base 是 loopback、与当前 origin 不同时改写；直连部署
+ * （DSH 在 `/` 或独立 origin）保持原 base，不影响本地 3000/32000 的分origin模式。
+ */
+const normalizeEmbedBase = (configured: string, sameOrigin: boolean): { base: string; sameOrigin: boolean } => {
+  try {
+    const base = new URL(configured, window.location.origin)
+    const page = window.location
+    const isLoopback = base.hostname === '127.0.0.1' || base.hostname === 'localhost'
+    const underProxyPrefix = page.pathname !== '/' && !/^\/(?:index\.html)?$/u.test(page.pathname)
+    if (!sameOrigin && isLoopback && underProxyPrefix && base.origin !== page.origin) {
+      return { base: page.origin, sameOrigin: true }
+    }
+    return { base: configured, sameOrigin }
+  } catch {
+    return { base: configured, sameOrigin }
+  }
+}
+
 const buildEmbedUrl = (config: ResourceTabConfig, meta: ResourceTabMeta, theme: HostTheme): string => {
   const base = config.embedBaseUrl.replace(/\/+$/u, '')
   // The workspace JWT travels in the fragment: a URL hash is never sent to the server and does
@@ -145,9 +168,10 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
         if (token === undefined) {
           throw new Error('缺少 DataOps 登录凭证，请重新登录工作区')
         }
+        const normalized = normalizeEmbedBase(body.embedBaseUrl, sameOrigin)
         const next: ResourceTabConfig = {
-          embedBaseUrl: body.embedBaseUrl,
-          sameOrigin,
+          embedBaseUrl: normalized.base,
+          sameOrigin: normalized.sameOrigin,
           tabType: body.tabType,
           token,
         }
