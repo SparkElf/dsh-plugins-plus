@@ -59,7 +59,6 @@ export const en = {
   renameFailed: 'Could not rename: the file may already exist or you may not have write access.',
   downloadFailed: 'Could not download this file.',
   'menu.home': 'Home',
-  'menu.permissions': 'Permissions',
   'menu.indexing': 'Directories & counts',
   'menu.trash': 'Trash',
   // The rail's own header: the brand beside the fold toggle.
@@ -741,7 +740,6 @@ export const zh: Record<KnowledgeKey, string> = {
   renameFailed: '无法重命名：可能已存在同名文件，或你没有写权限。',
   downloadFailed: '无法下载这个文件。',
   'menu.home': '主页',
-  'menu.permissions': '权限管理',
   'menu.indexing': '目录与统计',
   'menu.trash': '回收站',
   brand: '万相知识库',

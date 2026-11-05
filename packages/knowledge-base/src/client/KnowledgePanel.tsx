@@ -60,7 +60,6 @@ function extname(path: string): string {
   const dot = base.lastIndexOf('.')
   return dot <= 0 ? '' : base.slice(dot).toLowerCase()
 }
-import { KnowledgePermissions } from './KnowledgePermissions.tsx'
 import { KnowledgeLoading } from './KnowledgeLoading.tsx'
 import { closeSidebar, openInSidebar, readColumnExpanded } from './openInSidebar.ts'
 import { publishActor, setMountPointResolver } from './saveAudit.ts'
@@ -184,7 +183,6 @@ function relativeToRoot(mountPoint: string, absolute: string): string {
  * @returns The heading text.
  */
 function sectionTitle(t: (key: string) => string, selection: Selection): string {
-  if (selection.kind === 'permissions') return t('menu.permissions')
   if (selection.kind === 'home') return t('menu.home')
   if (selection.kind === 'trash') return t('menu.trash')
   if (selection.kind === 'audit') return t('menu.audit')
@@ -200,7 +198,6 @@ function sectionTitle(t: (key: string) => string, selection: Selection): string 
 type Selection =
   | { kind: 'search' }
   | { kind: 'home' }
-  | { kind: 'permissions' }
   | { kind: 'trash' }
   | { kind: 'audit' }
   | { kind: 'settings' }
@@ -529,7 +526,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   }, [])
 
   // Set by a row's context menu so the permission form opens on that path.
-  const [grantPath, setGrantPath] = useState<string | undefined>(undefined)
   const [folded, setFolded] = useState<boolean>(readFolded)
   // The tree header's own narrowing, which costs no request. Kept apart from the
   // rail's search term: one narrows what is displayed, the other queries the tree.
@@ -707,8 +703,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const canSeeTrash = permissionKeys === undefined || hasPermission('kb:file:delete')
   const canSeeAudit = permissionKeys === undefined || hasPermission('kb:audit:read')
   const canSeeSettings = permissionKeys === undefined || hasPermission('kb:config:manage')
-  const canManageGrants = state.kind === 'ready'
-    && state.status.canManageGrants === true
     && (permissionKeys === undefined || hasPermission('kb:grant:manage'))
 
   /**
@@ -983,21 +977,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
     }
   }
 
-  /**
-   * Leave the permission surface when the caller may not manage grants.
-   *
-   * Hiding the menu row is not enough: the selection can already BE permissions --
-   * a reload can revoke the permission while it is open, and a stale render or a
-   * restored view can restore it -- which would leave the surface on screen with
-   * only the menu missing. Falling back to the listing also drops the path the form
-   * was primed with, so nothing about the abandoned surface survives.
-   */
-  useEffect(() => {
-    if (canManageGrants) return
-    setSelection(current => (current.kind === 'permissions' ? { kind: 'search' } : current))
-    setGrantPath(undefined)
-  }, [canManageGrants])
-
   // The rail only offers surfaces the backend permission keys allow; reset a surface
   // that was selected before a role change so it cannot linger as a dead end.
   useEffect(() => {
@@ -1180,30 +1159,12 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    */
   const SECTIONS = [
     ...(canSeeHome ? [{ kind: 'home', key: 'menu.home' }] as const : []),
-    ...(canManageGrants ? [{ kind: 'permissions', key: 'menu.permissions' }] as const : []),
     ...(canSeeTrash ? [{ kind: 'trash', key: 'menu.trash' }] as const : []),
     ...(canSeeAudit ? [{ kind: 'audit', key: 'menu.audit' }] as const : []),
     ...(canSeeSettings ? [{ kind: 'settings', key: 'menu.settings' }] as const : []),
   ] as const
 
-  /**
-   * Open the permission surface for one path, or ignore the request.
-   *
-   * A right-click reaches this from the listing, so the refusal is repeated at the
-   * entry point: withdrawing the prop would hide the affordance, but this keeps the
-   * transition itself guarded however it is reached.
-   * @param path - the row's path, pre-filled into the grant form.
-   */
-  const openPermissions = (path: string): void => {
-    if (!canManageGrants) return
-    setGrantPath(path)
-    setSelection({ kind: 'permissions' })
-  }
-
-
-  const rendered: Selection = selection.kind === 'permissions' && !canManageGrants
-    ? { kind: 'search' }
-    : selection
+  const rendered: Selection = selection
 
   return (
     <div className={styles.page}>
@@ -1385,7 +1346,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   isPinned={pins.has}
                   onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
                   onOpen={(path) => { openDocument(path) }}
-                  onGrant={(path) => { openPermissions(path) }}
                   onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                 />
               )}
@@ -1678,7 +1638,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
                     onMove={(from, to) => { void moveOne(from, to) }}
                     onOpen={(path) => { openDocument(path) }}
-                    onGrant={(path) => { openPermissions(path) }}
                     onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                     // An empty tree offers the way to make a document. It does not
                     // create one: there is no create route, and a button that
@@ -1725,13 +1684,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   // explorer's own menu cannot be extended, so they live here instead
                   // of replacing it.
                   allPinned={selectedPaths.length > 0 && selectedPaths.every(path => pins.has(path))}
-                  onShare={() => {
-                    // A share dialog names one principal for one path; a batch share
-                    // would need a different form. Acting on the first selected path
-                    // with the count visible is honest about what it does.
-                    const first = selectedPaths[0]
-                    if (first !== undefined) openPermissions(first)
-                  }}
                   allFavorite={selectedPaths.length > 0 && selectedPaths.every(path => favorites.has(path))}
                   onFavorite={() => {
                     const all = selectedPaths.every(path => favorites.has(path))
@@ -1746,10 +1698,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                       false,
                       selectedPaths.map(path => ({ relPath: path, isDir: false })),
                     )
-                  }}
-                  onPermissions={() => {
-                    const first = selectedPaths[0]
-                    if (first !== undefined) openPermissions(first)
                   }}
                   onCut={() => {
                     setClipboard({
@@ -1920,7 +1868,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 onFavorite={(path, favorite) => { favorites.setFavorite(path, favorite) }}
                 isPinned={pins.has}
                 onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
-                onGrant={(path) => { openPermissions(path) }}
                 onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                 onTreeChanged={() => { setRefreshTick(t => t + 1) }}
                 // Where a create lands when the reader has not opened a directory:
@@ -1930,7 +1877,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 departmentName={state.kind === 'ready' ? state.status.caller?.departmentName : undefined}
                 // The one per-caller permission answer this client has: it decides
                 // whether the shared buckets join "Owned by me".
-                canManageGrants={state.kind === 'ready' ? state.status.canManageGrants === true : false}
+                canManageGrants={false}
               />
             )}
             {scope !== 'graph' && rendered.kind === 'trash' && <KnowledgeTrash t={t} />}
@@ -1950,18 +1897,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   onOpen={(path) => { openDocument(path) }}
                   // A right-click on a row opens the grant form with that path already
                   // filled in: a row is where an operator has a path in mind.
-                  onGrant={canManageGrants ? (path) => { openPermissions(path) } : undefined}
+                  onGrant={undefined}
                   onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
                 />}
-              />
-            )}
-            {scope !== 'graph' && rendered.kind === 'permissions' && (
-              <KnowledgePermissions
-                t={t}
-                mountPoint={config.mountPoint}
-                reloadToken={refreshTick}
-                initialPath={grantPath}
-                onAction={setPageAction}
               />
             )}
             {scope !== 'graph' && rendered.kind === 'file' && (
