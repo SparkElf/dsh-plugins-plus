@@ -365,6 +365,54 @@ const CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.dsh-ac__dialog-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base, #151517) 55%, transparent);
+  backdrop-filter: blur(3px);
+}
+.dsh-ac__dialog {
+  width: min(420px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, #2c2c2e);
+  box-shadow: var(--dsw-elevation-prominent, 0 18px 48px rgba(0,0,0,.4));
+}
+.dsh-ac__dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.06));
+  font-size: 12px;
+  font-weight: 600;
+}
+.dsh-ac__dialog-body { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.dsh-ac__export-option {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.06));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1, #232324);
+}
+.dsh-ac__export-title { font-size: 11px; font-weight: 600; color: var(--dsw-alias-label-primary, #f9fafb); }
+.dsh-ac__export-desc { margin: 0; font-size: 10px; line-height: 15px; color: var(--dsw-alias-label-secondary, #cfd3d6); }
+.dsh-ac__export-notice {
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 12%, transparent);
+  color: var(--dsw-alias-state-success-primary, #22c55e);
+  font-size: 10px;
+}
 `
 
 /** Cockpit catalogue plus viewer. */
@@ -451,40 +499,64 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
   }
 
   /**
-   * 导出一份可脱离 DSH 单独分发的 HTML：服务端返回的 HTML 已烧死 appId 与网关地址，
-   * 这里再把运行时与 ECharts 内联进去，产物双击即可打开（地址栏加 #token=… 取数）。
-   * 模板不是应用，没有网关导出地址，因此只在应用视图里提供。
+   * 导出对话框：常规（zip，素材外链）与全量（单文件，内联 assets）。
+   * 两者都走后端 `GET /api/artifact-apps/:id/export?mode=…`，经插件网关带调用者 token 转发。
    */
-  const [exporting, setExporting] = useState(false)
-  const exportHtml = async (): Promise<void> => {
-    if (selected === null || selected.kind !== 'app' || exporting) return
-    setExporting(true)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exporting, setExporting] = useState<'external' | 'inline' | null>(null)
+  const [exportNotice, setExportNotice] = useState('')
+
+  const fetchToken = async (): Promise<string> => {
+    const response = await fetch('/dsh-artifact-app/token', { headers: { accept: 'application/json' }, cache: 'no-store' })
+    const payload = await response.json() as { token?: string; error?: string }
+    if (!response.ok || typeof payload.token !== 'string' || payload.token.trim() === '') {
+      throw new Error(payload.error ?? '读取 DataOps 登录凭证失败')
+    }
+    return payload.token
+  }
+
+  const downloadExport = async (mode: 'external' | 'inline'): Promise<void> => {
+    if (selected === null || selected.kind !== 'app' || exporting !== null) return
+    setExporting(mode)
+    setExportNotice('')
     try {
-      const base = '/dsh-artifact-app/gateway/api/artifact-apps'
-      const [htmlResponse, runtimeResponse, echartsResponse] = await Promise.all([
-        fetch(base.replace(/\/+$/u, '') + '/' + encodeURIComponent(selected.viewerId) + '/html', { headers: { accept: 'application/json' } }),
-        fetch(base.replace(/\/+$/u, '') + '/runtime.js'),
-        fetch(base.replace(/\/+$/u, '') + '/echarts.js'),
-      ])
-      if (!htmlResponse.ok) throw new Error('读取驾驶舱 HTML 失败')
-      const payload = await htmlResponse.json() as { html?: string }
-      const runtime = runtimeResponse.ok ? await runtimeResponse.text() : ''
-      const echarts = echartsResponse.ok ? await echartsResponse.text() : ''
-      const inline = (runtime === '' ? '' : '<script>' + runtime + '<\/script>') + (echarts === '' ? '' : '<script>' + echarts + '<\/script>')
-      const html = (payload.html ?? '').replace('</body>', inline + '</body>')
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
+      const token = await fetchToken()
+      const url = '/dsh-artifact-app/gateway/api/artifact-apps/' + encodeURIComponent(selected.viewerId) + '/export?mode=' + mode
+      const response = await fetch(url, { headers: { 'x-dataops-token': token } })
+      if (!response.ok) throw new Error('导出失败（HTTP ' + String(response.status) + '）')
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
       const link = document.createElement('a')
-      link.href = url
-      link.download = (selected.name || 'cockpit') + '.html'
+      link.href = objectUrl
+      link.download = (selected.name || 'cockpit') + (mode === 'external' ? '.zip' : '.html')
       document.body.appendChild(link)
       link.click()
       link.remove()
-      URL.revokeObjectURL(url)
+      URL.revokeObjectURL(objectUrl)
+      setExportNotice('已开始下载')
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      setExportNotice('导出失败：' + (cause instanceof Error ? cause.message : String(cause)))
     } finally {
-      setExporting(false)
+      setExporting(null)
+    }
+  }
+
+  const copyToken = async (): Promise<void> => {
+    try {
+      const token = await fetchToken()
+      try {
+        await navigator.clipboard.writeText(token)
+      } catch {
+        const area = document.createElement('textarea')
+        area.value = token
+        document.body.appendChild(area)
+        area.select()
+        document.execCommand('copy')
+        area.remove()
+      }
+      setExportNotice('token 已复制')
+    } catch (cause) {
+      setExportNotice('复制失败：' + (cause instanceof Error ? cause.message : String(cause)))
     }
   }
 
@@ -532,11 +604,9 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
               <button
                 type="button"
                 className="dsh-ac__icon"
-                title="导出 HTML"
-                aria-label="导出 HTML"
-                disabled={exporting}
-                onClick={() => void exportHtml()}
-                style={{ opacity: exporting ? 0.5 : 1, cursor: exporting ? 'progress' : 'pointer' }}
+                title="导出"
+                aria-label="导出"
+                onClick={() => { setExportNotice(''); setExportOpen(true) }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M12 3v12" />
@@ -550,6 +620,46 @@ export function CockpitTab({ tab, scope, insertArtifactReference }: CockpitTabPr
             <CockpitViewer artifactId={selected.viewerId} reloadToken={reloadToken} />
           </div>
         </div>
+        {exportOpen ? (
+          <div className="dsh-ac__dialog-mask" data-export-dialog role="dialog" aria-modal="true" aria-label="导出驾驶舱">
+            <div className="dsh-ac__dialog">
+              <div className="dsh-ac__dialog-head">
+                <span>导出驾驶舱</span>
+                <button type="button" className="dsh-ac__icon" aria-label="关闭" onClick={() => setExportOpen(false)}>×</button>
+              </div>
+              <div className="dsh-ac__dialog-body">
+                <section className="dsh-ac__export-option">
+                  <div className="dsh-ac__export-title">常规导出</div>
+                  <p className="dsh-ac__export-desc">zip 包：HTML 与 assets 分离，解压后需静态托管；HTML 通过相对路径引用素材。</p>
+                  <button
+                    type="button"
+                    className="dsh-ac__btn is-primary"
+                    data-export-mode="external"
+                    disabled={exporting !== null}
+                    onClick={() => void downloadExport('external')}
+                  >{exporting === 'external' ? '导出中…' : '下载 zip'}</button>
+                </section>
+                <section className="dsh-ac__export-option">
+                  <div className="dsh-ac__export-title">全量导出（内联 assets）</div>
+                  <p className="dsh-ac__export-desc">单文件 HTML：双击即可打开；取数时需要粘贴 token。</p>
+                  <button
+                    type="button"
+                    className="dsh-ac__btn is-primary"
+                    data-export-mode="inline"
+                    disabled={exporting !== null}
+                    onClick={() => void downloadExport('inline')}
+                  >{exporting === 'inline' ? '导出中…' : '下载 HTML'}</button>
+                </section>
+                <section className="dsh-ac__export-option">
+                  <div className="dsh-ac__export-title">当前 token</div>
+                  <p className="dsh-ac__export-desc">全量导出取数时使用。当前 JWT 约到 2027-09，实际以登录态为准。</p>
+                  <button type="button" className="dsh-ac__btn" data-copy-token onClick={() => void copyToken()}>复制当前 token</button>
+                </section>
+                {exportNotice !== '' ? <div className="dsh-ac__export-notice" role="status">{exportNotice}</div> : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
         {notice !== '' ? <div className="dsh-ac__toast" role="status">{notice}</div> : null}
       </div>
     )

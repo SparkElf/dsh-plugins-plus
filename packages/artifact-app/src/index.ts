@@ -312,8 +312,8 @@ export function apply(ctx: Context, config: ConfigValues): void {
     handler: async (request, response) => {
       const cors = {
         'access-control-allow-origin': '*',
-        'access-control-allow-methods': 'POST, OPTIONS',
-        'access-control-allow-headers': 'authorization, content-type, accept',
+        'access-control-allow-methods': 'GET, POST, OPTIONS',
+        'access-control-allow-headers': 'authorization, content-type, accept, x-dataops-token',
         'access-control-max-age': '600',
       }
       if (request.method === 'OPTIONS') {
@@ -323,13 +323,14 @@ export function apply(ctx: Context, config: ConfigValues): void {
       }
       try {
         const url = new URL(request.url ?? '/', 'http://dsh.internal')
-        const upstream = url.pathname.slice(GATEWAY_PATH.length)
-        // 驾驶舱运行时需要的三类调用：详情（配置）、取数、调 API。
+        const upstreamPath = url.pathname.slice(GATEWAY_PATH.length)
+        const upstream = upstreamPath + url.search
+        // 驾驶舱运行时需要的调用：详情（配置）、取数、调 API、导出 HTML/zip。
         // 只放 query|call-api 会把「打开驾驶舱」时那次 GET /<id> 也挡掉，表现为整个页面
         // 渲染出来了但满屏「数据加载失败」。
-        // 允许：详情、取数、调 API、导出用的 HTML，以及导出时要内联的运行时资源。
-        // 「导出」按钮会拉这四类；少放行任何一个都会让导出静默失败（点击无下载）。
-        if (!/^\/api\/artifact-apps\/(?:[^/]+(?:\/(?:query|call-api|html))?|(?:runtime|echarts)\.js)$/u.test(upstream)) {
+        // 允许：详情、取数、调 API、导出（html/export），以及导出时要内联的运行时资源。
+        // 「导出」对话框会拉 export?mode=…；少放行任何一个都会让导出静默失败（点击无下载）。
+        if (!/^\/api\/artifact-apps\/(?:[^/]+(?:\/(?:query|call-api|html|export))?|(?:runtime|echarts)\.js)$/u.test(upstreamPath)) {
           response.writeHead(403, { ...cors, 'content-type': 'application/json; charset=utf-8' })
           response.end(JSON.stringify({ error: '网关只代理驾驶舱取数接口' }))
           return
