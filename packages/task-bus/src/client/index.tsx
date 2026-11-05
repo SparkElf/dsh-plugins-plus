@@ -690,6 +690,72 @@ function readKbTasks(now: number = Date.now()): KbTaskRecord[] {
   }
 }
 
+/** One plaza record as the skill-center integration serves it. */
+interface SkillPlazaRow {
+  name: string
+  reviewStatus?: 'pending' | 'approved' | 'rejected'
+}
+
+/**
+ * Pending skill-review count for the task center.
+ *
+ * The skill-center package computes its `reviewCounts` in the browser from the list +
+ * plaza records; there is no server-side unread/pending endpoint. We read the same two
+ * sources here: the plaza rows carry `reviewStatus`, the list rows carry the model flag
+ * that stands in for "disabled". A row missing `reviewStatus` counts as pending, which
+ * matches `reviewStatusOf` in the package.
+ */
+async function readSkillPending(): Promise<number> {
+  try {
+    const [listResponse, plazaResponse] = await Promise.all([
+      fetch('/api/dsh-skill-center/list', { cache: 'no-store' }),
+      fetch('/integrations/dataops/skill-plaza?mine=1', { cache: 'no-store' }),
+    ])
+    // Only an explicit `modelInvocable: false` marks a skill as disabled. A plaza row
+    // that has no local list entry is still pending review and must be counted.
+    const disabled = new Set<string>()
+    if (listResponse.ok) {
+      const body = await listResponse.json() as { groups?: Array<{ skills?: Array<{ name?: unknown; modelInvocable?: unknown }> }> }
+      for (const group of body.groups ?? []) {
+        for (const skill of group.skills ?? []) {
+          if (typeof skill.name === 'string' && skill.modelInvocable === false) disabled.add(skill.name)
+        }
+      }
+    }
+    if (!plazaResponse.ok) return 0
+    const plaza = await plazaResponse.json() as { skills?: Array<Record<string, unknown>> }
+    const names = new Set<string>()
+    for (const row of plaza.skills ?? []) {
+      if (typeof row.name !== 'string' || row.name === '') continue
+      if (row.reviewStatus === 'approved') continue
+      // Disabled skills do not need review; the list's model flag is the available proxy.
+      if (disabled.has(row.name)) continue
+      names.add(row.name)
+    }
+    return names.size
+  } catch {
+    return 0
+  }
+}
+
+/** A grouped notification row for the skill plaza. */
+function SkillPendingRow({ count, onOpen }: { count: number; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '9px 12px',
+        border: '1px solid ' + colors.line, borderRadius: 8, background: colors.panelAlt,
+        color: colors.text, fontSize: 12, textAlign: 'left', cursor: 'pointer',
+      }}
+    >
+      <span style={{ flex: 1 }}>技能广场 · {count} 个待审核技能</span>
+      <span style={{ color: colors.muted, fontSize: 11 }}>打开技能中心 →</span>
+    </button>
+  )
+}
+
 /** The "notifications" tab: the KB task queue, read from the shared key. */
 function KbNotificationPanel({ tasks, onClear }: {
   tasks: readonly KbTaskRecord[]
@@ -746,6 +812,7 @@ const TaskCenterButton = ({ openSession }: {
   const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
   const [kbTasks, setKbTasks] = useState<KbTaskRecord[]>(() => readKbTasks())
+  const [skillPending, setSkillPending] = useState(0)
 
   useEffect(() => {
     if (document.getElementById(TASK_BUS_STYLE_ID) !== null) return
@@ -839,6 +906,31 @@ const TaskCenterButton = ({ openSession }: {
       window.removeEventListener('storage', onStorage)
     }
   }, [])
+
+  useEffect(() => {
+    let alive = true
+    const sync = (): void => { void readSkillPending().then((count) => { if (alive) setSkillPending(count) }) }
+    sync()
+    const timer = window.setInterval(sync, 60_000)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [])
+
+  /**
+   * Jump to the Skill Center page.
+   *
+   * TODO(mention-provider wave): the sidebar menu has no stable data id; this finds the
+   * button by its visible label. Replace with a route/command once the base exposes one.
+   */
+  const openSkillCenter = (): void => {
+    setOpen(false)
+    window.setTimeout(() => {
+      const button = [...document.querySelectorAll('button')].find((candidate) => {
+        const label = (candidate.getAttribute('aria-label') ?? candidate.textContent ?? '').trim()
+        return /Skill Center|技能中心/i.test(label)
+      })
+      button?.click()
+    }, 80)
+  }
 
   const clearKbTasks = (): void => {
     try { window.localStorage.removeItem(KB_TASK_QUEUE_KEY) } catch { /* private mode */ }
@@ -937,9 +1029,9 @@ const TaskCenterButton = ({ openSession }: {
             <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
             <path d="M13.7 21a2 2 0 0 1-3.4 0" />
           </svg>
-          {pendingCount + kbPending > 0 ? (
+          {pendingCount + kbPending + skillPending > 0 ? (
             <span style={{ position: 'absolute', bottom: -2, right: -2, minWidth: 14, height: 14, padding: '0 3px', boxSizing: 'border-box', borderRadius: 999, background: '#2563eb', color: '#fff', fontSize: 9, lineHeight: '14px', textAlign: 'center' }}>
-              {pendingCount + kbPending > 99 ? '99+' : pendingCount + kbPending}
+              {pendingCount + kbPending + skillPending > 99 ? '99+' : pendingCount + kbPending + skillPending}
             </span>
           ) : null}
         </button>
@@ -960,7 +1052,10 @@ const TaskCenterButton = ({ openSession }: {
           {error ? <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fef2f2', color: colors.danger, fontSize: 11, margin: '0 24px 12px' }}>{error}</div> : null}
           <div id={'task-bus-panel-' + tab} role="tabpanel" aria-labelledby={'task-bus-tab-' + tab} style={{ padding: '16px 24px 24px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', flex: 1 }}>
             {tab === 'notifications' ? (
-              <KbNotificationPanel tasks={kbTasks} onClear={clearKbTasks} />
+              <>
+                {skillPending > 0 ? <SkillPendingRow count={skillPending} onOpen={openSkillCenter} /> : null}
+                <KbNotificationPanel tasks={kbTasks} onClear={clearKbTasks} />
+              </>
             ) : selected !== null ? (
               <TaskDetail task={selected} onBack={() => setSelected(null)} />
             ) : (
