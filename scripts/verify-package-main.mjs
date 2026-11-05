@@ -97,7 +97,9 @@ export function verifyTarball(tarballPath) {
   if (missing.length > 0) {
     const prefix = String(manifest.name) + '@' + String(manifest.version) + ': tarball ' + absolute
     const detail = missing.map(entry => '  missing ' + entry.path + ' (from package.json ' + entry.label + ')').join('\n')
-    const libFiles = entries.filter(entry => entry.startsWith('package/lib/')).slice(0, 8)
+    // The directory entry itself says nothing about what is inside; start at its children so
+    // a types-only tarball reads as `package/lib/types/…` rather than `package/lib/, …`.
+    const libFiles = entries.filter(entry => entry.startsWith('package/lib/') && entry !== 'package/lib/').slice(0, 8)
     throw new Error(prefix + ' does not carry its declared entry files:\n' + detail
       + (libFiles.length === 0 ? '\n  (the tarball has no package/lib/ files at all)' : '\n  lib/ contains: ' + libFiles.join(', ')))
   }
