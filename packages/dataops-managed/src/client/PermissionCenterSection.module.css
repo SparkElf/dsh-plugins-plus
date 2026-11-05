@@ -173,17 +173,17 @@
 }
 
 .matrixTool {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   padding: 0;
-  border: 1px solid var(--dsw-alias-border-l2);
+  border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
   display: inline-grid;
   place-items: center;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
 }
 
@@ -193,8 +193,7 @@
 }
 
 .matrixToolActive {
-  background: rgba(37, 99, 235, .16);
-  border-color: #2563eb;
+  background: rgba(37, 99, 235, .15);
   color: #2563eb;
 }
 
