@@ -1784,6 +1784,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
             <div className={styles.headerActions}>
               <KnowledgeProgressPopover
                 t={t}
+                headless
                 uploads={uploadTasks}
                 watchExtraction={config.mountPoint !== ''}
                 refreshSignal={progressRefresh}

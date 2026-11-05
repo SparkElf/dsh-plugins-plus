@@ -69,6 +69,14 @@ export interface KnowledgeProgressPopoverProps {
    * exists to remove. The page owns the store; this component only draws it.
    */
   failures?: readonly FailedExtractionView[]
+  /**
+   * Keep the persistence/polling work but render no bell or modal.
+   *
+   * The queue now lives in the Task Center's notifications tab, which reads the same
+   * localStorage key; the Knowledge page only needs this component mounted to keep
+   * writing observations.
+   */
+  headless?: boolean
 }
 
 /** How often to re-read extraction progress while something is pending. */
@@ -482,6 +490,8 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
   // The badge is the only always-visible part. It states a count and nothing else: a
   // number that is zero is not information, so the badge is absent rather than "0".
   const badge = pending === 0 ? undefined : pending > 99 ? t('progressBadgeMore') : String(pending)
+
+  if (props.headless === true) return null
 
   return (
     <>
