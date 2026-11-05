@@ -391,8 +391,38 @@
 }
 
 /* The actions column: three 24px controls plus their gaps, and it never shrinks. */
+.colStatus {
+  width: 10%;
+}
+
 .colActions {
   width: 96px;
+}
+
+.statusButton {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  display: inline-flex;
+}
+
+.statusDetail {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.statusDetail dt {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.statusDetail dd {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-all;
 }
 
 .actionsCell {

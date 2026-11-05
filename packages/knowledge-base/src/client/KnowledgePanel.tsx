@@ -367,6 +367,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    * reports it rather than appearing to do nothing.
    */
   const openDocument = async (path: string): Promise<void> => {
+    // Opening a document leaves the graph canvas as well: `scope` gates the whole
+    // content region, so a selection change alone would keep the canvas on screen.
+    setScope('kb')
     setSelection({ kind: 'file', path })
     // A markdown preview has an absolute-address claimant and needs no session. A
     // host-owned type (.pdf/.docx/.xlsx) gets a session-scoped address, so resolve a
@@ -1250,7 +1253,12 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 // The strip keeps the glyph and drops the label, so the accessible
                 // name has to travel on the button rather than in a hidden span.
                 {...(folded ? { 'aria-label': t(section.key), title: t(section.key) } : {})}
-                onClick={() => { setSelection({ kind: section.kind } as Selection) }}
+                onClick={() => {
+                  // The graph tab owns a separate `scope`; selecting a rail section must
+                  // leave that mode or every section stays hidden behind the canvas.
+                  setScope('kb')
+                  setSelection({ kind: section.kind } as Selection)
+                }}
               >
                 <span className={styles.menuGlyph}>{sectionGlyph(section.kind)}</span>
                 {!folded && <span className={styles.menuLabel}>{t(section.key)}</span>}

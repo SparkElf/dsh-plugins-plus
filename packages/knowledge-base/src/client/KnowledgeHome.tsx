@@ -25,6 +25,7 @@ import {
   IconListPenOutlineRegular,
   IconPlusOutlineRegular,
   IconRightUpOutlineRegular,
+  Modal,
   SegmentedTabs,
   Tag,
   Tooltip,
@@ -64,6 +65,8 @@ interface HomeRow {
   location: string
   /** Last-modified instant in Unix ms, which is the tree's only timestamp. */
   mtimeMs?: number
+  /** Host's answer: a `.md` sibling exists beside this non-text document. */
+  hasMarkdown?: boolean
 }
 
 /** The tabs, in display order. */
@@ -237,7 +240,7 @@ export interface KnowledgeHomeProps {
  * @returns Every document row the table shows, in bucket order.
  */
 async function loadHomeRows(mountPoint: string): Promise<HomeRow[]> {
-  const listLevel = async (path: string): Promise<Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>> => {
+  const listLevel = async (path: string): Promise<Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number; hasMarkdown?: boolean }>> => {
     const response = await fetch(kbApiPath(KB_API.list), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -246,7 +249,7 @@ async function loadHomeRows(mountPoint: string): Promise<HomeRow[]> {
     })
     if (!response.ok) throw new Error('HTTP ' + String(response.status))
     const body = await readKnowledgeJson<{
-      entries?: Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number }>
+      entries?: Array<{ relPath: string; name: string; isDir: boolean; mtimeMs?: number; hasMarkdown?: boolean }>
     }>(response)
     return body.entries ?? []
   }
@@ -266,7 +269,46 @@ async function loadHomeRows(mountPoint: string): Promise<HomeRow[]> {
     name: entry.name,
     location: locationOf(entry.relPath),
     ...(entry.mtimeMs === undefined ? {} : { mtimeMs: entry.mtimeMs }),
+    ...(entry.hasMarkdown === true ? { hasMarkdown: true } : {}),
   }))
+}
+
+/** Whether a file is text (indexed) rather than a document (extracted). */
+function isTextDocument(name: string): boolean {
+  return /\.(md|markdown|txt)$/iu.test(name)
+}
+
+/** What the plugin's own SQLite index knows about one document. */
+interface IndexStatusView {
+  found: boolean
+  docId?: number
+  chunks?: number
+  indexedAt?: number
+  path?: string
+  scope?: string
+}
+
+/** Read one document's index row from the Host. */
+async function fetchIndexStatus(relPath: string): Promise<IndexStatusView> {
+  try {
+    const response = await fetch(kbApiPath(KB_API.indexStatus), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: relPath }),
+      cache: 'no-store',
+    })
+    if (!response.ok) return { found: false }
+    return (await response.json()) as IndexStatusView
+  } catch {
+    return { found: false }
+  }
+}
+
+/** One row's status cell and the detail the modal shows. */
+interface RowStatus {
+  kind: 'extract' | 'index'
+  state: 'done' | 'none'
+  index?: IndexStatusView
 }
 
 /**
@@ -830,6 +872,27 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
     [visible, docPage],
   )
 
+  const [rowStatus, setRowStatus] = useState<Record<string, RowStatus>>({})
+  const [statusDetail, setStatusDetail] = useState<{ row: HomeRow; status: RowStatus } | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = async (): Promise<void> => {
+      const next: Record<string, RowStatus> = {}
+      for (const row of docPageRows.rows) {
+        if (isTextDocument(row.name)) {
+          const index = await fetchIndexStatus(row.relPath)
+          next[row.relPath] = { kind: 'index', state: index.found ? 'done' : 'none', index }
+        } else {
+          next[row.relPath] = { kind: 'extract', state: row.hasMarkdown === true ? 'done' : 'none' }
+        }
+      }
+      if (alive) setRowStatus(next)
+    }
+    void load()
+    return () => { alive = false }
+  }, [docPageRows])
+
   // A tab switch changes the row set under a fixed page index, which would otherwise show
   // page 3 of a two-page list. Reset to the first page whenever the tab changes.
   useEffect(() => { setDocPage(1) }, [tab])
@@ -1038,18 +1101,19 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
               <th className={styles.colOwner}>{c('homeColOwner')}</th>
               <th className={styles.colTime}>{c('homeColCreated')}</th>
               <th className={styles.colTime}>{c('homeColOpened')}</th>
+              <th className={styles.colStatus}>{c('homeColStatus')}</th>
               <th className={styles.colActions}>{c('colActions')}</th>
             </tr>
           </thead>
           <tbody>
             {state === 'loading' && (
               <tr className={styles.emptyRow}>
-                <td colSpan={6}>{c('loading')}</td>
+                <td colSpan={7}>{c('loading')}</td>
               </tr>
             )}
             {state === 'error' && (
               <tr className={styles.emptyRow}>
-                <td colSpan={6}>{c('unavailable')}</td>
+                <td colSpan={7}>{c('unavailable')}</td>
               </tr>
             )}
             {state === 'ready' && visible.length === 0 && (
@@ -1057,7 +1121,7 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                 {/* A starred tab with nothing in it is not an empty knowledge base; it
                     is "you have not starred anything yet". Saying the former would send
                     the reader looking for lost documents. */}
-                <td colSpan={6}>{tab === 'starred' ? c('homeStarredEmpty') : c('homeEmpty')}</td>
+                <td colSpan={7}>{tab === 'starred' ? c('homeStarredEmpty') : c('homeEmpty')}</td>
               </tr>
             )}
             {docPageRows.rows.map(row => (
@@ -1134,6 +1198,25 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
                 </td>
                 <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
                 <td className={styles.muted}>{formatStamp(row.mtimeMs, locale)}</td>
+                <td>
+                  {(() => {
+                    const status = rowStatus[row.relPath]
+                    if (status === undefined) return <span className={styles.muted}>—</span>
+                    const label = status.kind === 'index'
+                      ? (status.state === 'done' ? c('homeStatusIndexed') : c('homeStatusNotIndexed'))
+                      : (status.state === 'done' ? c('homeStatusExtracted') : c('homeStatusNotExtracted'))
+                    return (
+                      <button
+                        type="button"
+                        className={styles.statusButton}
+                        data-kb-status={status.kind + ':' + status.state}
+                        onClick={() => { setStatusDetail({ row, status }) }}
+                      >
+                        <Tag tone={status.state === 'done' ? 'success' : 'quiet'}>{label}</Tag>
+                      </button>
+                    )
+                  })()}
+                </td>
                 {/* The actions column. Three controls, each with its own accessible
                     name: an icon-only button without one is unusable by keyboard and
                     invisible to a screen reader. */}
@@ -1290,6 +1373,38 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
           void refreshRows()
         }}
       />
+
+      <Modal
+        open={statusDetail !== null}
+        onClose={() => { setStatusDetail(null) }}
+        title={statusDetail === null ? '' : statusDetail.row.name}
+        closeLabel={c('statusClose')}
+        footer={<Button variant="ghost" onClick={() => { setStatusDetail(null) }}>{c('statusClose')}</Button>}
+      >
+        {statusDetail === null ? null : (
+          <dl className={styles.statusDetail}>
+            <dt>{c('statusFileName')}</dt><dd>{statusDetail.row.name}</dd>
+            <dt>{c('statusPath')}</dt><dd>{statusDetail.row.relPath}</dd>
+            <dt>{c('statusType')}</dt>
+            <dd>{isTextDocument(statusDetail.row.name) ? c('statusTypeText') : c('statusTypeNonText')} · {statusDetail.row.name.slice(statusDetail.row.name.lastIndexOf('.') + 1)}</dd>
+            <dt>{c('statusExtract')}</dt>
+            <dd>{statusDetail.status.kind === 'extract'
+              ? (statusDetail.status.state === 'done' ? c('homeStatusExtracted') : c('homeStatusNotExtracted'))
+              : '—'}</dd>
+            <dt>{c('statusExtractTime')}</dt><dd>—</dd>
+            <dt>{c('statusMdSize')}</dt><dd>—</dd>
+            <dt>{c('statusIndex')}</dt>
+            <dd>{statusDetail.status.index === undefined
+              ? (statusDetail.status.kind === 'index' ? (statusDetail.status.state === 'done' ? c('homeStatusIndexed') : c('homeStatusNotIndexed')) : '—')
+              : (statusDetail.status.index.found ? c('homeStatusIndexed') : c('homeStatusNotIndexed'))}</dd>
+            <dt>{c('statusIndexTime')}</dt>
+            <dd>{statusDetail.status.index?.indexedAt === undefined ? '—' : new Date(statusDetail.status.index.indexedAt).toLocaleString()}</dd>
+            <dt>{c('statusChunks')}</dt>
+            <dd>{statusDetail.status.index?.chunks === undefined ? '—' : String(statusDetail.status.index.chunks) + ' · #' + String(statusDetail.status.index.docId ?? '—')}</dd>
+            <dt>{c('statusFailure')}</dt><dd>—</dd>
+          </dl>
+        )}
+      </Modal>
     </div>
   )
 }

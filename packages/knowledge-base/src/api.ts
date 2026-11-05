@@ -141,6 +141,7 @@ export const KB_API = {
   extractStatus: 'extract.status',
   /** Re-run extraction for one document that could not finish. */
   extractRetry: 'extract.retry',
+  indexStatus: 'index.status',
   /** Read the caller's pinned paths. */
   favoritesGet: 'favorites.get',
   favoritesSet: 'favorites.set',

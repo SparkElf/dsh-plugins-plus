@@ -2569,6 +2569,7 @@ export function permissionForKbRoute(method: string): string | undefined {
   if (method === 'create' || method === 'edit' || method === 'move' || method === 'upload' || method === 'rename') return 'kb:file:write'
   if (method === 'trash' || method === 'trash.remove' || method === 'trash.restore') return 'kb:file:delete'
   if (method === 'index' || method === 'extract.retry') return 'kb:file:extract'
+  if (method === 'index.status') return 'kb:file:read'
   if (method === 'audit.list') return 'kb:audit:read'
   if (method === 'grants' || method === 'grant' || method === 'revoke') return 'kb:grant:manage'
   if (method === 'pending.list' || method === 'pending.approve' || method === 'pending.reject') return 'kb:review:decide'
@@ -4775,6 +4776,41 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // which is the authority. The snapshot never claims something is running that
             // is not: `running` is read from the worker itself, not from a stored flag.
             return writeJson(res, 200, extractionQueue.snapshot())
+          }
+          case 'index.status': {
+            // Read-only view of the plugin's own SQLite index. The DataOps backend has
+            // no per-document index view, and the file list only needs counts.
+            const body = await readJsonBody(req)
+            const relPath = typeof body.path === 'string' ? body.path.trim() : ''
+            const docId = Number(body.docId)
+            const db = new DatabaseSync(indexPathFor(config.indexDir))
+            try {
+              let row: { id: number; path: string; scope: string; mtime: number } | undefined
+              if (Number.isInteger(docId) && docId > 0) {
+                row = db.prepare('select id, path, scope, mtime from kb_docs where id = ?').get(docId) as typeof row
+              } else if (relPath !== '') {
+                const name = relPath.slice(relPath.lastIndexOf('/') + 1)
+                row = (db.prepare('select id, path, scope, mtime from kb_docs where path = ?').get(relPath)
+                  // The index stores paths relative to its own root, while the view may
+                  // carry a bucket prefix (`global/…`), so the bare name is the fallback.
+                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path = ? order by mtime desc limit 1').get(name)
+                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path like ? order by mtime desc limit 1').get('%/' + relPath)
+                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path like ? order by mtime desc limit 1').get('%' + relPath)
+                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path like ? order by mtime desc limit 1').get('%/' + name)) as typeof row
+              }
+              if (row === undefined) return writeJson(res, 200, { found: false })
+              const count = db.prepare('select count(*) as n from kb_chunks where doc_id = ?').get(row.id) as { n?: number } | undefined
+              return writeJson(res, 200, {
+                found: true,
+                docId: row.id,
+                path: row.path,
+                scope: row.scope,
+                chunks: Number(count?.n ?? 0),
+                indexedAt: row.mtime,
+              })
+            } finally {
+              db.close()
+            }
           }
           case 'extract.retry': {
             // Re-run extraction for one document, for the case the upload path could not
