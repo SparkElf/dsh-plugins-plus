@@ -142,6 +142,7 @@ const logClaimFailure = (key: string, error: unknown): void => {
 /** Main-panel key the sidebar rows select. */
 const PANEL_ID = 'group-chat' as MainPanelId
 
+
 /**
  * The members tab type.
  *
@@ -215,7 +216,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-export const inject = ['slots', 'locale', 'uiWorkspace', 'workspaces', 'sidebarRightTabs', 'sidebarRight']
+export const inject = ['slots', 'locale', 'uiWorkspace', 'workspaces', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout']
 
 /**
  * Register the sidebar region and the room page.
@@ -259,7 +260,27 @@ export function apply(ctx: ClientContext): void {
 
   // One store shared by both surfaces, created here because the sidebar must show the
   // same list the page is operating on.
-  const base = createRoomStore()
+  // The store selects the room's Session; the catalog is the shell's, so it is wired here rather
+  // than imported there. `hasSession` keeps a room the Host has not opened yet from silently
+  // replacing the main view with an unknown id.
+  // `uiWorkspace.openSession` is the shell's own "show this Session" entry: it selects the Session
+  // and leaves the panel mode, which is exactly what a sidebar click does. The `sessions` service
+  // exposes the catalog, not navigation, so it is the wrong handle here.
+  const navigation = ctx.get('uiWorkspace') as { openSession?: (sessionId: string) => void } | undefined
+  if (navigation?.openSession === undefined) {
+    // Without navigation a selected room cannot become the view; say so once rather than letting
+    // every click look like a dead button.
+    console.warn('[group-chat] uiWorkspace.openSession is unavailable; room selection cannot navigate')
+  }
+  // Selecting the Session is not enough on its own: a panel left open keeps the main column on
+  // itself, so the same call the shell's own navigation makes clears it afterwards.
+  const layout = ctx.get('layout') as { selectPanel?: (panel: null) => void } | undefined
+  const base = createRoomStore({
+    openSession: (sessionId) => {
+      navigation?.openSession?.(sessionId)
+      layout?.selectPanel?.(null)
+    },
+  })
   // One store for the pending reply, shared by the message that starts it and the composer that
   // shows it. Created here because both surfaces are registered from this entry.
   const quotes = createQuoteStore()

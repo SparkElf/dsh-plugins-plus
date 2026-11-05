@@ -22,6 +22,7 @@
 import { rm } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { SessionPersistenceView, WorkspaceArchiveView } from './context.ts'
+import type { WorkspaceCatalogView } from './context.ts'
 import { ROOM_SESSION_PREFIX } from './session-id.ts'
 
 export type { SessionPersistenceView, WorkspaceArchiveView } from './context.ts'
@@ -214,5 +215,50 @@ export const cleanupRoomSessions = async (
     archived,
     removed,
     errors,
+  }
+}
+
+/** What {@link attachRoomSession} reports, so the caller can log a refusal it did not throw. */
+export type RoomAttachOutcome =
+  | { readonly attached: true }
+  | { readonly attached: false; readonly reason: 'registry-unavailable' | 'workspace-not-found' | 'attach-failed' }
+
+/**
+ * Register a room's Session with the workspace that owns its directory.
+ *
+ * The shell's `openSession` selects a Session that belongs to a Workspace, so a room created
+ * with a `cwd` and no workspace id is not selectable until this runs. Registration is idempotent
+ * on the registry (`attachSession` checks membership before writing), which is what lets the
+ * discovery poll run it on every boot without duplicating rows.
+ *
+ * Never throws: a room that cannot be registered still reads and writes through its Host, only
+ * the main view cannot follow it, and that is a state worth reporting rather than a failed open.
+ * @param registry - the workspace registry surface, absent on a minimal host.
+ * @param directory - the room directory the workspace is resolved by.
+ * @param sessionId - the room's canonical Session.
+ * @param log - optional warning sink; the plugin passes its Cordis logger.
+ * @returns whether the Session is now attached.
+ */
+export const attachRoomSession = async (
+  registry: WorkspaceCatalogView | undefined,
+  directory: string,
+  sessionId: string,
+  log?: { warn?: (...args: unknown[]) => void },
+): Promise<RoomAttachOutcome> => {
+  if (registry === undefined) {
+    log?.warn?.('[group-chat] the workspace registry is unavailable; the room session stays unlisted', sessionId)
+    return { attached: false, reason: 'registry-unavailable' }
+  }
+  try {
+    const workspace = await registry.resolveByPath(directory)
+    if (workspace === undefined) {
+      log?.warn?.('[group-chat] no workspace owns the room directory; the room session stays unlisted', sessionId, directory)
+      return { attached: false, reason: 'workspace-not-found' }
+    }
+    await workspace.attachSession(sessionId)
+    return { attached: true }
+  } catch (error) {
+    log?.warn?.('[group-chat] attaching the room session to its workspace failed', sessionId, error)
+    return { attached: false, reason: 'attach-failed' }
   }
 }

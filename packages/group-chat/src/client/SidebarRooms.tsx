@@ -169,7 +169,7 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
     )
   }
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
-  const { rooms, activeRoomId, failure, searchQuery, discoverable } = state
+  const { rooms, activeRoomId, failure, openFailure, searchQuery, discoverable } = state
 
   const [searchExpanded, setSearchExpanded] = useState(false)
   const [viewOpen, setViewOpen] = useState(false)
@@ -514,6 +514,9 @@ export function SidebarRooms(props: SidebarRoomsInjected) {
 
         <div className={styles.list}>
           {failure !== undefined && <p className={styles.empty}>{t(failure)}</p>}
+          {/* A room the reader selected but could not be shown. The list stays usable, so this
+              sits above it as a notice rather than replacing it the way a list failure does. */}
+          {openFailure !== undefined && <p className={styles.empty} role="alert">{t(openFailure)}</p>}
           {failure === undefined && rooms === undefined && <p className={styles.empty}>{t('loading')}</p>}
           {failure === undefined && rooms !== undefined && visible.length === 0 && (
             /* The same shape the workspace region uses when it has no sessions: a centred

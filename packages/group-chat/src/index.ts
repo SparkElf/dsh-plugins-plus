@@ -45,7 +45,8 @@ import {
   type ServerTarget,
 } from './identity.ts'
 import { declaredMentions, mentionedMemberIds, shouldTriggerAgent, speakerPrefix, textOfContent, withSpeakerPrefix, type AgentTriggerPolicy } from './routing.ts'
-import { cleanupRoomSessions, type SessionPersistenceView, type WorkspaceArchiveView } from './session-maintenance.ts'
+import { attachRoomSession, cleanupRoomSessions, type SessionPersistenceView, type WorkspaceArchiveView } from './session-maintenance.ts'
+import type { WorkspaceCatalogView } from './context.ts'
 import { openRoomStream } from './stream.ts'
 
 export const name = 'group-chat'
@@ -458,6 +459,9 @@ export class RoomSessions {
     const resumed = await this.resolvePersisted(sessionId, directory)
     if (resumed !== undefined) {
       await this.installRoomModel(resumed, room, false)
+      // Registered on every open, not only on creation: an image that predates this call (or a
+      // workspace deleted and recreated under the room) still has to become selectable.
+      await this.attachToWorkspace(sessionId, directory)
       return resumed
     }
 
@@ -470,9 +474,10 @@ export class RoomSessions {
     // claiming a row in that list. The session therefore lands in the shell's "Ungrouped"
     // bucket, which is exactly the bucket for sessions that belong to no workspace.
     //
-    // This must not be confused with "a session nothing can open": `uiWorkspace.openSession`
-    // retains the Session by id and never consults workspace membership, so the room opens the
-    // same way it did when it owned a workspace.
+    // It still has to be *attachable*: the shell's `openSession` selects a Session that belongs
+    // to a Workspace, so `attachToWorkspace` registers this one against the workspace that owns
+    // the room directory. Without that, clicking the room moves the sidebar highlight and the
+    // main column keeps the previous Session.
     const created = await this.ctx.sessionController.create({
       sessionId,
       cwd: directory,
@@ -493,6 +498,7 @@ export class RoomSessions {
       throw new Error(`group-chat could not open a session for room ${roomId}`)
     }
     await this.installRoomModel(session, room, true)
+    await this.attachToWorkspace(sessionId, directory)
     return session
   }
 
@@ -562,6 +568,26 @@ export class RoomSessions {
   /** The workspace registry's archive surface, looked up lazily because it is optional. */
   private get archiveRegistry(): WorkspaceArchiveView | undefined {
     return hostService<WorkspaceArchiveView>(this.ctx, 'workspaceRegistry')
+  }
+
+  /**
+   * Attach the room's Session to the workspace that owns its directory.
+   *
+   * The shell's `openSession` selects a Session that belongs to a Workspace, so a room created
+   * with a `cwd` alone is not selectable and clicking it moves the highlight only. Attaching is
+   * idempotent on the registry side, and every failure here is logged rather than fatal: a room
+   * whose registration failed still reads and writes through its Host, only the main view
+   * cannot follow it.
+   * @param sessionId - the room's canonical Session.
+   * @param directory - the room directory the workspace is resolved by.
+   */
+  private async attachToWorkspace(sessionId: string, directory: string): Promise<void> {
+    await attachRoomSession(
+      hostService<WorkspaceCatalogView>(this.ctx, 'workspaceRegistry'),
+      directory,
+      sessionId,
+      this.ctx.logger,
+    )
   }
 
   /** Hide a replacement the controller minted instead of honoring the room id. */

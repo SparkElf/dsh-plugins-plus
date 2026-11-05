@@ -36,6 +36,23 @@ export interface WorkspaceArchiveView {
 }
 
 /**
+ * The workspace registry surface that makes a room selectable.
+ *
+ * The shell's `openSession` selects a Session that belongs to a workspace; a room's Session is
+ * created with a `cwd` and no workspace id, so it has to be attached once, by path, or clicking
+ * the room moves the sidebar highlight and nothing else. `attachSession` is idempotent on the
+ * registry side, which is what lets the discovery poll run it on every boot.
+ */
+/** The one workspace method attaching a Session needs; kept structural so tests need no registry. */
+export interface WorkspaceAttachmentView {
+  attachSession(sessionId: string): Promise<void>
+}
+
+export interface WorkspaceCatalogView {
+  resolveByPath(path: string): Promise<WorkspaceAttachmentView | undefined>
+}
+
+/**
  * Host services this plugin needs.
  *
  * `agents` and `sessions` carry the room subscription, `webServer` exposes the

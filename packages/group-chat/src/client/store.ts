@@ -17,6 +17,7 @@ import {
   type RoomMember, type RoomSummary, updateRoom,
 } from './api.ts'
 import type { GroupChatKey } from './locales.ts'
+import { roomSessionId } from '../session-id.ts'
 
 /** The three distinguishable failures the surfaces render as copy. */
 export type RoomFailure = GroupChatKey | undefined
@@ -27,6 +28,12 @@ export interface RoomState {
   /** The room the main panel is showing, if any. */
   readonly activeRoomId: string | undefined
   readonly failure: RoomFailure
+  /**
+   * Why the last room selection could not be shown, when the Session it names is missing or the
+   * view refused it. Separate from {@link failure}: that one means the room list itself could not
+   * be read, and it replaces the list, while this one leaves every room selectable.
+   */
+  readonly openFailure: GroupChatKey | undefined
   /**
    * The sidebar's search box contents.
    *
@@ -191,11 +198,23 @@ export interface RoomStore {
  * @returns a store whose `getState` returns a stable reference between changes, which is
  *   what `useSyncExternalStore` requires to avoid a render loop.
  */
-export function createRoomStore(): RoomStore {
+/**
+ * What the store needs from the shell to make a selected room the main view.
+ *
+ * Injected rather than imported so the module stays a pure state container: a test can assert
+ * which Session was asked for without a layout, and the plugin wires the real catalog in.
+ */
+export interface RoomStoreDeps {
+  /** Make one Session the current view (the catalog's own selection). */
+  readonly openSession?: (sessionId: string) => void
+}
+
+export function createRoomStore(deps: RoomStoreDeps = {}): RoomStore {
   let state: RoomState = {
     rooms: undefined,
     activeRoomId: undefined,
     failure: undefined,
+    openFailure: undefined,
     searchQuery: '',
     selfId: undefined,
     administrator: false,
@@ -270,6 +289,7 @@ export function createRoomStore(): RoomStore {
       // makes the badge disappear the moment the conversation is on screen.
       set({
         activeRoomId: roomId,
+        openFailure: undefined,
         ...(state.rooms === undefined
           ? {}
           : { rooms: state.rooms.map(room => room.id === roomId ? { ...room, unreadCount: 0, mentionCount: 0 } : room) }),
@@ -278,6 +298,21 @@ export function createRoomStore(): RoomStore {
       // side bar refreshes every few seconds — fetching it there would be a steady stream of
       // requests for data that almost never differs.
       void loadMembersInto(roomId)
+      // Selecting the room IS selecting its Session: a room has exactly one, its id is
+      // deterministic, and the Host resolved-or-created it when it opened the room. Without this
+      // the sidebar highlight moved while the main column kept the previous Session -- the room
+      // looked open and the composer under it belonged to a different conversation.
+      const sessionId = roomSessionId(roomId)
+      // No pre-flight existence check: the Catalog pages its list, so a room whose Session exists
+      // can still be absent from the page in hand, and refusing on that would hide a real room.
+      // The Host guarantees the Session (discovery opens every joined room); a selection that
+      // fails reports itself instead.
+      try {
+        deps.openSession?.(sessionId)
+      } catch (error) {
+        console.error('[group-chat] selecting the room session failed', sessionId, error)
+        set({ openFailure: 'roomOpenFailed' })
+      }
     },
     discover: async (query) => {
       try {

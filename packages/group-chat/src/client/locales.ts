@@ -13,6 +13,7 @@ export const en = {
   description: 'Rooms this workspace has joined. @ yourself to make the agent answer; every other message is recorded and read, but nothing runs.',
   loading: 'Loading rooms…',
   retry: 'Retry',
+  roomOpenFailed: 'Could not open this room. Please retry.',
 
   emptyRooms: 'No rooms yet',
   createRoom: 'New room',
@@ -175,6 +176,7 @@ export const zh = {
   title: '群聊',
   description: '本工作区已加入的群聊。@ 自己会触发 agent 应答；其他消息都会记录并进入上下文，但不执行。',
   loading: '正在加载群聊…',
+  roomOpenFailed: '无法打开该房间，请稍后重试。',
   retry: '重试',
 
   emptyRooms: '暂无群聊',
