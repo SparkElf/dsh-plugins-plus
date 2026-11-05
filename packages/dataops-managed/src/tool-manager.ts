@@ -34,6 +34,7 @@ import {
 } from './tool-scope.ts'
 import { readConnectorState, type DataOpsConnectorState } from './connector-state.ts'
 import { buildAiManagementTools } from './tools.ts'
+import { buildAdminWorkspaceTools } from './admin-workspace-tools.ts'
 
 /** Structural view of the skill registry's viewer hook (newer DSH releases). */
 interface SkillViewerLike {
@@ -73,7 +74,10 @@ export class AiToolManager {
     private readonly collectHub: OpenResourceHub,
   ) {
     this.definitions = new Map(
-      buildAiManagementTools(ctx, reviewApi, () => this.scope, this.collectHub).map(tool => [tool.name, tool.definition]),
+      [
+        ...buildAiManagementTools(ctx, reviewApi, () => this.scope, this.collectHub),
+        ...buildAdminWorkspaceTools(reviewApi, () => this.scope),
+      ].map(tool => [tool.name, tool.definition]),
     )
     this.unsubscribeExpiry = onAuthStateChange((state) => {
       // A 401 from any DataOps call means the stored JWT is no longer accepted. The next

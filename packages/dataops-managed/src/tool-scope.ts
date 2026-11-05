@@ -107,6 +107,10 @@ export const AI_TOOL_ACCESS = {
   dataops_resource_grant_batch: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
   dataops_resource_approval_decide: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
   dataops_resource_grant_revoke: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
+  // 超管代维：只在超管会话出现；真正的闸门在服务端与工具调用时的二次判定。
+  admin_workspace_restart: { superAdminOnly: true },
+  admin_workspace_tunnel_open: { superAdminOnly: true },
+  admin_workspace_tunnel_revoke: { superAdminOnly: true },
 } as const satisfies Record<string, ToolAccessPolicy>
 
 /** Every managed tool name, in the order the manager considers them. */

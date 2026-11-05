@@ -19,13 +19,16 @@ description: 超管代维另一个用户的 DSH 工作区时使用。包含临�
 
 两个工具：
 
-- `admin_workspace_tunnel_open(userId)` → 返回一次性连接信息（`privateKey` / `targetHost` / `port` / `expiresAt`）。**私钥只出现这一次**，不落库、不进日志。
+- `admin_workspace_tunnel_open(userId)` → 私钥**不返回正文**：工具把它写成工作区内的 0600 一次性文件
+  （`/workspace/.dataops/admin-tunnels/<workspaceId>/id_ed25519`，目录 0700），只返回 `keyPath`、
+  `sshCommand`、`targetHost`、`port`、`expiresAt`。
 - `admin_workspace_tunnel_revoke(userId)` → 立即撤销（删除对应的 `authorized_keys` 标记行并结束转发）。
 
 规则：
 
 1. 开通前先在门户里确认目标工作区 id 和 owner，**不要凭用户名猜 userId**；
-2. 私钥只在当轮使用，用完即 `revoke`；不要把私钥写进文件、贴进聊天、存进工作区；
+2. 私钥只存在于上面那个 0600 文件里（工具不会把正文给你）；不要 `cat` 它、不要贴进聊天、
+   不要复制到别处；用完即 `revoke`，`revoke` 会同时删掉文件与目录；
 3. 隧道默认 **24 小时**到期，服务端每 5 分钟清理过期标记；到期后连接立即失效，**不要依赖自己记时间**；
 4. 同一目标不要并行开多条；用完就撤销，撤销后要复验「再连失败」再结束。
 
