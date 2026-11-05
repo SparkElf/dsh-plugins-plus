@@ -304,3 +304,64 @@
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxs-12);
 }
+
+/* Footer: clear-history on the left, close on the right. */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+/* Headless dialog chrome: title + ratio share a baseline, the close button stays 24px. */
+.dialogShell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+}
+
+.dialogHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dialogTitleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dialogTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-base-strong-16);
+}
+
+.titleRatio {
+  color: #8ea6c6;
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dialogClose {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dialogClose:hover {
+  background: rgba(255, 255, 255, .06);
+  color: var(--dsw-alias-label-primary);
+}

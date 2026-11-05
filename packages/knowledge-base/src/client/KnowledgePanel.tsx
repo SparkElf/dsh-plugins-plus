@@ -1827,53 +1827,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 the page names itself and says how big the tree is in one glance. It is
                 allowed to shrink and ellipsize; the title and the actions keep their
                 natural width. */}
-            <p className={styles.headerFact}>
-              {/* A document's own facts are its instant and its path. The count of
-                  everything in the tree is a fact about the KNOWLEDGE BASE, not about
-                  the document on screen, so it is not repeated over an open file --
-                  it describes the tree, and the tree already has its own header. */}
-              {scope === 'graph' ? (
-                activeGraph === undefined ? (
-                  <>
-                    <span>{String(graphNodes.length) + ' ' + t('graphUnitGraphs')}</span>
-                    <span className={styles.factDot} aria-hidden="true">·</span>
-                    <span>{t('graphSelectHint')}</span>
-                  </>
-                ) : (
-                  <>
-                    <span>{String(activeGraph.counts.topics) + ' ' + t('graphUnitLines')}</span>
-                    <span className={styles.factDot} aria-hidden="true">·</span>
-                    <span>{String(activeGraph.counts.links) + ' ' + t('graphUnitRelations')}</span>
-                    <span className={styles.factDot} aria-hidden="true">·</span>
-                    <span>{String(activeGraph.counts.documents) + ' ' + t('graphUnitDocuments')}</span>
-                  </>
-                )
-              ) : rendered.kind === 'file' ? (
-                <>
-                  {fileMtimeMs === undefined
-                    ? null
-                    : <span>{t('modifiedAt') + ' ' + new Date(fileMtimeMs).toLocaleString()}</span>}
-                  {fileMtimeMs === undefined ? null : <span className={styles.factDot} aria-hidden="true">·</span>}
-                  <code className={styles.headerPath}>
-                    {config.mountPoint + '/' + rendered.path}
-                  </code>
-                </>
-              ) : (
-                <>
-                  {/* Two different situations reach here as one null count. A share that
-                      is not mounted is something the reader must take up with the
-                      deployment; a pointer this plugin has not generated yet resolves
-                      itself on the next read. Saying "not mounted" for the second sends
-                      them to check a mount that is working, so the wording follows the
-                      state the Host classified rather than the absence of a number. */}
-                  {status.visibleFiles === null || status.visibleFiles === undefined
-                    ? (status.mountState === 'pointer-missing' ? t('viewNotBuilt') : t('mountPointMissing'))
-                    : String(status.visibleFiles) + ' ' + t('filesUnit')}
-                  <span className={styles.factDot} aria-hidden="true">·</span>
-                  <code className={styles.headerPath}>{config.mountPoint}</code>
-                </>
-              )}
-            </p>
             {/* Always rendered: the progress bell is a panel-level entry that must
                 survive every section, so the row cannot depend on a page action.
                 Note the bell disappears while a document is open in the right-hand

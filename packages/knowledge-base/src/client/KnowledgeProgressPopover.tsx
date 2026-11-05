@@ -25,6 +25,8 @@ import { canRetryExtraction, classifyExtractionFailure, mergeOptimistic, survivi
 import type { FailedExtractionView, OptimisticExtraction } from './progressRules.ts'
 import type { UploadTaskView } from './progressRules.ts'
 import styles from './KnowledgeProgressPopover.module.css'
+import { clearTaskQueue, loadTaskQueue, mergeTaskRecords, saveTaskQueue } from './taskQueueStore.ts'
+import type { PersistedTask } from './taskQueueStore.ts'
 
 /** Props for the notification button and panel. */
 export interface KnowledgeProgressPopoverProps {
@@ -136,6 +138,8 @@ function readFailureReason(
  */
 export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
   const t = props.t
+  /** Tasks observed by the Host before this page session belong to history, not the live queue. */
+  const sessionStart = useRef(Date.now())
   const [extractions, setExtractions] = useState<ExtractionTaskView[]>([])
   const [open, setOpen] = useState(false)
   /** The task being retried, so only its own row shows the pending state. */
@@ -245,6 +249,7 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     name: string
     path: string
     stage: 'uploading' | 'uploaded' | 'extracting' | 'done' | 'failed'
+    kind: 'upload' | 'extract'
     percent?: number
     reason?: string
     rawReason?: string
@@ -252,87 +257,205 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     at?: string
     retryPath?: string
     retryable?: boolean
+    /** Restored from localStorage rather than observed this session. */
+    historical?: boolean
   }
   const basename = (value: string): string => value.slice(value.lastIndexOf('/') + 1)
   const dirname = (value: string): string => value.slice(0, value.lastIndexOf('/'))
   const queueRows = useMemo<QueueRow[]>(() => {
-    const rows: QueueRow[] = []
-    const byPath = new Map(merged.rows.map(task => [task.relPath, task]))
-    // 上传行的 dir 是相对挂载点，提取任务的 relPath 可能带挂载前缀（如 Everyone/…）；
-    // 精确路径匹配不到时按文件名兜底，否则卡片会永远停在「上传完成」。
-    const byName = new Map(merged.rows.map(task => [basename(task.relPath), task]))
-    const extractionRow = (task: ExtractionTaskView, withUpload: boolean): QueueRow => {
-      const failure = task.state === 'failed' ? readFailureReason(task.reason, t) : undefined
-      const missingFile = task.state === 'failed' && classifyExtractionFailure(task.reason ?? '') === 'missing-file'
-      const stage = task.state === 'pending' || task.state === 'running'
-        ? 'extracting'
-        : task.state === 'succeeded' || task.state === 'already-markdown' ? 'done' : 'failed'
-      return {
-        key: 'extract:' + task.relPath,
-        name: basename(task.relPath),
-        path: dirname(task.relPath),
-        stage,
-        at: task.queuedAt ?? task.startedAt ?? task.finishedAt,
-        markdown: task.markdown,
-        ...(failure === undefined ? {} : { reason: failure.text, ...(failure.raw === undefined ? {} : { rawReason: failure.raw }) }),
-        ...(stage === 'failed' && !missingFile ? { retryPath: task.relPath, retryable: true } : {}),
+    const rows = new Map<string, QueueRow>()
+    const extractionByPath = new Map(merged.rows.map(task => [task.relPath, task]))
+    const extractionByName = new Map(merged.rows.map(task => [basename(task.relPath), task]))
+    const used = new Set<string>()
+    /** Overall progress: upload 0-25, upload done 25, extraction 25-75, done 100. */
+    const progressForExtraction = (task: ExtractionTaskView): number => {
+      if (task.state === 'succeeded' || task.state === 'already-markdown') return 100
+      if (task.state === 'failed' || task.state === 'unsupported') return 50
+      if (task.state === 'pending') return 30
+      if (task.step === 'chunk') return 60
+      if (task.step === 'index') return 70
+      if (task.step === 'done') return 75
+      return 45
+    }
+    const applyExtraction = (row: QueueRow, task: ExtractionTaskView): void => {
+      used.add(task.relPath)
+      row.percent = progressForExtraction(task)
+      if (task.state === 'succeeded' || task.state === 'already-markdown') {
+        row.stage = 'done'
+        row.markdown = task.markdown
+        return
       }
+      if (task.state === 'failed' || task.state === 'unsupported') {
+        row.stage = 'failed'
+        const failure = readFailureReason(task.reason, t)
+        row.reason = failure.text
+        if (failure.raw !== undefined) row.rawReason = failure.raw
+        if (classifyExtractionFailure(task.reason ?? '') !== 'missing-file') {
+          row.retryPath = task.relPath
+          row.retryable = true
+        }
+        return
+      }
+      row.stage = 'extracting'
+    }
+    const rank: Record<QueueRow['stage'], number> = { uploading: 0, uploaded: 1, extracting: 2, done: 3, failed: 4 }
+    const upsert = (row: QueueRow): void => {
+      const existing = rows.get(row.key)
+      if (existing === undefined) { rows.set(row.key, row); return }
+      if (rank[row.stage] >= rank[existing.stage]) rows.set(row.key, { ...existing, ...row })
     }
     for (const task of props.uploads) {
       const relPath = task.dir === '' ? task.name : task.dir + '/' + task.name
-      if (task.state === 'waiting' || task.state === 'uploading') {
-        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploading', percent: task.percent, at: task.at })
-        continue
+      const name = basename(task.name)
+      const row: QueueRow = {
+        key: 'file:' + name,
+        name,
+        path: '',
+        kind: 'upload',
+        stage: 'uploading',
+        percent: task.percent === undefined ? 0 : Math.round(task.percent * 0.25),
+        at: task.at,
       }
       if (task.state === 'failed') {
-        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'failed', reason: task.reason, at: task.at })
-        continue
+        row.stage = 'failed'
+        row.percent = 0
+        row.reason = task.reason
+      } else if (task.state === 'done') {
+        const extraction = extractionByPath.get(relPath) ?? extractionByName.get(name)
+        if (extraction !== undefined) applyExtraction(row, extraction)
+        else { row.stage = 'uploaded'; row.percent = 25 }
       }
-      const extractionTask = byPath.get(relPath) ?? byName.get(basename(relPath))
-      if (extractionTask !== undefined) {
-        byPath.delete(extractionTask.relPath)
-        byName.delete(basename(extractionTask.relPath))
-        rows.push(extractionRow(extractionTask, true))
-      } else {
-        // Uploaded and no extraction task reported yet: the file itself is in place, so
-        // the row settles at "uploaded" instead of holding the badge open forever.
-        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploaded', at: task.at })
-      }
+      upsert(row)
     }
-    // 只保留最近 10 分钟的提取任务：Host 的 extract.status 会返回历史任务，
-    // 全部堆进「任务队列」会淹掉读者刚发起的那一条。
+    // Completed tasks the Host still remembers from an earlier page session are history:
+    // the persisted record (if any) renders them. Active tasks and this session's own
+    // requests stay live.
     const recentCutoff = Date.now() - 10 * 60_000
-    // `.md` 是派生产物：源文件已经在队列里时不再单独显示一行，提取状态挂在源文件行上。
-    const sourceNames = new Set([...props.uploads.map(task => basename(task.name)), ...merged.rows.map(task => basename(task.relPath))])
-    for (const task of byPath.values()) {
+    const sourceNames = new Set(props.uploads.map(task => basename(task.name)))
+    for (const task of merged.rows) {
+      if (used.has(task.relPath)) continue
       const name = basename(task.relPath)
+      if (rows.has('file:' + name)) continue
+      // `.md` 是派生产物：源文件已经在队列里时不再单独显示一行。
       if (name.endsWith('.md') && sourceNames.has(name.slice(0, -3))) continue
       const at = Date.parse(task.queuedAt ?? task.startedAt ?? task.finishedAt ?? '')
       if (!Number.isFinite(at) || at < recentCutoff) continue
-      rows.push(extractionRow(task, false))
+      const active = task.state === 'pending' || task.state === 'running'
+      if (!active && at < sessionStart.current) continue
+      const row: QueueRow = {
+        key: 'file:' + name,
+        name,
+        path: '',
+        kind: 'extract',
+        stage: 'extracting',
+        percent: 25,
+        at: task.queuedAt ?? task.startedAt,
+      }
+      applyExtraction(row, task)
+      upsert(row)
     }
     for (const entry of merged.queued) {
-      rows.push({ key: 'queued:' + entry.relPath, name: basename(entry.relPath), path: dirname(entry.relPath), stage: 'extracting', at: new Date(entry.requestedAt).toISOString() })
+      const name = basename(entry.relPath)
+      const existing = rows.get('file:' + name)
+      if (existing !== undefined) {
+        if (existing.stage === 'uploaded') { existing.stage = 'extracting'; existing.percent = 25 }
+        continue
+      }
+      rows.set('file:' + name, {
+        key: 'file:' + name,
+        name,
+        path: '',
+        kind: 'extract',
+        stage: 'extracting',
+        percent: 25,
+        at: new Date(entry.requestedAt).toISOString(),
+      })
     }
     for (const failure of clientFailures) {
+      const name = basename(failure.relPath)
       const readable = readFailureReason(failure.reason, t)
       const missingFile = classifyExtractionFailure(failure.reason) === 'missing-file'
-      rows.push({
-        key: 'client-failed:' + failure.relPath,
-        name: basename(failure.relPath),
-        path: dirname(failure.relPath),
+      const existing = rows.get('file:' + name)
+      if (existing !== undefined) {
+        existing.stage = 'failed'
+        existing.percent = existing.percent ?? 50
+        existing.reason = readable.text
+        if (readable.raw !== undefined) existing.rawReason = readable.raw
+        if (!missingFile) { existing.retryPath = failure.relPath; existing.retryable = true }
+        continue
+      }
+      rows.set('file:' + name, {
+        key: 'file:' + name,
+        name,
+        path: '',
+        kind: 'extract',
         stage: 'failed',
+        percent: 50,
         reason: readable.text,
         ...(readable.raw === undefined ? {} : { rawReason: readable.raw }),
         ...(missingFile ? {} : { retryPath: failure.relPath, retryable: true }),
+        at: new Date(failure.at).toISOString(),
       })
     }
-    // Newest first: the task the reader just started is the one they opened the panel for.
-    return rows.sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
+    return [...rows.values()].sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
   }, [props.uploads, merged, clientFailures, t])
 
   const queueDone = queueRows.filter(row => row.stage === 'done' || row.stage === 'uploaded').length
   const queueFailed = queueRows.filter(row => row.stage === 'failed').length
+  const [history, setHistory] = useState<PersistedTask[]>(() => loadTaskQueue())
+  /**
+   * Persist every observation. Metadata only: the task's name, stage, progress and
+   * timestamps, never the document bytes.
+   */
+  useEffect(() => {
+    if (queueRows.length === 0) return
+    setHistory(current => {
+      const now = Date.now()
+      const incoming: PersistedTask[] = queueRows.map(row => {
+        const started = row.at === undefined ? NaN : Date.parse(row.at)
+        return {
+          id: row.key,
+          fileName: row.name,
+          kind: row.kind,
+          stage: row.stage,
+          ...(row.percent === undefined ? {} : { progress: row.percent }),
+          startedAt: Number.isFinite(started) ? started : now,
+          ...(row.stage === 'done' || row.stage === 'failed' ? { finishedAt: now } : {}),
+          ...(row.reason === undefined ? {} : { error: row.reason }),
+        }
+      })
+      const next = mergeTaskRecords(current, incoming, now)
+      saveTaskQueue(next)
+      return next
+    })
+  }, [queueRows])
+  const historyRows = useMemo<QueueRow[]>(() => {
+    const live = new Set(queueRows.map(row => row.key))
+    // 一份文件只画一张历史卡：upload 与 extract 是同一件事的两个阶段，按文件名折叠，
+    // 阶段取更靠后的那一条（extract 优先），避免刷新后出现「已上传 + 已提取」两行。
+    const stageRank: Record<QueueRow['stage'], number> = { uploading: 0, uploaded: 1, extracting: 2, done: 3, failed: 4 }
+    const byFile = new Map<string, PersistedTask>()
+    for (const record of history) {
+      if (live.has(record.id)) continue
+      const existing = byFile.get(record.fileName)
+      if (existing === undefined || stageRank[record.stage] >= stageRank[existing.stage]) byFile.set(record.fileName, record)
+    }
+    return [...byFile.values()].map(record => ({
+      key: 'history:' + record.id,
+      name: record.fileName,
+      path: '',
+      kind: record.kind,
+      stage: record.stage,
+      ...(record.progress === undefined ? {} : { percent: record.progress }),
+      at: new Date(record.startedAt).toISOString(),
+      ...(record.error === undefined ? {} : { reason: record.error }),
+      historical: true,
+    }))
+  }, [history, queueRows])
+  const displayRows = useMemo(
+    () => [...queueRows, ...historyRows].sort((a, b) => (b.at ?? '').localeCompare(a.at ?? '')),
+    [queueRows, historyRows],
+  )
 
   /**
    * Badge = tasks not finished yet (uploading or extracting). Uploaded-only rows are settled:
@@ -354,7 +477,7 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
 
   // A queued guess is work in flight, so the panel and its badge have to count it.
   const queuedCount = merged.queued.length
-  const hasWork = props.uploads.length > 0 || merged.rows.length > 0 || queuedCount > 0 || clientFailures.length > 0
+  const hasWork = displayRows.length > 0
 
   // The badge is the only always-visible part. It states a count and nothing else: a
   // number that is zero is not information, so the badge is absent rather than "0".
@@ -392,33 +515,28 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
         open={open}
         onClose={() => { setOpen(false) }}
         title={t('progressTitle')}
-        closeLabel={t('progressClose')}
         className={styles.dialog}
-        contentClassName={styles.dialogContent}
-        footer={(
-          <Button variant="ghost" size="md" onClick={() => { setOpen(false) }}>
-            {t('progressClose')}
-          </Button>
-        )}
+        headless
       >
+        <div className={styles.dialogShell}>
+          <div className={styles.dialogHead}>
+            <div className={styles.dialogTitleRow}>
+              <h2 className={styles.dialogTitle}>{t('progressTitle')}</h2>
+              {displayRows.length > 0 && (
+                <span className={styles.titleRatio}>{queueDone}/{displayRows.length}</span>
+              )}
+            </div>
+            <button type="button" className={styles.dialogClose} aria-label={t('progressClose')} onClick={() => { setOpen(false) }}>
+              ×
+            </button>
+          </div>
+          <div className={styles.dialogContent}>
         {!hasWork && <p className={styles.empty}>{t('progressIdle')}</p>}
 
-        {queueRows.length > 0 && (
-          <div className={styles.summary}>
-            <span className={styles.summaryItem}>
-              <span className={styles.summaryLabel}>{t('progressQueueTitle')}</span>
-              <span className={styles.summaryValue}>
-                {queueDone}/{queueRows.length}
-                {queueFailed > 0 ? ' · ' + t('progressFailedTitle') + ' ' + String(queueFailed) : ''}
-              </span>
-            </span>
-          </div>
-        )}
-
-        {queueRows.length > 0 && (
+        {displayRows.length > 0 && (
           <section className={styles.group}>
             <ul className={styles.list}>
-              {queueRows.map(row => {
+              {displayRows.map(row => {
                 const stageLabel = row.stage === 'uploading' ? t('dropUploading')
                   : row.stage === 'uploaded' ? t('progressUploadDone')
                     : row.stage === 'extracting' ? t('progressExtracting')
@@ -445,21 +563,17 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
                         className={styles.progressTrack}
                         role="progressbar"
                         aria-label={row.name}
-                        {...(row.stage === 'uploading' && row.percent !== undefined
-                          ? { 'aria-valuenow': row.percent, 'aria-valuemin': 0, 'aria-valuemax': 100 }
-                          : {})}
+                        aria-valuenow={row.percent ?? 0}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
                       >
                         <span
-                          className={row.stage === 'extracting' || (row.stage === 'uploading' && row.percent === undefined)
-                            ? styles.progressFillIndeterminate
-                            : row.stage === 'failed' ? styles.progressFill + ' ' + styles.progressFillFailed : styles.progressFill}
-                          {...(row.stage === 'extracting' || (row.stage === 'uploading' && row.percent === undefined)
-                            ? {}
-                            : { style: { width: row.stage === 'uploading' ? String(row.percent ?? 0) + '%' : '100%' } })}
+                          className={row.stage === 'failed' ? styles.progressFill + ' ' + styles.progressFillFailed : styles.progressFill}
+                          style={{ width: String(row.percent ?? 0) + '%' }}
                         />
                       </span>
-                      {row.stage === 'uploading' && row.percent !== undefined && (
-                        <span className={styles.progressPercent}>{String(row.percent) + '%'}</span>
+                      {row.percent !== undefined && (
+                        <span className={styles.progressPercent}>{String(Math.round(row.percent)) + '%'}</span>
                       )}
                     </span>
                     {row.reason !== undefined && <span className={styles.cardReason}>{row.reason}</span>}
@@ -487,6 +601,21 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
             </ul>
           </section>
         )}
+          </div>
+          <div className={styles.footer}>
+            <Button
+              variant="ghost"
+              size="md"
+              disabled={history.length === 0}
+              onClick={() => { clearTaskQueue(); setHistory([]) }}
+            >
+              {t('progressClear')}
+            </Button>
+            <Button variant="ghost" size="md" onClick={() => { setOpen(false) }}>
+              {t('progressClose')}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </>
   )
