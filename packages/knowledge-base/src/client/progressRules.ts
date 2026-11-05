@@ -125,6 +125,10 @@ export interface UploadTaskView {
   /** Why it failed, in the Host's own words. */
   reason?: string
   /**
+   * When this row was enqueued, ISO-8601. Used to order the unified task queue.
+   */
+  at?: string
+  /**
    * Bytes sent, as 0-100.
    *
    * Absent while the browser cannot know it (a body without a known length) and on every
@@ -149,15 +153,26 @@ export interface UploadTaskView {
  * @returns The number of tasks still in flight.
  */
 export function pendingCount(
-  uploads: readonly { state: string }[],
+  uploads: readonly { state: string; at?: string }[],
   extractions: readonly { state: string }[],
 ): number {
   // `waiting` and `uploading` are both pending; a file the reader just dropped counts
   // immediately, which is what makes the badge appear as soon as the drop happens.
   const uploading = uploads.filter(task => task.state === 'waiting' || task.state === 'uploading').length
   const extracting = extractions.filter(task => task.state === 'pending' || task.state === 'running').length
-  return uploading + extracting
+  // 上传刚完成的一小段时间里继续算 pending：服务端随后才会创建提取任务，如果 badge
+  // 立刻归零，轮询就会停，卡片会永远停在「上传完成」而不是进入「提取中」。
+  const now = Date.now()
+  const awaitingExtraction = uploads.filter(task => {
+    if (task.state !== 'done' || task.at === undefined) return false
+    const at = Date.parse(task.at)
+    return Number.isFinite(at) && now - at < UPLOAD_EXTRACTION_GRACE_MS
+  }).length
+  return uploading + extracting + awaitingExtraction
 }
+
+/** 上传完成后继续轮询提取任务的窗口。 */
+export const UPLOAD_EXTRACTION_GRACE_MS = 30_000
 
 /**
  * How long an optimistic extraction entry may wait for the Host to confirm it.

@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, FileTypeIcon, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { KB_API, kbApiPath, type ExtractionStatusView, type ExtractionTaskView } from '../api.ts'
-import { canRetryExtraction, classifyExtractionFailure, mergeOptimistic, pendingCount, survivingClientFailures, tallyExtraction, tallyUploads } from './progressRules.ts'
+import { canRetryExtraction, classifyExtractionFailure, mergeOptimistic, survivingClientFailures, UPLOAD_EXTRACTION_GRACE_MS } from './progressRules.ts'
 import type { FailedExtractionView, OptimisticExtraction } from './progressRules.ts'
 import type { UploadTaskView } from './progressRules.ts'
 import styles from './KnowledgeProgressPopover.module.css'
@@ -166,17 +166,6 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     [extractions, props.optimistic],
   )
 
-  /**
-   * Whether anything is still in flight, which is exactly what the badge counts.
-   *
-   * The optimistic rows are added on top of the Host's own count: they ARE the tasks the
-   * reader just asked for, and the badge's job is to answer "did my click do anything".
-   */
-  const pending = useMemo(
-    () => pendingCount(props.uploads, extractions) + merged.queued.length,
-    [props.uploads, extractions, merged.queued.length],
-  )
-
   // Poll only while something is pending: an idle reader must not cost a request every
   // second and a half forever. The panel being open does not change the rule -- the
   // closed state has to stay current too, because the badge has to be right before the
@@ -207,12 +196,11 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
       live = false
       if (timer !== undefined) clearTimeout(timer)
     }
-  }, [props.watchExtraction, readExtractions, props.refreshSignal])
+  }, [props.watchExtraction, readExtractions, props.refreshSignal, props.uploads])
 
   // The poll loop reads the current pending count through a ref: putting it in the effect
   // dependencies would restart the timer on every task change and starve the interval.
   const pendingRef = useRef(0)
-  pendingRef.current = pending
 
   /** Ask the Host to run this extraction again. */
   const retry = useCallback(async (relPath: string): Promise<void> => {
@@ -239,7 +227,6 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     }
   }, [props, readExtractions])
 
-  const upload = useMemo(() => tallyUploads(props.uploads), [props.uploads])
   // Failures the Host has no task for still belong in the summary, so they are folded in
   // as synthetic failed rows before counting. A summary that skipped them would show
   // "0 failed" above a list holding the failure the reader just saw.
@@ -247,10 +234,132 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
     () => survivingClientFailures(merged.rows, props.failures ?? [], merged.queued),
     [merged.rows, merged.queued, props.failures],
   )
-  const extraction = useMemo(
-    () => tallyExtraction([...merged.rows, ...clientFailures.map(() => ({ state: 'failed' }))]),
-    [merged.rows, clientFailures],
-  )
+  /**
+   * One unified queue: each file is one row whose badge advances through
+   * uploading → uploaded → extracting → done (or failed). Uploads and the extraction
+   * tasks they trigger are merged by tree-relative path, so a reader never has to
+   * reconcile two groups that describe the same file.
+   */
+  interface QueueRow {
+    key: string
+    name: string
+    path: string
+    stage: 'uploading' | 'uploaded' | 'extracting' | 'done' | 'failed'
+    /** 可视化步骤条：上传任务四节点，右键提取两节点。 */
+    steps: readonly string[]
+    /** 当前节点索引；之前的节点视为完成。 */
+    stepIndex: number
+    percent?: number
+    reason?: string
+    rawReason?: string
+    markdown?: string
+    at?: string
+    retryPath?: string
+    retryable?: boolean
+  }
+  const basename = (value: string): string => value.slice(value.lastIndexOf('/') + 1)
+  const dirname = (value: string): string => value.slice(0, value.lastIndexOf('/'))
+  const uploadSteps = [t('progressStepUploading'), t('progressStepUploaded'), t('progressStepExtracting'), t('progressStepExtracted')]
+  const extractSteps = [t('progressStepExtracting'), t('progressStepExtracted')]
+  const queueRows = useMemo<QueueRow[]>(() => {
+    const rows: QueueRow[] = []
+    const byPath = new Map(merged.rows.map(task => [task.relPath, task]))
+    // 上传行的 dir 是相对挂载点，提取任务的 relPath 可能带挂载前缀（如 Everyone/…）；
+    // 精确路径匹配不到时按文件名兜底，否则卡片会永远停在「上传完成」。
+    const byName = new Map(merged.rows.map(task => [basename(task.relPath), task]))
+    const extractionRow = (task: ExtractionTaskView, withUpload: boolean): QueueRow => {
+      const failure = task.state === 'failed' ? readFailureReason(task.reason, t) : undefined
+      const missingFile = task.state === 'failed' && classifyExtractionFailure(task.reason ?? '') === 'missing-file'
+      const stage = task.state === 'pending' || task.state === 'running'
+        ? 'extracting'
+        : task.state === 'succeeded' || task.state === 'already-markdown' ? 'done' : 'failed'
+      const steps = withUpload ? uploadSteps : extractSteps
+      const stepIndex = stage === 'extracting' ? (withUpload ? 2 : 0) : stage === 'done' ? steps.length - 1 : (withUpload ? 2 : 0)
+      return {
+        key: 'extract:' + task.relPath,
+        name: basename(task.relPath),
+        path: dirname(task.relPath),
+        stage,
+        steps,
+        stepIndex,
+        at: task.queuedAt ?? task.startedAt ?? task.finishedAt,
+        markdown: task.markdown,
+        ...(failure === undefined ? {} : { reason: failure.text, ...(failure.raw === undefined ? {} : { rawReason: failure.raw }) }),
+        ...(stage === 'failed' && !missingFile ? { retryPath: task.relPath, retryable: true } : {}),
+      }
+    }
+    for (const task of props.uploads) {
+      const relPath = task.dir === '' ? task.name : task.dir + '/' + task.name
+      if (task.state === 'waiting' || task.state === 'uploading') {
+        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploading', steps: uploadSteps, stepIndex: 0, percent: task.percent, at: task.at })
+        continue
+      }
+      if (task.state === 'failed') {
+        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'failed', steps: uploadSteps, stepIndex: 0, reason: task.reason, at: task.at })
+        continue
+      }
+      const extractionTask = byPath.get(relPath) ?? byName.get(basename(relPath))
+      if (extractionTask !== undefined) {
+        byPath.delete(extractionTask.relPath)
+        byName.delete(basename(extractionTask.relPath))
+        rows.push(extractionRow(extractionTask, true))
+      } else {
+        // Uploaded and no extraction task reported yet: the file itself is in place, so
+        // the row settles at "uploaded" instead of holding the badge open forever.
+        rows.push({ key: 'upload:' + relPath, name: basename(task.name), path: task.dir, stage: 'uploaded', steps: uploadSteps, stepIndex: 1, at: task.at })
+      }
+    }
+    // 只保留最近 10 分钟的提取任务：Host 的 extract.status 会返回历史任务，
+    // 全部堆进「任务队列」会淹掉读者刚发起的那一条。
+    const recentCutoff = Date.now() - 10 * 60_000
+    for (const task of byPath.values()) {
+      const at = Date.parse(task.queuedAt ?? task.startedAt ?? task.finishedAt ?? '')
+      if (!Number.isFinite(at) || at < recentCutoff) continue
+      rows.push(extractionRow(task, false))
+    }
+    for (const entry of merged.queued) {
+      rows.push({ key: 'queued:' + entry.relPath, name: basename(entry.relPath), path: dirname(entry.relPath), stage: 'extracting', steps: extractSteps, stepIndex: 0, at: new Date(entry.requestedAt).toISOString() })
+    }
+    for (const failure of clientFailures) {
+      const readable = readFailureReason(failure.reason, t)
+      const missingFile = classifyExtractionFailure(failure.reason) === 'missing-file'
+      rows.push({
+        key: 'client-failed:' + failure.relPath,
+        name: basename(failure.relPath),
+        path: dirname(failure.relPath),
+        stage: 'failed',
+        steps: extractSteps,
+        stepIndex: 0,
+        reason: readable.text,
+        ...(readable.raw === undefined ? {} : { rawReason: readable.raw }),
+        ...(missingFile ? {} : { retryPath: failure.relPath, retryable: true }),
+      })
+    }
+    // Newest first: the task the reader just started is the one they opened the panel for.
+    return rows.sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
+  }, [props.uploads, merged, clientFailures, t])
+
+  const queueDone = queueRows.filter(row => row.stage === 'done' || row.stage === 'uploaded').length
+  const queueFailed = queueRows.filter(row => row.stage === 'failed').length
+
+  /**
+   * Badge = tasks not finished yet (uploading or extracting). Uploaded-only rows are settled:
+   * the file is in place, so they must not keep the badge lit.
+   */
+  const pending = queueRows.filter(row => row.stage === 'uploading' || row.stage === 'extracting').length
+  /**
+   * Poll window: after an upload settles, keep polling briefly so the extraction task the
+   * Host creates afterwards is noticed; the badge itself does not count that window.
+   */
+  const pollPending = queueRows.filter(row => {
+    if (row.stage === 'uploading' || row.stage === 'extracting') return true
+    if (row.stage !== 'uploaded' || row.at === undefined) return false
+    const at = Date.parse(row.at)
+    return Number.isFinite(at) && Date.now() - at < UPLOAD_EXTRACTION_GRACE_MS
+  }).length
+  pendingRef.current = pollPending
+
+
   // A queued guess is work in flight, so the panel and its badge have to count it.
   const queuedCount = merged.queued.length
   const hasWork = props.uploads.length > 0 || merged.rows.length > 0 || queuedCount > 0 || clientFailures.length > 0
@@ -302,206 +411,97 @@ export function KnowledgeProgressPopover(props: KnowledgeProgressPopoverProps) {
       >
         {!hasWork && <p className={styles.empty}>{t('progressIdle')}</p>}
 
-        {/* The summary is numbers, not a sentence: a reader glancing at the panel wants
-            "3 of 5 done", and a prose line of the same facts costs a line and reads slower. */}
-        {hasWork && (
+        {queueRows.length > 0 && (
           <div className={styles.summary}>
-            {props.uploads.length > 0 && (
-              <span className={styles.summaryItem}>
-                <span className={styles.summaryLabel}>{t('progressUploadGroup')}</span>
-                <span className={styles.summaryValue}>{upload.done + upload.failed}/{upload.total}</span>
+            <span className={styles.summaryItem}>
+              <span className={styles.summaryLabel}>{t('progressQueueTitle')}</span>
+              <span className={styles.summaryValue}>
+                {queueDone}/{queueRows.length}
+                {queueFailed > 0 ? ' · ' + t('progressFailedTitle') + ' ' + String(queueFailed) : ''}
               </span>
-            )}
-            {(merged.rows.length > 0 || queuedCount > 0 || clientFailures.length > 0) && (
-              <span className={styles.summaryItem}>
-                <span className={styles.summaryLabel}>{t('progressExtractGroup')}</span>
-                {/* The denominator includes the queued guesses and the request failures
-                    the Host has no task for: a fraction that ignored rows the list is
-                    drawing would not add up. */}
-                <span className={styles.summaryValue}>{extraction.done + extraction.failed}/{merged.rows.length + queuedCount + clientFailures.length}</span>
-              </span>
-            )}
+            </span>
           </div>
         )}
 
-        {props.uploads.length > 0 && (
+        {queueRows.length > 0 && (
           <section className={styles.group}>
             <ul className={styles.list}>
-              {props.uploads.map(task => {
-                // The badge's tone is the state, so a reader scanning a column of cards
-                // reads the outcome before the words. One map keeps the three states from
-                // drifting apart across the two groups.
-                const tone = task.state === 'done' ? styles.badgeDone
-                  : task.state === 'failed' ? styles.badgeFailed
+              {queueRows.map(row => {
+                const stageLabel = row.stage === 'uploading' ? t('dropUploading')
+                  : row.stage === 'uploaded' ? t('progressUploadDone')
+                    : row.stage === 'extracting' ? t('progressExtracting')
+                      : row.stage === 'done' ? t('progressExtractDone')
+                        : t('progressFailedTitle')
+                const tone = row.stage === 'failed' ? styles.badgeFailed
+                  : row.stage === 'done' || row.stage === 'uploaded' ? styles.badgeDone
                     : styles.badgeBusy
-                const label = (task.state === 'waiting' || task.state === 'uploading') ? t('dropUploading')
-                  : task.state === 'done' ? t('progressSucceeded')
-                    : t('progressFailed').replace('{reason}', '')
-                const busy = task.state === 'waiting' || task.state === 'uploading'
+                const time = row.at === undefined
+                  ? ''
+                  : (() => { try { return new Date(row.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) } catch { return '' } })()
                 return (
-                  <li key={task.name} className={styles.card}>
-                    {/* Row one: icon, name, badge. The badge is the last flex child and
-                        never shrinks, so it sits on the right edge whatever the name
-                        length is. */}
+                  <li key={row.key} className={styles.card}>
                     <span className={styles.cardRow}>
-                      {/* The same `FileTypeIcon` the file tree renders, fed the same way:
-                          one mapping for every surface that shows a document. */}
-                      <FileTypeIcon path={task.name} size={16} />
-                      {/* `Tooltip` rather than a native `title`: the name is cut with an
-                          ellipsis, and hover is how a reader recovers the rest. Same
-                          approach as the Home table. */}
-                      <Tooltip label={task.name} portal side="top" align="end">
-                        <span className={styles.cardName}>{task.name}</span>
+                      <FileTypeIcon path={row.name} size={16} />
+                      <Tooltip label={row.name} portal side="top" align="end">
+                        <span className={styles.cardName}>{row.name}</span>
                       </Tooltip>
-                      <span className={tone}>{label}</span>
+                      {time !== '' && <span className={styles.cardTime}>{time}</span>}
+                      <span className={tone}>{stageLabel}</span>
                     </span>
-                    {/* Row two: where it is going. Secondary ink and its own line, so it
-                        cannot compete with the name for width. */}
-                    <span className={styles.cardPath}>{task.dir === '' ? t('progressRoot') : task.dir}</span>
-                    {/* Only while the upload is actually moving: a settled task must not
-                        leave an empty track behind. A failed one drops it too -- a bar
-                        frozen mid-way would read as "still going".
-
-                        When the browser reports a real percentage it is drawn as a
-                        determinate bar with the number beside it; when the body's length
-                        is unknown it falls back to the sliding indeterminate fill rather
-                        than inventing a value. */}
-                    {busy && (
+                    <span className={styles.steps} data-steps={row.steps.length} aria-label={row.steps.join(' → ')}>
+                      {row.steps.map((label, index) => {
+                        const state = index < row.stepIndex ? 'done'
+                          : index === row.stepIndex ? (row.stage === 'failed' ? 'failed' : 'active')
+                            : 'todo'
+                        return (
+                          <span
+                            key={label}
+                            className={styles.step + ' ' + (state === 'done' ? styles.stepDone : state === 'active' ? styles.stepActive : state === 'failed' ? styles.stepFailed : styles.stepTodo)}
+                          >
+                            <span className={styles.stepDot} aria-hidden="true">{state === 'done' ? '✓' : ''}</span>
+                            <span className={styles.stepLabel}>{label}</span>
+                          </span>
+                        )
+                      })}
+                    </span>
+                    {row.path !== '' && <span className={styles.cardPath}>{row.path}</span>}
+                    {row.markdown !== undefined && <span className={styles.cardPath}>{row.markdown}</span>}
+                    {row.stage === 'uploading' && (
                       <span className={styles.progressRow}>
                         <span
                           className={styles.progressTrack}
                           role="progressbar"
-                          aria-label={task.name}
-                          {...(task.percent === undefined
-                            ? {}
-                            : { 'aria-valuenow': task.percent, 'aria-valuemin': 0, 'aria-valuemax': 100 })}
+                          aria-label={row.name}
+                          {...(row.percent === undefined ? {} : { 'aria-valuenow': row.percent, 'aria-valuemin': 0, 'aria-valuemax': 100 })}
                         >
                           <span
-                            className={task.percent === undefined ? styles.progressFillIndeterminate : styles.progressFill}
-                            {...(task.percent === undefined ? {} : { style: { width: String(task.percent) + '%' } })}
+                            className={row.percent === undefined ? styles.progressFillIndeterminate : styles.progressFill}
+                            {...(row.percent === undefined ? {} : { style: { width: String(row.percent) + '%' } })}
                           />
                         </span>
-                        {task.percent !== undefined && (
-                          <span className={styles.progressPercent}>{String(task.percent) + '%'}</span>
+                        {row.percent !== undefined && (
+                          <span className={styles.progressPercent}>{String(row.percent) + '%'}</span>
                         )}
                       </span>
                     )}
-                    {task.state === 'failed' && task.reason !== undefined && (
-                      <span className={styles.cardReason}>{task.reason}</span>
+                    {row.reason !== undefined && <span className={styles.cardReason}>{row.reason}</span>}
+                    {row.rawReason !== undefined && row.rawReason !== row.reason && (
+                      <span className={styles.cardRawReason}>{t('progressRawReason').replace('{reason}', row.rawReason)}</span>
                     )}
-                  </li>
-                )
-              })}
-            </ul>
-          </section>
-        )}
-
-        {(merged.rows.length > 0 || queuedCount > 0 || clientFailures.length > 0) && (
-          <section className={styles.group}>
-            <ul className={styles.list}>
-              {/* The rows only this panel knows about: the reader clicked, the Host has not
-                  answered yet. Drawn FIRST so the click's own feedback appears at the top,
-                  and styled as a normal queued card rather than a special case. */}
-              {merged.queued.map(entry => (
-                <li key={'queued:' + entry.relPath} className={styles.card}>
-                  <span className={styles.cardRow}>
-                    <FileTypeIcon path={entry.relPath} size={16} />
-                    <Tooltip label={entry.relPath.slice(entry.relPath.lastIndexOf('/') + 1)} portal side="top" align="end">
-                      <span className={styles.cardName}>{entry.relPath.slice(entry.relPath.lastIndexOf('/') + 1)}</span>
-                    </Tooltip>
-                    <span className={styles.badgeBusy}>{t('progressPending')}</span>
-                  </span>
-                  <span className={styles.cardPath}>{entry.relPath.slice(0, entry.relPath.lastIndexOf('/'))}</span>
-                </li>
-              ))}
-              {extractions.map(task => {
-                const described = describeExtraction(task, t)
-                const failure = retryError?.relPath === task.relPath ? retryError.reason : undefined
-                // The one failure with no point retrying: the source is gone, so the same
-                // request fails identically until the file is back. Offering the button
-                // would be a promise the Host cannot keep.
-                const reason = task.state === 'failed' ? readFailureReason(task.reason, t) : undefined
-                const missingFile = task.state === 'failed' && classifyExtractionFailure(task.reason ?? '') === 'missing-file'
-                return (
-                  <li key={task.relPath} className={styles.card}>
-                    <span className={styles.cardRow}>
-                      <FileTypeIcon path={task.relPath} size={16} />
-                      <Tooltip label={task.relPath.slice(task.relPath.lastIndexOf('/') + 1)} portal side="top" align="end">
-                        <span className={styles.cardName}>{task.relPath.slice(task.relPath.lastIndexOf('/') + 1)}</span>
-                      </Tooltip>
-                      {/* `already-markdown` takes the success tone: nothing was needed and
-                          nothing went wrong, which is the opposite of the failure colour it
-                          used to borrow. */}
-                      <span className={task.state === 'succeeded' || task.state === 'already-markdown'
-                        ? styles.badgeDone
-                        : task.state === 'failed' || task.state === 'unsupported' ? styles.badgeFailed
-                          : styles.badgeBusy}
-                      >
-                        {retrying === task.relPath ? t('progressRetrying') : described.text}
-                      </span>
-                    </span>
-                    {task.markdown !== undefined && <span className={styles.cardPath}>{task.markdown}</span>}
-                    {reason?.raw !== undefined && <span className={styles.cardReason}>{reason.text}</span>}
-                    {reason?.raw !== undefined && reason.raw !== reason.text && (
-                      <span className={styles.cardRawReason}>{t('progressRawReason').replace('{reason}', reason.raw)}</span>
-                    )}
-                    {described.canRetry && !missingFile && (
+                    {row.retryable === true && row.retryPath !== undefined && (
                       <span className={styles.cardActions}>
                         <Button
                           variant="ghost"
                           size="sm"
                           disabled={retrying !== undefined}
-                          onClick={() => { void retry(task.relPath) }}
+                          onClick={() => { void retry(row.retryPath as string) }}
                         >
-                          {t('progressRetry')}
+                          {retrying === row.retryPath ? t('progressRetrying') : t('progressRetry')}
                         </Button>
                       </span>
                     )}
-                    {failure !== undefined && (
-                      <span className={styles.cardReason}>
-                        {t('progressRetryFailed').replace('{reason}', failure)}
-                      </span>
-                    )}
-                  </li>
-                )
-              })}
-              {/* Request failures the Host never turned into a task. Drawn after the
-                  authoritative rows so a retried path (which the Host now reports) does
-                  not appear twice. */}
-              {clientFailures.map(clientFailure => {
-                const reason = readFailureReason(clientFailure.reason, t)
-                const missingFile = classifyExtractionFailure(clientFailure.reason) === 'missing-file'
-                const retryFailure = retryError?.relPath === clientFailure.relPath ? retryError.reason : undefined
-                const name = clientFailure.relPath.slice(clientFailure.relPath.lastIndexOf('/') + 1)
-                return (
-                  <li key={'client-failed:' + clientFailure.relPath} className={styles.card}>
-                    <span className={styles.cardRow}>
-                      <FileTypeIcon path={clientFailure.relPath} size={16} />
-                      <Tooltip label={name} portal side="top" align="end">
-                        <span className={styles.cardName}>{name}</span>
-                      </Tooltip>
-                      <span className={styles.badgeFailed}>{t('progressFailedTitle')}</span>
-                    </span>
-                    <span className={styles.cardReason}>{reason.text}</span>
-                    {reason.raw !== undefined && reason.raw !== reason.text && (
-                      <span className={styles.cardRawReason}>{t('progressRawReason').replace('{reason}', reason.raw)}</span>
-                    )}
-                    {!missingFile && (
-                      <span className={styles.cardActions}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={retrying !== undefined}
-                          onClick={() => { void retry(clientFailure.relPath) }}
-                        >
-                          {t('progressRetry')}
-                        </Button>
-                      </span>
-                    )}
-                    {retryFailure !== undefined && (
-                      <span className={styles.cardReason}>
-                        {t('progressRetryFailed').replace('{reason}', retryFailure)}
-                      </span>
+                    {retryError !== undefined && retryError.relPath === row.retryPath && (
+                      <span className={styles.cardReason}>{t('progressRetryFailed').replace('{reason}', retryError.reason)}</span>
                     )}
                   </li>
                 )

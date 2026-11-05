@@ -450,11 +450,13 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
     const parent = relativeToRoot(mountPoint, dir)
     // One row per file, in drop order, so the progress area can show the whole batch
     // from the first byte rather than growing a row per completed file.
+    const queuedAt = new Date().toISOString()
     const queue: UploadTaskView[] = items.map(item => ({
       name: item.relativePath,
       // The directory the file lands in, tree-relative: what the reader recognises.
       dir: parent === '' ? '' : parent,
       state: 'waiting',
+      at: queuedAt,
     }))
     setUploadTasks(queue)
     setUploadBusy(true)
