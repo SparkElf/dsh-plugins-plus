@@ -56,7 +56,10 @@ export function CreateRoomDialog(props: CreateRoomDialogProps) {
 
   const [name, setName] = useState('')
   const [cwd, setCwd] = useState('')
-  const [preset, setPreset] = useState('')
+  // `standard` is the only preset every deployment ships. An empty value used to be sent as
+  // "no preset", which the host resolved to its own `default` and answered with
+  // 503 Unknown agent preset; naming the shipped preset explicitly keeps room creation working.
+  const [preset, setPreset] = useState('standard')
   const [invitePolicy, setInvitePolicy] = useState<InvitePolicy>('anyone')
   const [discoverability, setDiscoverability] = useState<Discoverability>('discoverable')
   const [agentTrigger, setAgentTrigger] = useState<AgentTrigger>('mention')
