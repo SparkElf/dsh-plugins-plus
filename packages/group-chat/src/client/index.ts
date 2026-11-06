@@ -275,11 +275,16 @@ export function apply(ctx: ClientContext): void {
   // A panel left open would keep the main column on itself, so the same call the shell's own
   // navigation makes clears it after the Session is selected.
   const layout = ctx.get('layout') as { selectPanel?: (panel: null) => void } | undefined
+  // The catalog was read before the room had a workspace, so the Session the Host just made
+  // selectable is not in it yet; `openSession` refuses an unknown id. Re-reading the list first is
+  // what turns the freshly attached Session into a selectable one.
+  const catalog = ctx.get('sessions') as { refresh?: () => Promise<void> } | undefined
   const base = createRoomStore({
     // The Host makes the room selectable (its Session belongs to a workspace it creates on
     // demand) and answers with the Session id the shell should select.
     openSession: async (roomId) => {
       const opened = await openRoom(roomId)
+      await catalog?.refresh?.()
       navigation?.openSession?.(opened.sessionId)
       layout?.selectPanel?.(null)
     },

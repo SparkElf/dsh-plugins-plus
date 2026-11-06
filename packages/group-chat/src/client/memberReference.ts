@@ -42,6 +42,8 @@ export const registerMemberSource = (inputTriggers: InputTriggersLike, store: Ro
   const source = {
     trigger: '@',
     name: SOURCE_NAME,
+    // The menu shows this instead of the package-path source id; identity stays `name`.
+    label: '成员',
     // Above room messages (30): a member is the more common address in a group chat.
     order: 20,
     showGroupTitle: true,

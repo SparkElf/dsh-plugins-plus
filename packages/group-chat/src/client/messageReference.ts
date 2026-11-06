@@ -101,6 +101,8 @@ export const registerMessageSource = (inputTriggers: InputTriggersLike, store: R
   const source = {
     trigger: '@',
     name: SOURCE_NAME,
+    // Display title only; `name` remains the identity every pick and mention is keyed by.
+    label: '消息',
     order: 30,
     showGroupTitle: true,
     async candidates(_session: unknown, request: { readonly query: string; readonly signal: AbortSignal }) {

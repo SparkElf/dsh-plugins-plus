@@ -438,7 +438,10 @@ export class RoomSessions {
    */
   async ensure(roomId: string, room: RoomSessionScope): Promise<Session> {
     const existing = this.existing(roomId)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      this.titleRoomSession(existing, room.name)
+      return existing
+    }
     const pending = this.pending.get(roomId)
     if (pending !== undefined) return pending
     const opening = this.open(roomId, room).finally(() => {
@@ -498,6 +501,7 @@ export class RoomSessions {
       throw new Error(`group-chat could not open a session for room ${roomId}`)
     }
     await this.installRoomModel(session, room, true)
+    this.titleRoomSession(session, room.name)
     return session
   }
 
@@ -569,6 +573,28 @@ export class RoomSessions {
     return hostService<WorkspaceArchiveView>(this.ctx, 'workspaceRegistry')
   }
 
+
+  /**
+   * Give the room's Session the title a reader expects, once.
+   *
+   * A room Session starts titled from its first message, which reads like an ordinary
+   * conversation in the sidebar. Renaming happens only while the Session has never carried a
+   * `session/title` event: once the plugin or the reader has named it, that choice stands.
+   * @param session - the room's Session.
+   * @param name - the room name, used as `群聊·<name>`.
+   */
+  private titleRoomSession(session: Session, name: string): void {
+    // The event type is contributed by the session-title service this plugin does not import, so
+    // the name is read structurally rather than through the typed union.
+    const titled = session.snapshotEvents().some((event) => (event as { type: string }).type === 'session/title')
+    if (titled) return
+    const titles = hostService<{ rename(session: Session, title: string): unknown }>(this.ctx, 'sessionTitle')
+    try {
+      titles?.rename(session, `群聊·${name}`)
+    } catch (error) {
+      this.ctx.logger?.warn?.('[group-chat] naming the room session failed', session.id, error)
+    }
+  }
 
   /** Hide a replacement the controller minted instead of honoring the room id. */
   private async archiveReplacement(sessionId: string): Promise<void> {
