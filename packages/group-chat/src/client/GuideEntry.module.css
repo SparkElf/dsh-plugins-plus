@@ -9,21 +9,28 @@
  * this should follow it rather than drift.
  */
 
+/* One square tile in the guide grid, matching the shell's own entries: full cell, centered
+   column, 22px glyph over the title. Better-sidebar forces this geometry on every entry through
+   `[data-sidebar-right-guide]`; the replacement keeps the same values so it holds even when the
+   guide is rendered without that stylesheet. */
 .entry {
   box-sizing: border-box;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 14px;
-  width: 380px;
-  max-width: 100%;
-  min-height: 56px;
-  padding: 14px 20px;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
   border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: var(--dsw-radius-xl);
   background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
   font: inherit;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -38,24 +45,27 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   color: var(--dsw-alias-label-secondary);
 }
 
 .text {
   display: flex;
-  flex: 1;
+  flex: 0 1 auto;
   flex-direction: column;
+  align-items: center;
   gap: 3px;
+  width: 100%;
   min-width: 0;
 }
 
 /* Both lines yield to the box's width: a long room name must not push the description past the
    capsule's edge. */
 .title {
+  max-width: 100%;
   overflow: hidden;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;

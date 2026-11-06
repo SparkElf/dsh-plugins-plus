@@ -163,3 +163,23 @@ describe('重复评估时不会因同优先级再注册而失败', () => {
     expect(SRC).toMatch(/console\.warn/u)
   })
 })
+
+describe('guide tile', () => {
+  // The start guide's shared sheet addresses entries by `data-sidebar-right-guide-entry`; a
+  // replacement that omits it keeps the shell's horizontal capsule instead of the square tile.
+  const entry = readFileSync(new URL('../src/client/GuideEntry.tsx', import.meta.url), 'utf8')
+  const css = readFileSync(new URL('../src/client/GuideEntry.module.css', import.meta.url), 'utf8')
+
+  it('marks the box with the guide entry attribute and a 22px glyph', () => {
+    expect(entry).toContain('data-sidebar-right-guide-entry={props.kind}')
+    expect(entry).toContain('<svg width="22" height="22"')
+  })
+
+  it('lays the box out as the tile: full cell, centered column, 12px padding', () => {
+    expect(css).toMatch(/\.entry \{[^}]*flex-direction: column/u)
+    expect(css).toMatch(/\.entry \{[^}]*width: 100%/u)
+    expect(css).toMatch(/\.entry \{[^}]*height: 100%/u)
+    expect(css).toMatch(/\.entry \{[^}]*padding: 12px/u)
+    expect(css).toMatch(/\.icon \{[^}]*width: 22px/u)
+  })
+})

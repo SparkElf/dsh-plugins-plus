@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-artifact-app",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DataOps cockpit artifacts in the DSH right sidebar: templates, render host, SSE open bridge and model tools.",
   "type": "module",
   "main": "./lib/index.js",

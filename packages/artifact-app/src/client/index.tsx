@@ -178,8 +178,10 @@ export function apply(ctx: ClientContext): void {
       disposeTab = service.registerTab({
         id: ARTIFACT_TAB_TYPE,
         title: '驾驶舱',
-        icon: (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        // A component, not a fixed element: the tab strip asks for 14 and the start-guide tile
+        // asks for 22, and the tile must not draw a larger glyph than its neighbours.
+        icon: ({ size = 14 }: { size?: number }) => (
+          <svg width={size >= 22 ? 22 : size} height={size >= 22 ? 22 : size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M4 18a8 8 0 1 1 16 0" />
             <path d="M12 18l4.2-5" />
             <circle cx="12" cy="18" r="1.4" />

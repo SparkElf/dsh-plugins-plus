@@ -63,13 +63,17 @@ export function MembersGuideEntry(props: MembersGuideEntryProps): ReactNode {
     <button
       type="button"
       className={styles['entry']}
+      // The guide's shared sheet addresses entries by this attribute: better-sidebar turns every
+      // one of them into a square tile (column, centred, 22px glyph). A replacement that omits it
+      // keeps the shell capsule and reads as a foreign control among the tiles.
+      data-sidebar-right-guide-entry={props.kind}
       data-group-chat-guide-entry={props.entryId}
       onClick={() => { onPick?.() }}
     >
       <span className={styles['icon']} aria-hidden="true">
         {/* Drawn inline: this package carries no icon set, and one glyph does not justify a
-            dependency. The paths are the familiar "people" mark, at the guide's own 26px. */}
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            dependency. The paths are the familiar "people" mark, at the guide tile's 22px. */}
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
           <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
           <circle cx="9" cy="7" r="4" />
