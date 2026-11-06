@@ -16,6 +16,7 @@
  */
 
 import { MEMBER_MENTION_SOURCE } from '../reference-ids.ts'
+import { roomSessionId } from '../session-id.ts'
 import { listMembers } from './api.ts'
 import { mentionSourceOf } from './mentionSource.ts'
 import type { RoomStore } from './store.ts'
@@ -44,9 +45,13 @@ export const registerMemberSource = (inputTriggers: InputTriggersLike, store: Ro
     // Above room messages (30): a member is the more common address in a group chat.
     order: 20,
     showGroupTitle: true,
-    async candidates(_session: unknown, request: { readonly query: string; readonly signal: AbortSignal }) {
+    async candidates(session: { readonly sessionId?: string }, request: { readonly query: string; readonly signal: AbortSignal }) {
       const roomId = store.getState().activeRoomId
       if (roomId === undefined) return []
+      // `activeRoomId` outlives the room view: switching to an ordinary Session leaves it set. The
+      // Session being composed is what decides, so a stale id cannot put the roster into a session
+      // that is not the room.
+      if (session.sessionId !== undefined && session.sessionId !== roomSessionId(roomId)) return []
       const members = await listMembers(roomId)
       const roster = mentionSourceOf(members)
       const owners = new Set(members.filter(member => member.owner).map(member => member.userId))

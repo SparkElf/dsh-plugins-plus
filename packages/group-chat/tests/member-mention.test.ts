@@ -54,6 +54,15 @@ describe('roster mention source', () => {
     expect(listMembers).not.toHaveBeenCalled()
   })
 
+  it('answers nothing in a session that is not the open room', async () => {
+    const source = capture('room-1')
+    // Visiting a room leaves `activeRoomId` set; the Session being composed is what decides, so an
+    // ordinary conversation never inherits the roster.
+    await expect(source.candidates({ sessionId: 'session-ordinary' }, { query: '', signal: signal() })).resolves.toEqual([])
+    const room = await source.candidates({ sessionId: 'group-room-room-1' }, { query: '', signal: signal() })
+    expect(room.map(row => row.value)).toEqual(['u-owner', 'u-guest'])
+  })
+
   it('lists the roster as mention rows and filters by query', async () => {
     const source = capture('room-1')
     const all = await source.candidates({}, { query: '', signal: signal() })
