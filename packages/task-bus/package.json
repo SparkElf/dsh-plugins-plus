@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-task-bus",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "DataOps Task Center and Task Bus for the official DSH Web shell.",
   "type": "module",
   "main": "./lib/index.js",

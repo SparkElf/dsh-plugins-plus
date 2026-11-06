@@ -705,14 +705,14 @@ interface SkillPlazaRow {
  * that stands in for "disabled". A row missing `reviewStatus` counts as pending, which
  * matches `reviewStatusOf` in the package.
  */
-async function readSkillPending(): Promise<number> {
+async function readSkillPlazaRows(): Promise<string[]> {
   try {
     const [listResponse, plazaResponse] = await Promise.all([
       fetch('/api/dsh-skill-center/list', { cache: 'no-store' }),
       fetch('/integrations/dataops/skill-plaza?mine=1', { cache: 'no-store' }),
     ])
     // Only an explicit `modelInvocable: false` marks a skill as disabled. A plaza row
-    // that has no local list entry is still pending review and must be counted.
+    // that has no local list entry is still pending review and must be listed.
     const disabled = new Set<string>()
     if (listResponse.ok) {
       const body = await listResponse.json() as { groups?: Array<{ skills?: Array<{ name?: unknown; modelInvocable?: unknown }> }> }
@@ -722,78 +722,176 @@ async function readSkillPending(): Promise<number> {
         }
       }
     }
-    if (!plazaResponse.ok) return 0
+    if (!plazaResponse.ok) return []
     const plaza = await plazaResponse.json() as { skills?: Array<Record<string, unknown>> }
-    const names = new Set<string>()
+    const names: string[] = []
     for (const row of plaza.skills ?? []) {
       if (typeof row.name !== 'string' || row.name === '') continue
       if (row.reviewStatus === 'approved') continue
-      // Disabled skills do not need review; the list's model flag is the available proxy.
       if (disabled.has(row.name)) continue
-      names.add(row.name)
+      names.push(row.name)
     }
-    return names.size
+    return names
   } catch {
-    return 0
+    return []
   }
 }
 
-/** A grouped notification row for the skill plaza. */
-function SkillPendingRow({ count, onOpen }: { count: number; onOpen: () => void }) {
+/** One review inbox row as the DataOps integration serves it. */
+interface ReviewInboxItem {
+  id: string
+  type: string
+  title: string
+  body?: string
+  createdAt: string
+  read: boolean
+}
+
+/**
+ * The same review inbox the plaza bell used to show, now rendered inside the task center's
+ * notification tab so every notification lives in one list.
+ */
+async function readReviewInbox(): Promise<ReviewInboxItem[]> {
+  try {
+    const response = await fetch('/integrations/dataops/review-notifications', { cache: 'no-store' })
+    if (!response.ok) return []
+    const body = await response.json() as { items?: Array<Record<string, unknown>> }
+    const rows: ReviewInboxItem[] = []
+    for (const raw of body.items ?? []) {
+      if (typeof raw.id !== 'string' || typeof raw.title !== 'string') continue
+      rows.push({
+        id: raw.id,
+        type: typeof raw.type === 'string' ? raw.type : 'info',
+        title: raw.title,
+        ...(typeof raw.body === 'string' && raw.body !== '' ? { body: raw.body } : {}),
+        createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+        read: raw.read === true,
+      })
+    }
+    return rows.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, 20)
+  } catch {
+    return []
+  }
+}
+
+/** One notification card shared by every source in the notification tab. */
+function NotificationCard({ title, body, time, unread, onClick }: {
+  title: string
+  body?: string
+  time?: string
+  unread?: boolean
+  onClick?: () => void
+}) {
   return (
     <button
       type="button"
-      onClick={onOpen}
+      onClick={onClick}
+      disabled={onClick === undefined}
       style={{
-        display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '9px 12px',
+        display: 'flex', alignItems: 'flex-start', gap: 10, width: '100%', padding: '10px 12px',
         border: '1px solid ' + colors.line, borderRadius: 8, background: colors.panelAlt,
-        color: colors.text, fontSize: 12, textAlign: 'left', cursor: 'pointer',
+        color: colors.text, fontSize: 12, textAlign: 'left',
+        cursor: onClick === undefined ? 'default' : 'pointer',
       }}
     >
-      <span style={{ flex: 1 }}>技能广场 · {count} 个待审核技能</span>
-      <span style={{ color: colors.muted, fontSize: 11 }}>打开技能中心 →</span>
+      <span style={{
+        flex: '0 0 auto', width: 6, height: 6, marginTop: 6, borderRadius: 99,
+        background: unread === true ? colors.accent : 'transparent',
+      }} />
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ display: 'block', fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
+        {body === undefined ? null : <span style={{ display: 'block', marginTop: 2, fontSize: 11, color: colors.muted }}>{body}</span>}
+      </span>
+      {time === undefined ? null : <span style={{ fontSize: 10, color: colors.muted, whiteSpace: 'nowrap' }}>{time}</span>}
     </button>
   )
 }
 
-/** The "notifications" tab: the KB task queue, read from the shared key. */
-function KbNotificationPanel({ tasks, onClear }: {
+/** The "notifications" tab: every source rendered as the same notification card. */
+function KbNotificationPanel({ tasks, skillRows, reviewItems, onOpenSkill, onClear }: {
   tasks: readonly KbTaskRecord[]
+  skillRows: readonly string[]
+  reviewItems: readonly ReviewInboxItem[]
+  onOpenSkill: () => void
   onClear: () => void
 }) {
   const done = tasks.filter(task => task.stage === 'done' || task.stage === 'uploaded').length
+  const timeOf = (value: string): string => {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return ''
+    return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  }
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>任务队列</span>
-          {tasks.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{done}/{tasks.length}</span> : null}
+          <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>审核通知</span>
+          {reviewItems.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{reviewItems.length}</span> : null}
         </div>
-        <Button size="sm" variant="ghost" disabled={tasks.length === 0} onClick={onClear}>清空记录</Button>
+        {reviewItems.length === 0 ? (
+          <div style={{ padding: 14, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无审核通知</div>
+        ) : reviewItems.map(item => (
+          <NotificationCard
+            key={item.id}
+            title={item.title}
+            body={item.body}
+            time={timeOf(item.createdAt)}
+            unread={!item.read}
+            onClick={onOpenSkill}
+          />
+        ))}
       </div>
-      {tasks.length === 0 ? (
-        <div style={{ padding: 18, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无通知</div>
-      ) : tasks.map(task => {
-        const percent = Math.max(0, Math.min(100, Math.round(task.progress ?? (task.stage === 'done' ? 100 : task.stage === 'uploaded' ? 25 : 0))))
-        const tone = task.stage === 'failed' ? colors.danger
-          : task.stage === 'done' || task.stage === 'uploaded' ? colors.success : colors.accent
-        return (
-          <div key={task.id} style={{ padding: '10px 12px', border: '1px solid ' + colors.line, borderRadius: 8, background: colors.panelAlt, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 500, color: colors.text }}>{task.fileName}</span>
-              <span style={{ fontSize: 10, color: colors.muted }}>{new Date(task.startedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
-              <span style={{ fontSize: 10, color: tone, whiteSpace: 'nowrap' }}>{KB_STAGE_LABEL[task.stage]}</span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ flex: 1, height: 6, borderRadius: 999, background: 'rgba(255,255,255,.08)', overflow: 'hidden' }}>
-                <div style={{ width: String(percent) + '%', height: '100%', borderRadius: 999, background: tone, transition: 'width 120ms linear' }} />
-              </div>
-              <span style={{ minWidth: 34, textAlign: 'right', fontSize: 11, color: colors.muted, fontVariantNumeric: 'tabular-nums' }}>{String(percent) + '%'}</span>
-            </div>
-            {task.error !== undefined ? <div style={{ fontSize: 11, color: colors.danger }}>{task.error}</div> : null}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>技能广场待审核</span>
+          {skillRows.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{skillRows.length}</span> : null}
+        </div>
+        {skillRows.length === 0 ? (
+          <div style={{ padding: 14, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无待审核技能</div>
+        ) : skillRows.map(name => (
+          <NotificationCard
+            key={name}
+            title={'技能「' + name + '」等待审核'}
+            body="提交到技能广场，等待管理员审核"
+            unread
+            onClick={onOpenSkill}
+          />
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>知识库任务</span>
+            {tasks.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{done}/{tasks.length}</span> : null}
           </div>
-        )
-      })}
+          <Button size="sm" variant="ghost" disabled={tasks.length === 0} onClick={onClear}>清空记录</Button>
+        </div>
+        {tasks.length === 0 ? (
+          <div style={{ padding: 14, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无提取任务</div>
+        ) : tasks.map(task => {
+          const percent = Math.max(0, Math.min(100, Math.round(task.progress ?? (task.stage === 'done' ? 100 : task.stage === 'uploaded' ? 25 : 0))))
+          const tone = task.stage === 'failed' ? colors.danger
+            : task.stage === 'done' || task.stage === 'uploaded' ? colors.success : colors.accent
+          return (
+            <div key={task.id} style={{ padding: '10px 12px', border: '1px solid ' + colors.line, borderRadius: 8, background: colors.panelAlt, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 500, color: colors.text }}>{task.name}</span>
+                <span style={{ fontSize: 10, color: colors.muted }}>{new Date(task.startedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+                <span style={{ fontSize: 10, color: tone, whiteSpace: 'nowrap' }}>{KB_STAGE_LABEL[task.stage]}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1, height: 6, borderRadius: 999, background: 'rgba(255,255,255,.08)', overflow: 'hidden' }}>
+                  <div style={{ width: String(percent) + '%', height: '100%', borderRadius: 999, background: tone, transition: 'width 120ms linear' }} />
+                </div>
+                <span style={{ minWidth: 34, textAlign: 'right', fontSize: 11, color: colors.muted, fontVariantNumeric: 'tabular-nums' }}>{String(percent) + '%'}</span>
+              </div>
+              {task.error !== undefined ? <div style={{ fontSize: 11, color: colors.danger }}>{task.error}</div> : null}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -812,7 +910,8 @@ const TaskCenterButton = ({ openSession }: {
   const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
   const [kbTasks, setKbTasks] = useState<KbTaskRecord[]>(() => readKbTasks())
-  const [skillPending, setSkillPending] = useState(0)
+  const [skillRows, setSkillRows] = useState<string[]>([])
+  const [reviewInbox, setReviewInbox] = useState<ReviewInboxItem[]>([])
 
   useEffect(() => {
     if (document.getElementById(TASK_BUS_STYLE_ID) !== null) return
@@ -909,7 +1008,10 @@ const TaskCenterButton = ({ openSession }: {
 
   useEffect(() => {
     let alive = true
-    const sync = (): void => { void readSkillPending().then((count) => { if (alive) setSkillPending(count) }) }
+    const sync = (): void => {
+      void readSkillPlazaRows().then((rows) => { if (alive) setSkillRows(rows) })
+      void readReviewInbox().then((items) => { if (alive) setReviewInbox(items) })
+    }
     sync()
     const timer = window.setInterval(sync, 60_000)
     return () => { alive = false; window.clearInterval(timer) }
@@ -1029,9 +1131,9 @@ const TaskCenterButton = ({ openSession }: {
             <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
             <path d="M13.7 21a2 2 0 0 1-3.4 0" />
           </svg>
-          {pendingCount + kbPending + skillPending > 0 ? (
+          {pendingCount + kbPending + skillRows.length + reviewInbox.filter(item => !item.read).length > 0 ? (
             <span style={{ position: 'absolute', bottom: -2, right: -2, minWidth: 14, height: 14, padding: '0 3px', boxSizing: 'border-box', borderRadius: 999, background: '#2563eb', color: '#fff', fontSize: 9, lineHeight: '14px', textAlign: 'center' }}>
-              {pendingCount + kbPending + skillPending > 99 ? '99+' : pendingCount + kbPending + skillPending}
+              {pendingCount + kbPending + skillRows.length + reviewInbox.filter(item => !item.read).length > 99 ? '99+' : pendingCount + kbPending + skillRows.length + reviewInbox.filter(item => !item.read).length}
             </span>
           ) : null}
         </button>
@@ -1052,10 +1154,7 @@ const TaskCenterButton = ({ openSession }: {
           {error ? <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fef2f2', color: colors.danger, fontSize: 11, margin: '0 24px 12px' }}>{error}</div> : null}
           <div id={'task-bus-panel-' + tab} role="tabpanel" aria-labelledby={'task-bus-tab-' + tab} style={{ padding: '16px 24px 24px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', flex: 1 }}>
             {tab === 'notifications' ? (
-              <>
-                {skillPending > 0 ? <SkillPendingRow count={skillPending} onOpen={openSkillCenter} /> : null}
-                <KbNotificationPanel tasks={kbTasks} onClear={clearKbTasks} />
-              </>
+              <KbNotificationPanel tasks={kbTasks} skillRows={skillRows} reviewItems={reviewInbox} onOpenSkill={openSkillCenter} onClear={clearKbTasks} />
             ) : selected !== null ? (
               <TaskDetail task={selected} onBack={() => setSelected(null)} />
             ) : (

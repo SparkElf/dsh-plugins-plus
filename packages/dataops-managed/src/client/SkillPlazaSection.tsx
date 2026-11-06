@@ -17,7 +17,6 @@ import type { ReviewContext, ReviewTab, RiskReport } from './review-types.ts'
 import {
   canReview,
   filterByReview,
-  notificationTab,
   normalizeReviewStatus,
   normalizeVisibility,
   reviewCounts,
@@ -25,7 +24,6 @@ import {
   visibilityTag,
 } from './review-types.ts'
 import { demoPlazaSkills } from './review-demo.ts'
-import { NotificationBell } from './NotificationBell.tsx'
 import styles from './SkillPlazaSection.module.css'
 
 /** Values the skill center passes to a contributed section. */
@@ -362,13 +360,6 @@ export function SkillPlazaSection(props: SkillPlazaSectionProps): ReactNode {
           {count === null ? null : <span className={styles.titleCount}>{count}</span>}
         </h2>
         {reviewDemoMode() ? <span className={styles.demoTag}>{t('plazaDemo')}</span> : null}
-        <NotificationBell
-          label={t('plazaTitle') + '通知'}
-          onOpen={(item) => {
-            const next = notificationTab(item)
-            if (next !== undefined) setTab(next)
-          }}
-        />
       </div>
     </div>
   )
