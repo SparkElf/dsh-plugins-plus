@@ -11,9 +11,10 @@ import { canSeeManagedSettings } from './settings-gate.ts'
  * caller, and the page itself refuses to render without a management role.
  */
 export function PermissionCenterIcon(): ReactNode {
-  // The launcher label is enough for the two administrator roles, so the shield paints without
-  // waiting for the review API; the department-administrator case still asks the Host.
-  const [allowed, setAllowed] = useState<boolean | undefined>(() => canSeeManagedSettings() ? true : undefined)
+  // Paint the shield on the first frame and hide it only once the Host says ordinary user. A
+  // navigation affordance is not the authorization decision, and `canSeeManagedSettings()` is
+  // false until the launcher label hydrates — waiting for it made the icon pop in a beat late.
+  const [allowed, setAllowed] = useState(true)
   useEffect(() => {
     let live = true
     if (reviewDemoMode() || canSeeManagedSettings()) { setAllowed(true); return () => { live = false } }
@@ -23,7 +24,7 @@ export function PermissionCenterIcon(): ReactNode {
     }).catch(() => { if (live) setAllowed(false) })
     return () => { live = false }
   }, [])
-  if (allowed !== true) return null
+  if (!allowed) return null
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
       <path d="M9 2.2 14.5 4v4.4c0 3.1-2.1 5.6-5.5 7.4-3.4-1.8-5.5-4.3-5.5-7.4V4L9 2.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
