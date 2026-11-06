@@ -39,12 +39,37 @@ if (directory === undefined) {
   throw new Error('usage: publish-package.mjs --dir <package directory> [--tag <dist-tag>] [--access public] [--dry-run]')
 }
 
+/** Read the JSON block `npm pack --json` appends after any prepack build output. */
+function parsePackJson(stdout) {
+  const text = String(stdout).trim()
+  try {
+    return JSON.parse(text)
+  } catch {
+    // Fall through to the trailing-block scan.
+  }
+  const lines = text.split('\n')
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim()
+    if (!line.startsWith('[') && !line.startsWith('{')) continue
+    try {
+      return JSON.parse(lines.slice(index).join('\n'))
+    } catch {
+      // Keep scanning: an earlier bracket may still open the real payload.
+    }
+  }
+  throw new Error('publish-package: npm pack --json printed no parsable JSON block')
+}
+
 const packageDirectory = resolve(directory)
-const packed = JSON.parse(execFileSync('npm', ['pack', '--json'], {
+const packOutput = execFileSync('npm', ['pack', '--json'], {
   cwd: packageDirectory,
   encoding: 'utf8',
   stdio: ['ignore', 'pipe', 'inherit'],
-}))
+})
+// `prepack` runs the build, and tsdown prints its log lines to the same stdout as `--json`.
+// Parse the trailing JSON block instead of the whole buffer; scanning from the end skips the
+// build lines (which also start with brackets, e.g. `ℹ [CJS] lib/client.js`).
+const packed = parsePackJson(packOutput)
 // npm 11 prints an array; npm 12 prints an object keyed by package name. Read both shapes.
 const entries = Array.isArray(packed) ? packed : Object.values(packed)
 const filename = entries[0]?.filename
