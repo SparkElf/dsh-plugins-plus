@@ -529,6 +529,18 @@ export const registerQuote = (
 export const clearQuote = (roomId: string): Promise<unknown> =>
   call(`/rooms/${encodeURIComponent(roomId)}/quote`, { method: 'DELETE' })
 
+/**
+ * Ask the Host to make one room the view: it resolves the room's Session and the workspace that
+ * owns it, then hands back the Session id the shell should select.
+ *
+ * The browser cannot do this itself: the Session belongs to no workspace until the Host creates
+ * one at the Session's own directory, and `openSession` only selects a Session a workspace owns.
+ * @param roomId - the room to open.
+ * @returns the Session to select.
+ */
+export const openRoom = (roomId: string): Promise<{ readonly sessionId: string }> =>
+  call(`/rooms/${encodeURIComponent(roomId)}/open`, { method: 'POST' })
+
 export const sendBlocks = (
   roomId: string,
   content: readonly ContentBlock[],

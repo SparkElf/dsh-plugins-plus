@@ -17,7 +17,6 @@ import {
   type RoomMember, type RoomSummary, updateRoom,
 } from './api.ts'
 import type { GroupChatKey } from './locales.ts'
-import { roomSessionId } from '../session-id.ts'
 
 /** The three distinguishable failures the surfaces render as copy. */
 export type RoomFailure = GroupChatKey | undefined
@@ -205,8 +204,11 @@ export interface RoomStore {
  * which Session was asked for without a layout, and the plugin wires the real catalog in.
  */
 export interface RoomStoreDeps {
-  /** Make one Session the current view (the catalog's own selection). */
-  readonly openSession?: (sessionId: string) => void
+  /**
+   * Make one room the view. The Host resolves the room's Session and the workspace that owns it,
+   * then the shell selects that Session; the store only reports the outcome.
+   */
+  readonly openSession?: (roomId: string) => Promise<void>
 }
 
 export function createRoomStore(deps: RoomStoreDeps = {}): RoomStore {
@@ -302,17 +304,15 @@ export function createRoomStore(deps: RoomStoreDeps = {}): RoomStore {
       // deterministic, and the Host resolved-or-created it when it opened the room. Without this
       // the sidebar highlight moved while the main column kept the previous Session -- the room
       // looked open and the composer under it belonged to a different conversation.
-      const sessionId = roomSessionId(roomId)
-      // No pre-flight existence check: the Catalog pages its list, so a room whose Session exists
-      // can still be absent from the page in hand, and refusing on that would hide a real room.
-      // The Host guarantees the Session (discovery opens every joined room); a selection that
-      // fails reports itself instead.
-      try {
-        deps.openSession?.(sessionId)
-      } catch (error) {
-        console.error('[group-chat] selecting the room session failed', sessionId, error)
-        set({ openFailure: 'roomOpenFailed' })
-      }
+      // The Host owns Session and workspace resolution: the browser cannot attach a Session to a
+      // workspace, and selecting one that no workspace owns leaves the previous view up. Awaiting
+      // it also lets a refusal surface instead of looking like a dead button.
+      void Promise.resolve()
+        .then(() => deps.openSession?.(roomId))
+        .catch((error: unknown) => {
+          console.error('[group-chat] opening the room failed', roomId, error)
+          set({ openFailure: 'roomOpenFailed' })
+        })
     },
     discover: async (query) => {
       try {

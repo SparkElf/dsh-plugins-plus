@@ -46,6 +46,7 @@ import {
 } from './identity.ts'
 import { declaredMentions, mentionedMemberIds, shouldTriggerAgent, speakerPrefix, textOfContent, withSpeakerPrefix, type AgentTriggerPolicy } from './routing.ts'
 import { cleanupRoomSessions, type SessionPersistenceView, type WorkspaceArchiveView } from './session-maintenance.ts'
+import { ensureRoomWorkspace, type RoomWorkspaceRegistry } from './room-workspace.ts'
 import type { WorkspaceCatalogView } from './context.ts'
 import { openRoomStream } from './stream.ts'
 
@@ -1538,6 +1539,35 @@ export const handleRoomRequest = async (
    * `purge: true` plus `confirm` equal to the room id. The canonical room Session is never a
    * candidate, and neither is another room's Session or a subagent child.
    */
+  /**
+   * Make one room the view: resolve its Session, give it the workspace that makes it selectable,
+   * and answer with the Session id. The browser cannot do any of this itself -- it has no registry
+   * and no workspace, and `openSession` refuses a Session no workspace owns.
+   */
+  const openMatch = /^rooms\/([^/]+)\/open$/u.exec(route)
+  if (openMatch !== null && openMatch[1] !== undefined) {
+    if (httpMethod !== 'POST') throw new RouteRefusal('opening a room accepts POST', 405)
+    const targetRoomId = decodeURIComponent(openMatch[1])
+    const room = (await backend.listRooms()).find((candidate) => candidate.id === targetRoomId)
+    if (room === undefined) throw new RouteRefusal('this account is not a member of that room', 404)
+    const session = await new RoomSessions(ctx).ensure(targetRoomId, {
+      name: room.name,
+      ...room.cwd === null ? {} : { cwd: room.cwd },
+      agentPreset: room.agentPreset ?? undefined,
+      modelProvider: room.modelProvider ?? undefined,
+      model: room.model ?? undefined,
+      reasoningEffort: room.reasoningEffort ?? undefined,
+    })
+    const directory = session.header.cwd ?? resolveRoomDirectory(targetRoomId, room.cwd)
+    const workspace = await ensureRoomWorkspace(
+      hostService<RoomWorkspaceRegistry>(ctx, 'workspaceRegistry'),
+      directory,
+      `群聊·${room.name}`,
+      session.id,
+    )
+    return { sessionId: session.id, workspaceId: workspace.workspaceId, workspaceCreated: workspace.created }
+  }
+
   const cleanupMatch = /^rooms\/([^/]+)\/sessions\/cleanup$/u.exec(route)
   if (cleanupMatch !== null && cleanupMatch[1] !== undefined) {
     if (httpMethod !== 'POST') throw new RouteRefusal('session cleanup accepts POST', 405)

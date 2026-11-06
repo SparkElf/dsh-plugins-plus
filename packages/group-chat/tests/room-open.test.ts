@@ -1,76 +1,78 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRoomStore } from '../src/client/store.ts'
-import { ROOM_SESSION_PREFIX } from '../src/session-id.ts'
 
 const ROOM = 'room-1'
 
 /** The store the sidebar drives, with the catalog replaced by spies. */
-const storeWith = (options: { openSession?: (sessionId: string) => void } = {}) =>
-  createRoomStore({ openSession: options.openSession ?? (() => {}) })
+const storeWith = (options: { openSession?: (roomId: string) => Promise<void> } = {}) =>
+  createRoomStore({ openSession: options.openSession ?? (async () => {}) })
 
 describe('selecting a room shows its session', () => {
-  it('opens the room\'s deterministic session, which is what moves the main view', () => {
-    const openSession = vi.fn()
+  it('hands the room to the shell, which resolves the Session the main view follows', async () => {
+    const openSession = vi.fn(async (_roomId: string) => {})
     const store = storeWith({ openSession })
 
     store.open(ROOM)
+    await Promise.resolve()
 
-    // A room has exactly one Session and its id is the room id with a known prefix; selecting
-    // that Session is what makes the main column follow the sidebar highlight.
+    // The Host owns Session and workspace resolution, so the store passes the room id and the
+    // shell selects what comes back; the highlight moves either way.
     expect(openSession).toHaveBeenCalledTimes(1)
-    expect(openSession).toHaveBeenCalledWith(`${ROOM_SESSION_PREFIX}${ROOM}`)
+    expect(openSession).toHaveBeenCalledWith(ROOM)
     expect(store.getState().activeRoomId).toBe(ROOM)
     expect(store.getState().openFailure).toBeUndefined()
   })
 
-  it('reuses the same session on every open instead of minting another', () => {
-    const openSession = vi.fn()
+  it('asks again on every open; reuse is the Host\'s to guarantee', async () => {
+    const openSession = vi.fn(async (_roomId: string) => {})
     const store = storeWith({ openSession })
 
     store.open(ROOM)
     store.open(ROOM)
+    await Promise.resolve()
 
-    // Same id twice: the store never creates, so a reader who switches away and back cannot
-    // grow a second Session for one room.
-    expect(openSession.mock.calls.map(([id]) => id)).toEqual([
-      `${ROOM_SESSION_PREFIX}${ROOM}`,
-      `${ROOM_SESSION_PREFIX}${ROOM}`,
-    ])
+    // The store never creates anything, so a reader switching away and back cannot grow a second
+    // Session; the Host resolves the same one.
+    expect(openSession.mock.calls.map(([id]) => id)).toEqual([ROOM, ROOM])
   })
 
-  it('asks the catalog even for a room the loaded page does not name', () => {
-    const openSession = vi.fn()
+  it('does not pre-check the catalog, which pages its list', async () => {
+    const openSession = vi.fn(async (_roomId: string) => {})
     const store = storeWith({ openSession })
 
     store.open(ROOM)
+    await Promise.resolve()
 
-    // The Catalog pages its list, so a room whose Session exists can be absent from the page in
-    // hand; a pre-flight check would have refused a room that is really there.
-    expect(openSession).toHaveBeenCalledWith(`${ROOM_SESSION_PREFIX}${ROOM}`)
+    // A room whose Session exists can be absent from the page in hand; a pre-flight check would
+    // have refused a room that is really there.
+    expect(openSession).toHaveBeenCalledWith(ROOM)
     expect(store.getState().openFailure).toBeUndefined()
   })
 
-  it('surfaces a selection the catalog refuses', () => {
+  it('surfaces a refusal instead of leaving the previous view up', async () => {
     const store = storeWith({
-      openSession: () => { throw new Error('catalog refused the selection') },
+      openSession: async () => { throw new Error('the Host refused to open the room') },
     })
 
     store.open(ROOM)
+    await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(store.getState().openFailure).toBe('roomOpenFailed')
   })
 
-  it('clears the notice on the next successful selection', () => {
+  it('clears the notice on the next successful open', async () => {
     let refuse = true
     const store = storeWith({
-      openSession: () => { if (refuse) throw new Error('catalog refused the selection') },
+      openSession: async () => { if (refuse) throw new Error('the Host refused to open the room') },
     })
 
     store.open(ROOM)
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(store.getState().openFailure).toBe('roomOpenFailed')
 
     refuse = false
     store.open(ROOM)
+    await Promise.resolve()
     expect(store.getState().openFailure).toBeUndefined()
   })
 })

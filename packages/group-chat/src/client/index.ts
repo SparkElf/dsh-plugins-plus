@@ -48,7 +48,7 @@ import { registerMessageSource, type InputTriggersLike } from './messageReferenc
 import { registerMemberSource } from './memberReference.ts'
 import { PRESET_LOCALE_NS } from './rows.ts'
 import { roomSessionId } from '../session-id.ts'
-import { readRoomState } from './api.ts'
+import { openRoom, readRoomState } from './api.ts'
 import { en, zh, type GroupChatKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -272,12 +272,15 @@ export function apply(ctx: ClientContext): void {
     // every click look like a dead button.
     console.warn('[group-chat] uiWorkspace.openSession is unavailable; room selection cannot navigate')
   }
-  // Selecting the Session is not enough on its own: a panel left open keeps the main column on
-  // itself, so the same call the shell's own navigation makes clears it afterwards.
+  // A panel left open would keep the main column on itself, so the same call the shell's own
+  // navigation makes clears it after the Session is selected.
   const layout = ctx.get('layout') as { selectPanel?: (panel: null) => void } | undefined
   const base = createRoomStore({
-    openSession: (sessionId) => {
-      navigation?.openSession?.(sessionId)
+    // The Host makes the room selectable (its Session belongs to a workspace it creates on
+    // demand) and answers with the Session id the shell should select.
+    openSession: async (roomId) => {
+      const opened = await openRoom(roomId)
+      navigation?.openSession?.(opened.sessionId)
       layout?.selectPanel?.(null)
     },
   })
