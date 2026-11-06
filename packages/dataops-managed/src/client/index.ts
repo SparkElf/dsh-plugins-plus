@@ -79,6 +79,35 @@ const bindReloginCopy = (ctx: ClientContext): ReloginPromptProps['t'] => {
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dataops-managed: settings copy')
   installWanxiangBranding(ctx)
+
+  /**
+   * The DSH logo returns to the portal page the reader entered from.
+   *
+   * The portal records `dataops.ai.returnTo` in sessionStorage before mounting this frame;
+   * its shell owns the router, so this half only asks it to navigate. The menu label is
+   * DSH-owned, hence the visible-text match rather than a stable id.
+   */
+  ctx.effect(() => {
+    if (window.parent === window) return () => {}
+    const onLogoClick = (event: MouseEvent): void => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      let node: Element | null = target
+      for (let depth = 0; node !== null && depth < 5; depth += 1, node = node.parentElement) {
+        const rect = node.getBoundingClientRect()
+        if (rect.top > 120 || rect.left > 360 || rect.width <= 0 || rect.width > 520) break
+        if (/万相AI中台|Wanxiang AI/i.test((node.textContent ?? '').trim())) {
+          event.preventDefault()
+          event.stopPropagation()
+          window.parent.postMessage({ type: 'dataops:return-to', version: 1 }, '*')
+          return
+        }
+      }
+    }
+    document.addEventListener('click', onLogoClick, true)
+    return () => document.removeEventListener('click', onLogoClick, true)
+  }, 'dataops-managed: return-to logo')
+
   const t = ctx.locale.bind(NS) as ManagedDataOpsSectionInjected['t']
 
   /**
