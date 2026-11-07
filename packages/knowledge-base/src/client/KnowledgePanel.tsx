@@ -1072,6 +1072,11 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // render would disagree about how many hooks exist. React reports that as error #310
   // and unmounts the boundary.
   useEffect(() => {
+    // This panel draws the preview itself (`documentInSidebar` is false), so there is no host
+    // frame to hand back. Running the hand-back below on every render both closed a frame this
+    // surface does not own and reset a just-selected file to home, which looked like the preview
+    // flashing open and collapsing in the same paint.
+    if (!documentInSidebar) return
     if (readerOnScreen) return
     // A selected document has not finished opening yet; the host's collapsed track is
     // not a user close. Wait until the column has been seen expanded at least once.
