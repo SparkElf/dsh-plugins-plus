@@ -193,7 +193,6 @@ describe('the cleanup route', () => {
       new Map(),
       () => {},
       ctx,
-      new Map(),
     ) as { readonly mode: string; readonly removed: readonly string[] }
 
     expect(result.mode).toBe('purge')
@@ -214,7 +213,6 @@ describe('the cleanup route', () => {
       {
         sessionPersistence: persistenceOf('/tmp', []),
       } as unknown as GroupChatContext,
-      new Map(),
     )).rejects.toThrow(/confirm/u)
   })
 })

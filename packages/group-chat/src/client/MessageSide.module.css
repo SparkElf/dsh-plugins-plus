@@ -1,25 +1,14 @@
 /*
  * A room message written by another author.
  *
- * `display: contents` is what keeps this element invisible to layout: it is added only to
- * carry the decision, and its child — the official row — keeps the exact box it had before,
- * as a direct child of the flow item. That matters because the official row is a full-width
- * column flex container and the message stack inside it caps itself with a percentage
- * `max-width`; putting a flex or shrink-to-fit box between them would resolve that
- * percentage against an indefinite width and resize every bubble.
+ * `display: contents` keeps this element invisible to layout: its child — the official row —
+ * keeps the exact box it had before, as a direct child of the flow item. `align-items:
+ * flex-start` on the row is what flips the official right alignment; the row's width, the
+ * message stack's percentage cap and the bubble's own sizing stay untouched.
  *
- * The alignment then has to be flipped on the row itself, since that is where the official
- * rule pins it to the right: `align-items: flex-start` on a column flex container moves the
- * message stack and the action row together, and leaves the row's width, the stack's
- * percentage cap and the bubble's own sizing untouched.
- *
- * Why the child is matched structurally: the official module's class names are
- * content-hashed and change whenever that package is rebuilt, so naming one would break on
- * any upgrade of the shell.
- *
- * Why the class is written twice: this rule sets the same property as the official one at
- * the same specificity, so the winner would otherwise depend on which stylesheet the shell
- * injected last. Repeating the class wins on specificity in either order.
+ * The official module's class names are content-hashed, so the row is matched structurally.
+ * The class is written twice so this rule outranks the official one regardless of stylesheet
+ * order.
  */
 .otherRow {
   display: contents;
@@ -34,13 +23,8 @@
  *
  * The wrapper cannot stay `display: contents` once it carries a header: a contents box generates
  * no box of its own, so the header would become a sibling of the official row inside the flow
- * item — the row's `align-items: flex-end` would then push the header to the right, away from the
- * bubble it labels.
- *
- * So the wrapper becomes a column that shrink-wraps. The one thing that must not change is the
- * width the official row resolves its percentage `max-width` against: `align-items: flex-start`
- * gives it the wrapper's content width, which is the same width it had as a direct child of the
- * flow item, so the bubble keeps its size and only its alignment moves.
+ * item. The wrapper therefore becomes a shrink-wrapping column that gives the official row the
+ * same content width it had as a direct child of the flow item.
  */
 .otherRow {
   display: flex;
@@ -79,60 +63,7 @@
   max-width: 100%;
 }
 
-/* ── quoted message bar ──────────────────────────────────────────────────────── */
-
-/*
- * The bar sits above the bubble and outside it, so the reply keeps the official layout and the
- * quote reads as a pointer rather than as part of what was said. Narrower than the bubble and
- * clipped to one line: it is attribution, not content.
- */
-.quoteBar {
-  box-sizing: border-box;
-  display: flex;
-  gap: 6px;
-  align-items: stretch;
-  max-width: min(420px, 100%);
-  margin-bottom: 4px;
-  padding: 4px 8px 4px 0;
-  border-radius: 4px;
-  background: var(--dsw-alias-bg-l2, rgb(255 255 255 / 4%));
-  overflow: hidden;
-}
-
-/* The accent rule, drawn as a stretched column so it matches the bar's height. */
-.quoteMark {
-  flex: none;
-  width: 2px;
-  border-radius: 1px;
-  background: var(--dsw-alias-brand-primary, currentcolor);
-  opacity: 0.6;
-}
-
-.quoteBody {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  min-width: 0;
-  font-size: 12px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-secondary, inherit);
-}
-
-.quoteAuthor {
-  flex: none;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.quoteText {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.85;
-}
-
-/* A reply I wrote keeps the bar on the right with the bubble it belongs to. */
+/* A message I wrote keeps the official right alignment. */
 .selfRow {
   display: flex;
   flex-direction: column;
@@ -141,13 +72,7 @@
   max-width: 100%;
 }
 
-/* ── reply control on a message ─────────────────────────────────────────────── */
-
-/*
- * The bubble and its action share one row so the button can be placed against it. Without this
- * wrapper the button would have to be positioned against the flow item, which also contains the
- * author header and the quoted bar.
- */
+/* The bubble keeps its own row so alignment is scoped to it, not to the author header. */
 .rowBody {
   position: relative;
   display: flex;
@@ -156,62 +81,7 @@
   max-width: 100%;
 }
 
-/*
- * Always present, just quiet, and fully opaque on hover or focus.
- *
- * A control that only exists while hovered cannot be reached by keyboard, and the reveal here
- * depends on the official row's own hover behaviour — which this plugin does not own.
- */
-.rowActions {
-  /* The official copy control sits at the row's bottom-right corner; the reply control goes
-     immediately left of it, sharing that row and the shipped 8px icon gap. */
-  position: absolute;
-  opacity: 0;
-  right: calc(36px + var(--dsh-content-font-delta, 0px));
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  transition: opacity 120ms ease;
-}
-
-.otherRow:hover .rowActions,
-.rowActions:focus-within {
-  opacity: 1;
-}
-
-.replyButton {
-  /* The shipped icon-action measurements, so a reply control on a room message is the same size
-     as the copy control beside it on an agent message. */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(28px + var(--dsh-content-font-delta, 0px));
-  height: calc(28px + var(--dsh-content-font-delta, 0px));
-  padding: 6px;
-  border: none;
-  border-radius: var(--dsw-radius-sm, 6px);
-  background: none;
-  color: var(--dsw-alias-label-tertiary, inherit);
-  cursor: pointer;
-}
-
-.replyButton:hover {
-  background: var(--dsw-alias-bg-l2, rgb(255 255 255 / 8%));
-  color: var(--dsw-alias-label-primary, inherit);
-}
-
-.replyButton:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary, currentcolor);
-  outline-offset: 1px;
-}
-
-/*
- * The reply control on a message I wrote.
- *
- * The bubble is right-aligned, so the control goes on its left: that is where the pointer comes
- * from when reaching back into the conversation, and it never covers the trailing timestamp the
- * official row puts on the right.
- */
+/* A message I wrote keeps the official right alignment inside the wrapper. */
 .selfBody {
   position: relative;
   display: flex;
@@ -219,20 +89,4 @@
   justify-content: flex-end;
   min-width: 0;
   max-width: 100%;
-}
-
-.rowActionsSelf {
-  /* Same corner as the other authors' rows: beside copy at the bottom-right, not on the left. */
-  position: absolute;
-  right: calc(36px + var(--dsh-content-font-delta, 0px));
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
-.selfRow:hover .rowActionsSelf,
-.rowActionsSelf:focus-within {
-  opacity: 1;
 }

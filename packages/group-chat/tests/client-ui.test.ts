@@ -184,18 +184,17 @@ describe('guide tile', () => {
   })
 })
 
-describe('message reply placement', () => {
-  // The reply control shares the official row's bottom-right corner with the copy control:
-  // one 28px button (plus the shipped 8px gap) in from the right edge, bottom aligned.
-  const css = readFileSync(new URL('../src/client/MessageSide.module.css', import.meta.url), 'utf8')
+describe('native quote only', () => {
+  // Quoting is the shell's own selection interaction (message-quotes): select message text, pick
+  // 引用, and the official composer inserts the atomic quote. The room must not carry a second,
+  // button-driven quote surface of its own.
+  const side = readFileSync(new URL('../src/client/MessageSide.tsx', import.meta.url), 'utf8')
+  const client = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
 
-  it('anchors both reply variants beside the copy control', () => {
-    for (const selector of ['.rowActions', '.rowActionsSelf']) {
-      const rule = new RegExp(`\\${selector} \\{[^}]*\\}`, 'u').exec(css)?.[0] ?? ''
-      expect(rule).toContain('right: calc(36px + var(--dsh-content-font-delta, 0px));')
-      expect(rule).toContain('bottom: 0;')
-      expect(rule).not.toContain('left: -28px;')
-      expect(rule).not.toContain('right: -28px;')
-    }
+  it('draws no reply button and registers no quote dock', () => {
+    expect(side).not.toContain('data-group-chat-reply')
+    expect(side).not.toContain('replyButton')
+    expect(client).not.toContain('conversation.input.dock')
+    expect(client).not.toContain('createQuoteStore')
   })
 })

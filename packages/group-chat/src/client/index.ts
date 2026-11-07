@@ -42,8 +42,6 @@ import {
 } from './MembersPanel.tsx'
 import { MembersGuideEntry, type MembersGuideEntryProps } from './GuideEntry.tsx'
 import { createRoomStore, type RoomStore } from './store.ts'
-import { createQuoteStore } from './quote.ts'
-import { PendingQuoteBar } from './QuoteComposer.tsx'
 import { registerMessageSource, type InputTriggersLike } from './messageReference.ts'
 import { registerMemberSource } from './memberReference.ts'
 import { PRESET_LOCALE_NS } from './rows.ts'
@@ -289,46 +287,6 @@ export function apply(ctx: ClientContext): void {
       layout?.selectPanel?.(null)
     },
   })
-  // One store for the pending reply, shared by the message that starts it and the composer that
-  // shows it. Created here because both surfaces are registered from this entry.
-  const quotes = createQuoteStore()
-  /**
-   * Drops the pending reply once the composer submits.
-   *
-   * The composer belongs to the official chat surface, so there is no submit callback to hook.
-   * What is stable is how a submission looks: Enter inside the editor, or a click on the send
-   * button. Both are observed at the document in the capture phase — before the official handler
-   * runs — and this side's pending reply is dropped for the open room. Only the local copy goes:
-   * the host still needs its own to attach the quote to the message being published, and deleting
-   * it here would send the reply bare.
-   */
-  const dropQuoteOnSubmit = (): (() => void) => {
-    const clearActive = (): void => {
-      const roomId = store.getState().activeRoomId
-      if (roomId !== undefined) quotes.clearLocal(roomId)
-    }
-    const onSubmitKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
-      const target = event.target
-      if (target instanceof Element && target.closest('[contenteditable="true"]') !== null) clearActive()
-    }
-    const onSubmitClick = (event: MouseEvent): void => {
-      const target = event.target
-      if (!(target instanceof Element)) return
-      const button = target.closest('button[aria-label]')
-      const label = button?.getAttribute('aria-label') ?? ''
-      // Matches the shipped labels without pinning one language: both the zh and en strings
-      // describe sending a message.
-      if (/发送|send/i.test(label)) clearActive()
-    }
-    document.addEventListener('keydown', onSubmitKey, true)
-    document.addEventListener('click', onSubmitClick, true)
-    return () => {
-      document.removeEventListener('keydown', onSubmitKey, true)
-      document.removeEventListener('click', onSubmitClick, true)
-    }
-  }
-  ctx.effect(dropQuoteOnSubmit)
   // The one action that means "show me this room" is opening its Session, so every caller —
   // the row today, a keyboard shortcut or a deep link later — goes through it and no caller has
   // to remember a second step.
@@ -653,10 +611,6 @@ export function apply(ctx: ClientContext): void {
             // the page, leaving every other author's bubble unlabelled.
             getRoster: (roomId: string) => store.getState().members[roomId],
             sided: props['node'] !== undefined,
-            quotes,
-            // Our own copy, kept apart from the seat's `t`: that one is bound to the official
-            // `chat` namespace the bubble renders against.
-            tOwn: t,
           }))
         } catch (error) {
           logClaimFailure(key, error)
@@ -672,12 +626,9 @@ export function apply(ctx: ClientContext): void {
     return () => { unsubscribe(); release() }
   })
 
-  // The pending-quote bar above the composer. `conversation.input.dock` is a list seat, so this
-  // adds a row beside the official queue/todo docks instead of replacing one of them. The seat
-  // is session-scoped and hands the factory a session id; a non-room session draws nothing.
   // Room messages join the official `@` menu. This is the only route to a real inline
   // reference: the pipeline owns chip insertion, so a plugin-provided pick is what makes a
-  // quote look and behave like a session reference instead of a second, parallel widget.
+  // reference look and behave like a session reference instead of a second, parallel widget.
   const inputTriggers = ctx.get('inputTriggers') as InputTriggersLike | undefined
   if (inputTriggers !== undefined) {
     ctx.effect(() => registerMessageSource(inputTriggers, store))
@@ -685,17 +636,6 @@ export function apply(ctx: ClientContext): void {
     // `appearance: 'mention'`, which is what carries the member ids to the Host as prompt.mentions.
     ctx.effect(() => registerMemberSource(inputTriggers, store))
   }
-
-  ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-    name: 'conversation.input.dock',
-    id: QUOTE_DOCK_ID,
-    locale: NS,
-    inject: (() => ({
-      t,
-      quotes,
-      store,
-    })) as never,
-  }, PendingQuoteBar)), 'group-chat: pending quote bar')
 
   void PANEL_ID
 }

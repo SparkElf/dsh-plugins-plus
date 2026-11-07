@@ -30,8 +30,24 @@
 import { createElement, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
 import { Avatar } from './Avatar.tsx'
 import type { RoomMember } from './api.ts'
-import { previewOf, quoteOf, type MessageLike, type QuotedMessage, type QuoteStore } from './quote.ts'
 import type { GroupChatKey } from './locales.ts'
+
+/** Source kind of the legacy model-only quoted-message context; it must never be drawn. */
+const QUOTE_CONTEXT_KIND = 'group-chat-quote'
+
+/** The parts of a message row this module reads. */
+interface MessageLike {
+  readonly source?: {
+    readonly kind?: unknown
+    readonly roomId?: unknown
+    readonly memberId?: unknown
+    readonly authorKind?: unknown
+    readonly memberName?: unknown
+    readonly messageId?: unknown
+  } | null
+  readonly content?: unknown
+  readonly id?: unknown
+}
 import styles from './MessageSide.module.css'
 
 
@@ -114,23 +130,6 @@ export interface MessageSideProps {
    * `undefined` and every bubble would render unlabelled forever.
    */
   readonly getRoster: (roomId: string) => readonly RoomMember[] | undefined
-  /**
-   * Where a reply started on this message is recorded.
-   *
-   * The message is the only place that knows which row the reader pointed at, so the button has
-   * to live here rather than on the composer: a composer-side control would have to ask "which
-   * message?" and answer it from a hover that the composer never sees.
-   */
-  readonly quotes?: QuoteStore
-  /**
-   * Copy resolver for this plugin's own strings.
-   *
-   * Kept separate from the `t` the seat supplies: that one is bound to the official `chat`
-   * namespace, because the official bubble looks its own copy up there and would print raw keys
-   * if this plugin replaced it. Our keys live in this plugin's namespace, so they arrive under
-   * their own name.
-   */
-  readonly tOwn?: (key: GroupChatKey) => string
 }
 
 /**
@@ -153,80 +152,8 @@ export interface MessageSideProps {
  * @param props - the official props plus this wrapper's placement inputs.
  * @returns the official view, wrapped only when the message is another author's room message.
  */
-/**
- * The bar above a bubble showing which message it answers.
- *
- * Drawn by this plugin rather than by the official view: the quote travels as a content block
- * whose type the official renderer does not know, so it would otherwise be dropped. The bar sits
- * outside the bubble so the reply's own text keeps the official layout.
- *
- * @param props - the quote to show.
- * @returns the bar, or `null` when there is nothing worth quoting.
- */
-export const QuoteBar = ({ quote }: { readonly quote: QuotedMessage }): ReactNode => {
-  if (quote.preview.length === 0) return null
-  return (
-    <div className={styles['quoteBar']} data-group-chat-quote={quote.messageId}>
-      <span className={styles['quoteMark']} aria-hidden="true" />
-      <span className={styles['quoteBody']}>
-        {quote.authorName === undefined ? null : (
-          <span className={styles['quoteAuthor']}>{quote.authorName}</span>
-        )}
-        <span className={styles['quoteText']}>{quote.preview}</span>
-      </span>
-    </div>
-  )
-}
-
-/**
- * The control that starts a reply to one message.
- *
- * Rendered inside the wrapper this plugin already draws around another author's row, which is
- * the only place the message id is known. It reads its own hover state so the button appears
- * over the row it belongs to and nowhere else.
- *
- * @param props - the message it replies to, and the store the pick lands in.
- * @returns the button, or `null` when the message cannot be replied to.
- */
-/** Source kind of the model-only quoted-message context; it must never be drawn as a message. */
-const QUOTE_CONTEXT_KIND = 'group-chat-quote'
-
-const ReplyControl = (props: {
-  readonly roomId: string
-  readonly messageId: string
-  readonly authorName?: string
-  readonly preview: string
-  readonly quotes: QuoteStore
-  readonly t: (key: GroupChatKey) => string
-}): ReactNode => {
-  const { roomId, messageId, authorName, preview, quotes, t } = props
-  if (preview.length === 0) return null
-  return (
-    <button
-      type="button"
-      className={styles['replyButton']}
-      data-group-chat-reply=""
-      aria-label={t('reply')}
-      title={t('reply')}
-      onClick={() => {
-        quotes.start({ roomId, messageId, preview, ...authorName === undefined ? {} : { authorName } })
-      }}
-    >
-      {/* Inline rather than an icon from the primitives package: importing that package pulls its
-          CSS into every module that renders a bubble, and the plain-function tests import this
-          module without a bundler. The shape is a corner-turning arrow, the usual "answers that
-          message" mark. */}
-      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-           strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M6 4 2.5 7.5 6 11" />
-        <path d="M2.5 7.5h7A3.5 3.5 0 0 1 13 11v1.5" />
-      </svg>
-    </button>
-  )
-}
-
 export const MessageSide = (props: MessageSideProps): ReactNode => {
-  const { node, Official, getSelfId, subscribeSelf, sided, getRoster, quotes } = props
+  const { node, Official, getSelfId, subscribeSelf, sided, getRoster } = props
   // One subscription drives both lookups: identity and roster arrive from separate requests, so
   // subscribing twice would re-render on the same change and could draw the author before the
   // name is known.
@@ -243,7 +170,6 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
   // name, and the message it belongs to already shows the quote as a pointer.
   if (message?.source?.kind === QUOTE_CONTEXT_KIND) return null
   const side = sided ? messageSide(message, selfId) : undefined
-  const quote = quoteOf(message)
   const roomId = message?.source?.roomId
   const roomKnown = typeof roomId === 'string' && roomId.length > 0
   // The id the room's log knows this message by. `source.messageId` is that row; `id` is the
@@ -254,23 +180,9 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
   const messageId = typeof sourceMessageId === 'string' && sourceMessageId.length > 0
     ? sourceMessageId
     : typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined
-  // A message outside a room has no roster to attribute it from and no room to reply into, so it
-  // stays exactly as the official renderer drew it. A quote can still be present on a message
-  // whose room id went missing; the bar is shown rather than dropped, because losing it would
-  // make a reply look like it answered nothing.
-  if (side === undefined || !roomKnown) {
-    if (quote === undefined) return view
-    return (
-      <div
-        className={styles['selfRow']}
-        data-group-chat-side="self"
-        {...messageId === undefined ? {} : { 'data-group-chat-message': messageId }}
-      >
-        <QuoteBar quote={quote} />
-        {view}
-      </div>
-    )
-  }
+  // A message outside a room has no roster to attribute it from, so it stays exactly as the
+  // official renderer drew it.
+  if (side === undefined || !roomKnown) return view
 
   const member = authorOf(message, getRoster(roomId))
   const name = authorNameOf(member)
@@ -286,33 +198,7 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
         </div>
       )
 
-  // The host prefixes what it publishes with the speaker's name so the model can tell who is
-  // talking. That prefix is part of the stored text, so a quote taken from it would read
-  // "DataOps Admin：DataOps Admin：…" once the bar draws the name itself.
-  const rawPreview = previewOf(message)
-  const preview = name === undefined
-    ? rawPreview
-    : rawPreview.replace(new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[：:]\\s*`), '')
-  // Both halves are required: an id with no text has nothing to quote, and a message with no id
-  // cannot be pointed at. Offering the control in either case would store a quote nobody can
-  // resolve.
-  const replying = quotes !== undefined && messageId !== undefined && preview.length > 0
-
-  const actions = replying ? (
-    <div className={side === 'self' ? styles['rowActionsSelf'] : styles['rowActions']}>
-      <ReplyControl
-        roomId={roomId}
-        messageId={messageId}
-        {...name === undefined ? {} : { authorName: name }}
-        preview={preview}
-        quotes={quotes}
-        t={props.tOwn ?? ((key) => key)}
-      />
-    </div>
-  ) : null
-
-  // A message I wrote keeps the official right alignment; the reply control sits on its left,
-  // where the bubble has room and where the pointer arrives from.
+  // A message I wrote keeps the official right alignment.
   if (side === 'self') {
     return (
       <div
@@ -320,10 +206,8 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
         data-group-chat-side="self"
         {...messageId === undefined ? {} : { 'data-group-chat-message': messageId }}
       >
-        {quote === undefined ? null : <QuoteBar quote={quote} />}
         <div className={styles['selfBody']}>
           {view}
-          {actions}
         </div>
       </div>
     )
@@ -336,10 +220,8 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
       {...messageId === undefined ? {} : { 'data-group-chat-message': messageId }}
     >
       {head}
-      {quote === undefined ? null : <QuoteBar quote={quote} />}
       <div className={styles['rowBody']}>
         {view}
-        {actions}
       </div>
     </div>
   )
