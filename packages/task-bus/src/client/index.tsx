@@ -708,8 +708,8 @@ interface SkillPlazaRow {
 async function readSkillPlazaRows(): Promise<string[]> {
   try {
     const [listResponse, plazaResponse] = await Promise.all([
-      fetch('/api/dsh-skill-center/list', { cache: 'no-store' }),
-      fetch('/integrations/dataops/skill-plaza?mine=1', { cache: 'no-store' }),
+      fetch('api/dsh-skill-center/list', { cache: 'no-store' }),
+      fetch('integrations/dataops/skill-plaza?mine=1', { cache: 'no-store' }),
     ])
     // Only an explicit `modelInvocable: false` marks a skill as disabled. A plaza row
     // that has no local list entry is still pending review and must be listed.
@@ -753,7 +753,7 @@ interface ReviewInboxItem {
  */
 async function readReviewInbox(): Promise<ReviewInboxItem[]> {
   try {
-    const response = await fetch('/integrations/dataops/review-notifications', { cache: 'no-store' })
+    const response = await fetch('integrations/dataops/review-notifications', { cache: 'no-store' })
     if (!response.ok) return []
     const body = await response.json() as { items?: Array<Record<string, unknown>> }
     const rows: ReviewInboxItem[] = []
@@ -807,7 +807,91 @@ function NotificationCard({ title, body, time, unread, onClick }: {
   )
 }
 
-/** The "notifications" tab: every source rendered as the same notification card. */
+/** How many rows one notification group shows before it pages. */
+const NOTIFICATION_PAGE_SIZE = 10
+/** Names the reader hid from the review group; clearing is recoverable, so it outlives a reload. */
+const HIDDEN_SKILLS_KEY = 'dataops-task-bus-hidden-skills-v1'
+/** Ids the reader cleared from the audit group, so a reload does not bring them back. */
+const CLEARED_NOTIFICATIONS_KEY = 'dataops-task-bus-cleared-notifications-v1'
+
+/** Read a string set the browser persisted; an unreadable value is an empty set. */
+function readStoredSet(key: string): ReadonlySet<string> {
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (raw === null || raw === '') return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+/** Persist one string set; storage failures leave the in-memory set authoritative. */
+function writeStoredSet(key: string, values: Iterable<string>): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify([...values]))
+  } catch {
+    /* private mode */
+  }
+}
+
+/** Slice one page out of a list and report the page count a pager needs. */
+function pageOf<T>(items: readonly T[], page: number): { rows: readonly T[]; pages: number; page: number } {
+  const pages = Math.max(1, Math.ceil(items.length / NOTIFICATION_PAGE_SIZE))
+  const current = Math.min(Math.max(0, page), pages - 1)
+  return { rows: items.slice(current * NOTIFICATION_PAGE_SIZE, (current + 1) * NOTIFICATION_PAGE_SIZE), pages, page: current }
+}
+
+/** `上一页 / 第 x/y 页 / 下一页`, hidden while a group fits on one page. */
+function NotificationPager({ page, pages, onChange }: {
+  page: number
+  pages: number
+  onChange: (page: number) => void
+}) {
+  if (pages <= 1) return null
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+      <Button size="sm" variant="ghost" disabled={page <= 0} onClick={() => onChange(page - 1)}>上一页</Button>
+      <span style={{ fontSize: 12, color: colors.muted, fontVariantNumeric: 'tabular-nums' }}>第 {page + 1}/{pages} 页</span>
+      <Button size="sm" variant="ghost" disabled={page >= pages - 1} onClick={() => onChange(page + 1)}>下一页</Button>
+    </div>
+  )
+}
+
+/** The header every group shares: title, total, current page, and its own clear action. */
+function NotificationGroupHeader({ title, total, pages, page, clearLabel, onClear, restore, testId }: {
+  title: string
+  total: number
+  pages: number
+  page: number
+  clearLabel?: string
+  onClear?: () => void
+  restore?: { label: string; onClick: () => void }
+  testId?: string
+}) {
+  return (
+    <div data-testid={testId} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>{title}</span>
+        {total > 0 ? (
+          <span style={{ fontSize: 12, color: '#8ea6c6', fontVariantNumeric: 'tabular-nums' }}>
+            {total} 条{pages > 1 ? ` · 第 ${page + 1}/${pages} 页` : ''}
+          </span>
+        ) : null}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {restore === undefined ? null : (
+          <Button size="sm" variant="ghost" onClick={restore.onClick}>{restore.label}</Button>
+        )}
+        {clearLabel === undefined || onClear === undefined ? null : (
+          <Button size="sm" variant="ghost" data-testid={testId === undefined ? undefined : testId + '-clear'} disabled={total === 0} onClick={onClear}>{clearLabel}</Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** The "notifications" tab: every source rendered as the same notification card, paged per source. */
 function KbNotificationPanel({ tasks, skillRows, reviewItems, onOpenSkill, onClear }: {
   tasks: readonly KbTaskRecord[]
   skillRows: readonly string[]
@@ -815,22 +899,69 @@ function KbNotificationPanel({ tasks, skillRows, reviewItems, onOpenSkill, onCle
   onOpenSkill: () => void
   onClear: () => void
 }) {
+  const [auditPage, setAuditPage] = useState(0)
+  const [skillPage, setSkillPage] = useState(0)
+  const [kbPage, setKbPage] = useState(0)
+  const [hiddenSkills, setHiddenSkills] = useState<ReadonlySet<string>>(() => readStoredSet(HIDDEN_SKILLS_KEY))
+  const [clearedIds, setClearedIds] = useState<ReadonlySet<string>>(() => readStoredSet(CLEARED_NOTIFICATIONS_KEY))
+
+  const audits = reviewItems.filter(item => !clearedIds.has(item.id))
+  const skills = skillRows.filter(name => !hiddenSkills.has(name))
+  const audit = pageOf(audits, auditPage)
+  const skill = pageOf(skills, skillPage)
+  const kb = pageOf(tasks, kbPage)
+
   const done = tasks.filter(task => task.stage === 'done' || task.stage === 'uploaded').length
   const timeOf = (value: string): string => {
     const date = new Date(value)
     if (Number.isNaN(date.getTime())) return ''
     return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   }
+
+  /** Mark every audit row read on the host, then keep them out of the list so clearing is visible. */
+  const clearAudits = (): void => {
+    const ids = new Set(clearedIds)
+    for (const item of reviewItems) ids.add(item.id)
+    setClearedIds(ids)
+    writeStoredSet(CLEARED_NOTIFICATIONS_KEY, ids)
+    // The host route accepts the read action on the collection path and forwards it to
+    // `/api/ai/review-notifications/read`; the `/read` suffix is not a browser-reachable route.
+    void fetch('integrations/dataops/review-notifications', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ all: true }),
+    }).catch(() => { /* the local clear stands even when the host call fails */ })
+  }
+
+  /** Hide the pending skills; the header keeps a 恢复 entry so nothing is lost. */
+  const clearSkills = (): void => {
+    const names = new Set(hiddenSkills)
+    for (const name of skillRows) names.add(name)
+    setHiddenSkills(names)
+    writeStoredSet(HIDDEN_SKILLS_KEY, names)
+  }
+
+  const restoreSkills = (): void => {
+    setHiddenSkills(new Set())
+    writeStoredSet(HIDDEN_SKILLS_KEY, [])
+    setSkillPage(0)
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>审核通知</span>
-          {reviewItems.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{reviewItems.length}</span> : null}
-        </div>
-        {reviewItems.length === 0 ? (
+        <NotificationGroupHeader
+          title="审核通知"
+          testId="notify-audit"
+          total={audits.length}
+          pages={audit.pages}
+          page={audit.page}
+          clearLabel="清空"
+          onClear={clearAudits}
+        />
+        {audits.length === 0 ? (
           <div style={{ padding: 14, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无审核通知</div>
-        ) : reviewItems.map(item => (
+        ) : audit.rows.map(item => (
           <NotificationCard
             key={item.id}
             title={item.title}
@@ -840,16 +971,23 @@ function KbNotificationPanel({ tasks, skillRows, reviewItems, onOpenSkill, onCle
             onClick={onOpenSkill}
           />
         ))}
+        <NotificationPager page={audit.page} pages={audit.pages} onChange={setAuditPage} />
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>技能广场待审核</span>
-          {skillRows.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{skillRows.length}</span> : null}
-        </div>
-        {skillRows.length === 0 ? (
+        <NotificationGroupHeader
+          title="技能广场待审核"
+          testId="notify-skills"
+          total={skills.length}
+          pages={skill.pages}
+          page={skill.page}
+          clearLabel="清空"
+          onClear={clearSkills}
+          {...hiddenSkills.size > 0 ? { restore: { label: `恢复隐藏的 ${hiddenSkills.size} 条`, onClick: restoreSkills } } : {}}
+        />
+        {skills.length === 0 ? (
           <div style={{ padding: 14, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无待审核技能</div>
-        ) : skillRows.map(name => (
+        ) : skill.rows.map(name => (
           <NotificationCard
             key={name}
             title={'技能「' + name + '」等待审核'}
@@ -858,32 +996,38 @@ function KbNotificationPanel({ tasks, skillRows, reviewItems, onOpenSkill, onCle
             onClick={onOpenSkill}
           />
         ))}
+        <NotificationPager page={skill.page} pages={skill.pages} onChange={setSkillPage} />
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>知识库任务</span>
-            {tasks.length > 0 ? <span style={{ fontSize: 12, color: '#8ea6c6' }}>{done}/{tasks.length}</span> : null}
-          </div>
-          <Button size="sm" variant="ghost" disabled={tasks.length === 0} onClick={onClear}>清空记录</Button>
-        </div>
+        <NotificationGroupHeader
+          title="知识库任务"
+          testId="notify-kb"
+          total={tasks.length}
+          pages={kb.pages}
+          page={kb.page}
+          clearLabel="清空记录"
+          onClear={onClear}
+        />
+        {tasks.length > 0 ? (
+          <div style={{ fontSize: 12, color: colors.muted, fontVariantNumeric: 'tabular-nums' }}>已完成 {done}/{tasks.length}</div>
+        ) : null}
         {tasks.length === 0 ? (
           <div style={{ padding: 14, textAlign: 'center', color: colors.muted, fontSize: 12 }}>暂无提取任务</div>
-        ) : tasks.map(task => {
-          const percent = Math.max(0, Math.min(100, Math.round(task.progress ?? (task.stage === 'done' ? 100 : task.stage === 'uploaded' ? 25 : 0))))
+        ) : kb.rows.map(task => {
+          const percent = Math.max(0, Math.min(100, Math.round(task.progress ?? (task.stage === 'done' ? 100 : task.stage === 'uploaded' ? 100 : 0))))
           const tone = task.stage === 'failed' ? colors.danger
             : task.stage === 'done' || task.stage === 'uploaded' ? colors.success : colors.accent
           return (
-            <div key={task.id} style={{ padding: '10px 12px', border: '1px solid ' + colors.line, borderRadius: 8, background: colors.panelAlt, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div key={task.id} style={{ padding: '10px 12px', border: '1px solid ' + colors.line, borderRadius: 8, background: colors.panelAlt }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 500, color: colors.text }}>{task.name}</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600, color: colors.text }}>{task.fileName}</span>
                 <span style={{ fontSize: 10, color: colors.muted }}>{new Date(task.startedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
                 <span style={{ fontSize: 10, color: tone, whiteSpace: 'nowrap' }}>{KB_STAGE_LABEL[task.stage]}</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <div style={{ flex: 1, height: 6, borderRadius: 999, background: 'rgba(255,255,255,.08)', overflow: 'hidden' }}>
-                  <div style={{ width: String(percent) + '%', height: '100%', borderRadius: 999, background: tone, transition: 'width 120ms linear' }} />
+                  <div style={{ width: String(percent) + '%', height: '100%', borderRadius: 999, background: tone, transition: 'width 120ms ease' }} />
                 </div>
                 <span style={{ minWidth: 34, textAlign: 'right', fontSize: 11, color: colors.muted, fontVariantNumeric: 'tabular-nums' }}>{String(percent) + '%'}</span>
               </div>
@@ -891,6 +1035,7 @@ function KbNotificationPanel({ tasks, skillRows, reviewItems, onOpenSkill, onCle
             </div>
           )
         })}
+        <NotificationPager page={kb.page} pages={kb.pages} onChange={setKbPage} />
       </div>
     </div>
   )
