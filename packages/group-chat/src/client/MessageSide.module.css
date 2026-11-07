@@ -163,10 +163,12 @@
  * depends on the official row's own hover behaviour — which this plugin does not own.
  */
 .rowActions {
+  /* The official copy control sits at the row's bottom-right corner; the reply control goes
+     immediately left of it, sharing that row and the shipped 8px icon gap. */
   position: absolute;
   opacity: 0;
-  top: 0;
-  right: -28px;
+  right: calc(36px + var(--dsh-content-font-delta, 0px));
+  bottom: 0;
   display: flex;
   align-items: center;
   transition: opacity 120ms ease;
@@ -220,9 +222,10 @@
 }
 
 .rowActionsSelf {
+  /* Same corner as the other authors' rows: beside copy at the bottom-right, not on the left. */
   position: absolute;
-  top: 0;
-  left: -28px;
+  right: calc(36px + var(--dsh-content-font-delta, 0px));
+  bottom: 0;
   display: flex;
   align-items: center;
   opacity: 0;

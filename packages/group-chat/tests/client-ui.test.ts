@@ -183,3 +183,19 @@ describe('guide tile', () => {
     expect(css).toMatch(/\.icon \{[^}]*width: 22px/u)
   })
 })
+
+describe('message reply placement', () => {
+  // The reply control shares the official row's bottom-right corner with the copy control:
+  // one 28px button (plus the shipped 8px gap) in from the right edge, bottom aligned.
+  const css = readFileSync(new URL('../src/client/MessageSide.module.css', import.meta.url), 'utf8')
+
+  it('anchors both reply variants beside the copy control', () => {
+    for (const selector of ['.rowActions', '.rowActionsSelf']) {
+      const rule = new RegExp(`\\${selector} \\{[^}]*\\}`, 'u').exec(css)?.[0] ?? ''
+      expect(rule).toContain('right: calc(36px + var(--dsh-content-font-delta, 0px));')
+      expect(rule).toContain('bottom: 0;')
+      expect(rule).not.toContain('left: -28px;')
+      expect(rule).not.toContain('right: -28px;')
+    }
+  })
+})
