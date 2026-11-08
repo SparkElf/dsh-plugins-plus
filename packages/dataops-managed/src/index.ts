@@ -22,6 +22,7 @@ import {
 import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
 import { ReviewApi } from './review-api.ts'
 import { AiToolManager } from './tool-manager.ts'
+import { sessionHidesSkill, sessionHidesTool, skillPermissions, type AiToolName } from './tool-scope.ts'
 import {
   OpenResourceHub,
   OPEN_RESOURCE_EVENTS_PATH,
@@ -628,6 +629,48 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     return (scope.permissions ?? scope.permissionKeys ?? []).includes(CONNECTOR_SKILL_PERMISSION)
   }
   ctx.effect(() => () => aiTools.dispose(), 'dataops-managed: skill and review tool disclosure')
+
+  /**
+   * Per-session disclosure.
+   *
+   * The registration set above is global to the workspace; a group-chat room acts for one member,
+   * so its Session carries that member's scope as an opaque actor and the base asks these rules
+   * while it assembles the step. Both registries are optional: an older base without them keeps
+   * today's workspace-wide behaviour, and `addVisibilityFilter` is only called when it exists.
+   */
+  ctx.effect(() => {
+    const tools = ctx.tools as typeof ctx.tools & {
+      addVisibilityFilter?: (filter: {
+        appliesTo: (tool: { name: string }) => boolean
+        hidden: (session: { actor?: unknown } | undefined, tool: { name: string }) => boolean
+      }) => () => void
+    }
+    const skills = ctx.skills as typeof ctx.skills & {
+      addVisibilityFilter?: (filter: {
+        appliesTo: (candidate: { metadata?: Readonly<Record<string, unknown>> }) => boolean
+        hidden: (session: { actor?: unknown } | undefined, candidate: { metadata?: Readonly<Record<string, unknown>> }) => boolean
+      }) => () => void
+    }
+    const disposers: (() => void)[] = []
+    if (typeof tools.addVisibilityFilter === 'function') {
+      disposers.push(tools.addVisibilityFilter({
+        // Only the tools this plugin registers; everything else in the process is not ours to judge.
+        appliesTo: tool => tool.name.startsWith('dataops_'),
+        hidden: (session, tool) => sessionHidesTool(tool.name as AiToolName, session?.actor, aiTools.currentScope()),
+      }))
+    }
+    if (typeof skills.addVisibilityFilter === 'function') {
+      disposers.push(skills.addVisibilityFilter({
+        // A skill that declares permissions opts into this rule; one without a declaration keeps
+        // whatever the connector gate already decided.
+        appliesTo: candidate => skillPermissions(candidate.metadata).length > 0,
+        hidden: (session, candidate) => sessionHidesSkill(skillPermissions(candidate.metadata), session?.actor, aiTools.currentScope()),
+      }))
+    }
+    return () => {
+      for (const dispose of disposers.splice(0)) dispose()
+    }
+  }, 'dataops-managed: per-session tool and skill disclosure')
   ctx.effect(() => ctx.on('credentials/reference-updated', (ref) => {
     if (String(ref) !== config.credentialRef) return
     // A new token can belong to a different principal, so supersede any read that may still

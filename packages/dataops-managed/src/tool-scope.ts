@@ -217,6 +217,85 @@ export function isToolCapabilityEnabled(
   return state.capabilities[policy.capability] ?? policy.defaultEnabled ?? false
 }
 
+/** Keys a group-chat Session may carry as its opaque `actor`. */
+const ACTOR_KEYS = ['roleCodes', 'systemKeys', 'permissions', 'permissionKeys', 'primaryRole', 'userId'] as const
+
+/**
+ * Whether an opaque Session actor is a usable DataOps scope.
+ *
+ * `Session.actor` is untyped by design -- the base never interprets it -- so the connector has to
+ * decide here. A value without any of the scope's identifying fields is not one of ours, and a
+ * disclosure rule must then hide rather than fall through to the workspace's scope: the Session
+ * belongs to someone else.
+ * @param actor - the opaque value the Session carries.
+ * @returns true when the actor can be read as a {@link DataOpsScope}.
+ */
+export function isScopeActor(actor: unknown): actor is DataOpsScope {
+  return isRecord(actor) && ACTOR_KEYS.some(key => key in actor)
+}
+
+/**
+ * Whether the model must not see one managed tool in this Session.
+ *
+ * A Session carrying a scope-like actor is a group-chat room acting for a member: the member's
+ * own scope decides, never the workspace's. Otherwise the workspace scope applies, which is exactly
+ * what the registration set was derived from, so an ordinary Session sees no change at all.
+ * @param name - the registered tool name.
+ * @param actor - `Session.actor`, or undefined outside a room.
+ * @param workspaceScope - the scope the registration set was built from.
+ * @returns true to hide the tool for this Session.
+ */
+export function sessionHidesTool(
+  name: AiToolName,
+  actor: unknown,
+  workspaceScope: DataOpsScope | undefined,
+): boolean {
+  if (actor !== undefined) {
+    return !isScopeActor(actor) || !isToolVisible(name, actor)
+  }
+  // No workspace scope yet means nothing was registered; if a name still reaches here it cannot be
+  // shown, and saying so keeps the rule total.
+  if (workspaceScope === undefined) return true
+  return !isToolVisible(name, workspaceScope)
+}
+
+/**
+ * Whether the model must not see one skill in this Session.
+ *
+ * A skill declares the permissions it needs in its frontmatter; the effective scope must hold all
+ * of them. Skills without such a declaration are never claimed by the rule, so the plugin's own
+ * connector gate stays the only thing that hides them.
+ * @param permissions - `metadata.permissions` from the candidate, when the frontmatter carried it.
+ * @param actor - `Session.actor`, or undefined outside a room.
+ * @param workspaceScope - the scope the registration set was built from.
+ * @returns true to hide the skill for this Session.
+ */
+/**
+ * Read the permissions a skill's frontmatter declares.
+ *
+ * The candidate carries provider frontmatter as opaque `metadata`; only `permissions` is a
+ * disclosure fact here. A malformed value is ignored rather than hidden: the plugin only claims
+ * candidates it can read.
+ * @param metadata - `SkillCandidate.metadata`, when the provider supplied one.
+ * @returns the declared permission keys, or an empty list.
+ */
+export function skillPermissions(metadata: Readonly<Record<string, unknown>> | undefined): readonly string[] {
+  const value = metadata?.['permissions']
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is string => typeof entry === 'string')
+}
+
+export function sessionHidesSkill(
+  permissions: readonly string[],
+  actor: unknown,
+  workspaceScope: DataOpsScope | undefined,
+): boolean {
+  const effective = actor !== undefined ? (isScopeActor(actor) ? actor : undefined) : workspaceScope
+  if (effective === undefined) return true
+  const held = new Set(permissionList(effective) ?? [])
+  return !permissions.every(permission => held.has(permission))
+}
+
 export function isToolVisible(name: AiToolName, scope: DataOpsScope): boolean {
   const policy: ToolAccessPolicy = AI_TOOL_ACCESS[name]
   if (policy.superAdminOnly === true && !isSuperAdmin(scope)) return false
