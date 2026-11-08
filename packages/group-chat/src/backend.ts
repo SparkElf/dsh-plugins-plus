@@ -38,6 +38,28 @@ export interface RoomEvent {
   readonly surfaceOp?: string
 }
 
+/**
+ * An external system a room is bridged to.
+ *
+ * A room with an external channel accepts messages written by someone who has no DataOps account;
+ * the bridge names the sender on each message it forwards, and the room shows it as foreign rather
+ * than pretending the workspace said it.
+ */
+export interface ExternalChannel {
+  readonly kind: 'qqbot'
+  /** The external group this room mirrors. */
+  readonly groupOpenid: string
+}
+
+/** One message author that came from an external channel. */
+export interface ExternalSender {
+  readonly kind: 'qqbot'
+  /** The sender's id inside the external system. */
+  readonly openid: string
+  /** Display name the external system reported, already user-facing. */
+  readonly nickname: string
+}
+
 export interface RoomSummary {
   readonly id: string
   readonly name: string
@@ -62,6 +84,8 @@ export interface RoomSummary {
   readonly actor?: unknown
   /** The room's agent preset, or null for the default. */
   readonly agentPreset: string | null
+  /** The external system this room mirrors, when one is attached. */
+  readonly externalChannel?: ExternalChannel
   /**
    * The model the room runs on, or nulls to follow the deployment default.
    *
@@ -400,7 +424,12 @@ export class GroupChatBackend {
    */
   async createRoom(
     name: string,
-    execution?: { readonly cwd?: string; readonly agentPreset?: string; readonly actor?: unknown },
+    execution?: {
+      readonly cwd?: string
+      readonly agentPreset?: string
+      readonly actor?: unknown
+      readonly externalChannel?: ExternalChannel
+    },
     signal?: AbortSignal,
   ): Promise<RoomSummary> {
     return this.request<RoomSummary>('POST', '/api/ai/chat/rooms', {

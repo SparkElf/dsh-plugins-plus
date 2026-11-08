@@ -44,6 +44,8 @@ interface MessageLike {
     readonly authorKind?: unknown
     readonly memberName?: unknown
     readonly messageId?: unknown
+    /** Present when the message was forwarded from an external system. */
+    readonly senderExternal?: unknown
   } | null
   readonly content?: unknown
   readonly id?: unknown
@@ -106,6 +108,33 @@ export const authorOf = (
 export const authorNameOf = (member: RoomMember | undefined): string | undefined => {
   const name = member?.displayName?.trim() ?? ''
   return name.length === 0 ? undefined : name
+}
+
+/** One message author that came from an external channel, as the bubble reads it. */
+export interface ExternalSenderView {
+  readonly kind: 'qqbot'
+  readonly openid: string
+  readonly nickname: string
+}
+
+/**
+ * The external sender a message carries, when it was forwarded from another system.
+ *
+ * The bridge writes `source.senderExternal`; a message without one is an ordinary room message and
+ * is rendered exactly as before. A malformed value is ignored rather than guessed at, because a
+ * wrong badge would attribute an external author to the workspace.
+ * @param message - the message data the node carries.
+ * @returns the sender, or undefined for a native room message.
+ */
+export const externalSenderOf = (message: MessageLike | undefined): ExternalSenderView | undefined => {
+  const raw = message?.source?.senderExternal
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const sender = raw as Record<string, unknown>
+  if (sender['kind'] !== 'qqbot') return undefined
+  const openid = typeof sender['openid'] === 'string' ? sender['openid'] : ''
+  const nickname = typeof sender['nickname'] === 'string' ? sender['nickname'].trim() : ''
+  if (openid === '' || nickname === '') return undefined
+  return { kind: 'qqbot', openid, nickname }
 }
 
 /** The official node view, as the registry hands it over. */
@@ -186,17 +215,32 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
 
   const member = authorOf(message, getRoster(roomId))
   const name = authorNameOf(member)
+  // A message forwarded from an external channel has no roster entry: the bridge carries the
+  // sender on the message itself, and the room shows it as foreign so nobody reads it as a member.
+  const external = externalSenderOf(message)
   // The avatar and the name are drawn only when the room knows this author. An unknown author
   // still moves left — the side is decided from a fact the message carries — but is left
   // unlabelled rather than attributed to a guessed name or an internal id.
-  const head = name === undefined || member === undefined
-    ? null
-    : (
-        <div className={styles['author']} data-group-chat-author={member.userId}>
-          <Avatar name={name} src={member.avatarUrl} size="sm" />
-          <span className={styles['authorName']}>{name}</span>
+  const head = external !== undefined
+    ? (
+        <div
+          className={styles['author']}
+          data-group-chat-author={external.openid}
+          data-group-chat-external={external.kind}
+        >
+          <Avatar name={external.nickname} size="sm" />
+          <span className={styles['authorName']}>{external.nickname}</span>
+          <span className={styles['externalBadge']}>来自 QQ</span>
         </div>
       )
+    : name === undefined || member === undefined
+      ? null
+      : (
+          <div className={styles['author']} data-group-chat-author={member.userId}>
+            <Avatar name={name} src={member.avatarUrl} size="sm" />
+            <span className={styles['authorName']}>{name}</span>
+          </div>
+        )
 
   // A message I wrote keeps the official right alignment.
   if (side === 'self') {

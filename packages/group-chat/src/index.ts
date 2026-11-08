@@ -32,6 +32,7 @@ import type { Dirent } from 'node:fs'
 import { mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import type { ExternalChannel } from './backend.ts'
 import { BackendError, GroupChatBackend, type ContentBlockLike, type RoomEvent, type RoomMember, type RoomSummary } from './backend.ts'
 import type { GroupChatContext } from './context.ts'
 import {
@@ -1750,10 +1751,23 @@ const isString = (value: unknown): value is string => typeof value === 'string'
  * `cwd` and the preset decide what the room's agent may touch on any member's behalf, so
  * they travel with creation and are never accepted as later updates.
  */
+/** Read a well-formed external channel from a create/update payload. */
+const externalChannelOf = (payload: Record<string, unknown> | undefined): ExternalChannel | undefined => {
+  const raw = payload?.['externalChannel']
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const channel = raw as Record<string, unknown>
+  if (channel['kind'] !== 'qqbot') return undefined
+  const groupOpenid = typeof channel['groupOpenid'] === 'string' ? channel['groupOpenid'].trim() : ''
+  return groupOpenid.length === 0 ? undefined : { kind: 'qqbot', groupOpenid }
+}
+
 const readExecution = (
   payload: Record<string, unknown> | undefined,
-): { cwd?: string; agentPreset?: string; actor?: unknown } => ({
+): { cwd?: string; agentPreset?: string; actor?: unknown; externalChannel?: ExternalChannel } => ({
   ...payload?.['actor'] === undefined ? {} : { actor: payload['actor'] },
+  // Only a well-formed channel is forwarded: the backend stores what it is given, so a malformed
+  // value would create a room that claims a bridge it does not have.
+  ...externalChannelOf(payload) === undefined ? {} : { externalChannel: externalChannelOf(payload) },
   ...typeof payload?.['cwd'] === 'string' && payload['cwd'].trim().length > 0
     ? { cwd: payload['cwd'].trim() } : {},
   ...typeof payload?.['agentPreset'] === 'string' && payload['agentPreset'].trim().length > 0

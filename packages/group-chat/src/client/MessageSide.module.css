@@ -53,6 +53,17 @@
   white-space: nowrap;
 }
 
+/* Marks a message forwarded from an external channel, so a QQ author is never read as a member. */
+.externalBadge {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(255, 255, 255, .16));
+  border-radius: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 14px;
+}
+
 /*
  * The official row still owns the bubble's own alignment. Kept as a separate rule from the one
  * above so the header is not dragged by it: only the row is flipped, and the header keeps the
