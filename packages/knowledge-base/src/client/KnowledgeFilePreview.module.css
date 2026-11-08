@@ -88,3 +88,51 @@
   color: var(--dsw-alias-state-error-primary);
   font: var(--dsw-font-xxs-12);
 }
+
+/* Binary files have no in-page rendering: show a compact card, not a text-mode apology. */
+.binaryCard {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 420px;
+  margin: 24px auto;
+  padding: 16px 18px;
+  border: 1px solid var(--dsh-border, rgba(0, 0, 0, 0.12));
+  border-radius: 10px;
+  background: var(--dsh-surface, rgba(0, 0, 0, 0.02));
+}
+
+.binaryIcon {
+  display: inline-flex;
+  color: var(--dsh-text-secondary, rgba(0, 0, 0, 0.55));
+}
+
+.binaryMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.binaryName {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.binarySize {
+  font-size: 12px;
+  color: var(--dsh-text-secondary, rgba(0, 0, 0, 0.55));
+}
+
+.binaryAction {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  font-size: 12px;
+  border: 1px solid var(--dsh-border, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}

@@ -36,6 +36,40 @@ type ReadState =
   | { kind: 'binary'; size: number }
   | { kind: 'failed'; error: string }
 
+/** Human-readable size for the binary card. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + ' GB'
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(1) + ' MB'
+  if (bytes >= 1024) return Math.round(bytes / 1024) + ' KB'
+  return String(Math.round(bytes)) + ' B'
+}
+
+/** Save the document through the host download route (bytes arrive base64 over JSON). */
+async function downloadDocument(path: string, name: string): Promise<void> {
+  const response = await fetch(kbApiPath(KB_API.download), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+    cache: 'no-store',
+  })
+  const body = await readKnowledgeJson<{ contentBase64?: string; mimeType?: string; error?: string }>(response)
+  if (!response.ok || typeof body.contentBase64 !== 'string') {
+    throw new Error(typeof body.error === 'string' ? body.error : 'HTTP ' + String(response.status))
+  }
+  const binary = atob(body.contentBase64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  const url = URL.createObjectURL(new Blob([bytes], { type: body.mimeType ?? 'application/octet-stream' }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = name
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
 /**
  * Render one document read through the knowledge read route.
  *
@@ -92,7 +126,27 @@ export function KnowledgeFilePreview(props: KnowledgeFilePreviewProps) {
         {state.kind === 'loading' && <p className={styles.notice}>{props.t('previewLoading')}</p>}
         {state.kind === 'failed' && <p className={styles.error}>{props.t('previewFailed')} {state.error}</p>}
         {state.kind === 'binary' && (
-          <p className={styles.notice}>{props.t('previewBinarySize').replace('{size}', String(state.size))}</p>
+          // A binary file has no in-page rendering to offer, so show a compact card instead of a
+          // text-mode apology: the name, the size and one action.
+          <div className={styles.binaryCard}>
+            <span className={styles.binaryIcon} aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6" />
+              </svg>
+            </span>
+            <span className={styles.binaryMeta}>
+              <strong className={styles.binaryName}>{name}</strong>
+              <span className={styles.binarySize}>{formatBytes(state.size)}</span>
+            </span>
+            <button
+              type="button"
+              className={styles.binaryAction}
+              onClick={() => { void downloadDocument(props.path, name).catch(() => undefined) }}
+            >
+              {props.t('previewDownload') || '下载'}
+            </button>
+          </div>
         )}
         {state.kind === 'text' && (
           <>
