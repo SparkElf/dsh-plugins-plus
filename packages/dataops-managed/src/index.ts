@@ -23,6 +23,7 @@ import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
 import { ReviewApi } from './review-api.ts'
 import { AiToolManager } from './tool-manager.ts'
 import { sessionHidesSkill, sessionHidesTool, skillPermissions, type AiToolName } from './tool-scope.ts'
+import { mintScopedCredential, scopedCredentialRef } from './scoped-credential.ts'
 import {
   OpenResourceHub,
   OPEN_RESOURCE_EVENTS_PATH,
@@ -51,6 +52,8 @@ export const name = 'dataops-managed'
 export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval']
 
 export const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
+/** Where the connector mints one room Session's scoped credential. */
+export const SCOPED_TOKEN_PATH = '/integrations/dataops/scoped-token'
 
 /** This plugin's profile entry id, which owns its Config and sync state. */
 export const MANAGED_PLUGIN_ID = 'dataops-managed'
@@ -561,6 +564,40 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // here; the client half is the only code that calls betterSidebar.openTab.
   const resourceTabHub = new OpenResourceHub(ctx.logger)
   ctx.effect(() => () => resourceTabHub.dispose(), 'dataops-managed: resource tab SSE clients')
+  /**
+   * Mint the scoped credential one room Session uses.
+   *
+   * The connector calls this after it created (or adopted) the room Session with an actor, passing
+   * the DataOps user the room acts for. The token is stored under the Session-specific ref the MCP
+   * bridge derives from the same Session id; a failed mint answers 502 and leaves the room on the
+   * workspace credential, which is what it would have used anyway.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: SCOPED_TOKEN_PATH,
+    handler: async (request, response) => {
+      if ((request.method ?? 'GET').toUpperCase() !== 'POST') {
+        response.writeHead(405).end()
+        return
+      }
+      const body = await readJson(request).catch(() => null)
+      const sessionId = typeof body?.['sessionId'] === 'string' ? body['sessionId'] : ''
+      const actorUserId = typeof body?.['actorUserId'] === 'string' ? body['actorUserId'] : ''
+      if (sessionId === '' || actorUserId === '') {
+        response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify({ error: 'sessionId and actorUserId are required' }))
+        return
+      }
+      const ref = await mintScopedCredential({
+        request: (path, init) => reviewApi.request(path, init),
+        set: async (name, value) => { await ctx.credentials.set(credentialRef(name), value) },
+        warn: (message, error) => { ctx.logger.warn(`dataops-managed: ${message}`, error) },
+      }, config.credentialRef ?? 'DATAOPS_ACCESS_TOKEN', sessionId, actorUserId)
+      response.writeHead(ref === undefined ? 502 : 200, { 'content-type': 'application/json; charset=utf-8' })
+      response.end(JSON.stringify(ref === undefined ? { error: 'scoped token was not minted' } : { ref }))
+    },
+  }), 'dataops-managed: scoped credential route')
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: OPEN_RESOURCE_EVENTS_PATH,
