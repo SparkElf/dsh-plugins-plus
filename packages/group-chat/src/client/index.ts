@@ -282,6 +282,16 @@ export function apply(ctx: ClientContext): void {
     // demand) and answers with the Session id the shell should select.
     openSession: async (roomId) => {
       const opened = await openRoom(roomId)
+      // The room acts for the member who is looking at it, so the managed plugin stores this
+      // request's gateway-attached DataOps JWT in the Session's own credential slot. Fire and
+      // forget: the room opens on the workspace credential when the plugin is not mounted, and the
+      // next message retries the slot.
+      void fetch('integrations/dataops/managed-auth', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: opened.sessionId }),
+      }).catch(() => { /* no managed plugin in this deployment */ })
       await catalog?.refresh?.()
       navigation?.openSession?.(opened.sessionId)
       layout?.selectPanel?.(null)

@@ -768,7 +768,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         response.end()
         return
       }
-      await ctx.credentials.set(accessRef, token)
+      // A room Session keeps its member's own JWT in a Session-scoped slot so the room's MCP calls
+      // act as that member. The caller names the Session; without one the workspace slot is written
+      // exactly as before, which is every ordinary conversation.
+      const body = await readJson(request).catch(() => null)
+      const sessionId = typeof body?.['sessionId'] === 'string' ? body['sessionId'] : ''
+      if (sessionId === '') {
+        await ctx.credentials.set(accessRef, token)
+      } else {
+        const scopedRef = credentialRef(scopedCredentialRef(config.credentialRef, sessionId))
+        const current = await ctx.credentials.resolve(scopedRef).catch(() => undefined)
+        if (current?.value !== token) {
+          try {
+            await ctx.credentials.set(scopedRef, token)
+          } catch (error: unknown) {
+            // The room keeps working on the workspace credential; the next message retries.
+            ctx.logger.warn(`dataops-managed: session credential for ${sessionId} was not stored`, error)
+          }
+        }
+      }
       resetAuthState()
       // A re-login can change the principal behind the workspace; re-read the scope before the
       // next model turn. It stays off the response path for the same reason as activation;

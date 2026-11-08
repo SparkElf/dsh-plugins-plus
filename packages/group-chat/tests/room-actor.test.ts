@@ -15,7 +15,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { RoomSessions, roomSessionId, type GroupChatContext } from '../src/index.ts'
+import { RoomSessions, roomSessionId } from '../src/index.ts'
+import type { GroupChatContext } from '../src/context.ts'
 
 type Event = { type: string }
 
