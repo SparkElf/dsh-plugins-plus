@@ -44,7 +44,8 @@
     "skills/dataops-collect/SKILL.md",
     "skills/admin-workspace-rescue/SKILL.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "skills/**/SKILL.md"
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
