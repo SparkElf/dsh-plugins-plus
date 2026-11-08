@@ -42,3 +42,13 @@ describe('the external channel a room carries', () => {
     expect(externalSenderOf({ source: { roomId: 'room-1', senderExternal: 'nope' } })).toBeUndefined()
   })
 })
+
+describe('the update route', () => {
+  it('forwards a well-formed channel and drops a malformed one', async () => {
+    const { externalChannelOfForTest } = await import('../src/index.ts')
+    expect(externalChannelOfForTest({ externalChannel: { kind: 'qqbot', groupOpenid: 'G-1' } }))
+      .toEqual({ kind: 'qqbot', groupOpenid: 'G-1' })
+    expect(externalChannelOfForTest({ externalChannel: { kind: 'qqbot', groupOpenid: '  ' } })).toBeUndefined()
+    expect(externalChannelOfForTest({})).toBeUndefined()
+  })
+})

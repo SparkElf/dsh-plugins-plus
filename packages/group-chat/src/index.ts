@@ -1761,6 +1761,9 @@ const externalChannelOf = (payload: Record<string, unknown> | undefined): Extern
   return groupOpenid.length === 0 ? undefined : { kind: 'qqbot', groupOpenid }
 }
 
+/** Exposed for tests: the exact shape a create/update may forward. */
+export const externalChannelOfForTest = externalChannelOf
+
 const readExecution = (
   payload: Record<string, unknown> | undefined,
 ): { cwd?: string; agentPreset?: string; actor?: unknown; externalChannel?: ExternalChannel } => ({
@@ -1780,6 +1783,9 @@ const readPolicyPatch = (payload: Record<string, unknown> | undefined) => ({
   ...typeof payload?.['invitePolicy'] === 'string' ? { invitePolicy: payload['invitePolicy'] } : {},
   ...typeof payload?.['discoverability'] === 'string' ? { discoverability: payload['discoverability'] } : {},
   ...typeof payload?.['agentTrigger'] === 'string' ? { agentTrigger: payload['agentTrigger'] } : {},
+  // Attaching or detaching the bridge is a policy edit like the rest; a malformed value is dropped
+  // rather than forwarded, and its absence leaves the room's channel exactly as it was.
+  ...externalChannelOf(payload) === undefined ? {} : { externalChannel: externalChannelOf(payload) },
 })
 
 /** A refusal this route reached on its own, carrying the status the browser should see. */
