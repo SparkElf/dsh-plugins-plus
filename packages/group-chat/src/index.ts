@@ -364,6 +364,13 @@ export interface RoomSessionScope {
    */
   readonly name: string
   /**
+   * Opaque connector identity the room acts for.
+   *
+   * Copied onto the room's Session (created or resumed) so the base's disclosure rules can read it
+   * per Session. Absent leaves the Session untouched, which is every room today.
+   */
+  readonly actor?: unknown
+  /**
    * The directory the room's creator chose, when they chose one.
    *
    * Absent means "derive the room's own directory" rather than "use the workspace root":
@@ -416,6 +423,9 @@ export class RoomSessions {
   async ensure(roomId: string, room: RoomSessionScope): Promise<Session> {
     const existing = this.existing(roomId)
     if (existing !== undefined) {
+      // A live Session skips the open path entirely, so the identity is refreshed here as well:
+      // the connector may replace the actor while the room is already open.
+      this.applyActor(existing, room)
       this.titleRoomSession(existing, room.name)
       return existing
     }
@@ -426,6 +436,22 @@ export class RoomSessions {
     })
     this.pending.set(roomId, opening)
     return opening
+  }
+
+  /**
+   * Copy the room's connector identity onto its Session.
+   *
+   * `Session.actor` is opaque to the base: disclosure filters read it, nothing interprets it here.
+   * A room without one is left exactly as it was, so a deployment that never attaches an actor sees
+   * no change. The whole object is replaced rather than mutated, which is the contract the base
+   * documents for refreshing an identity snapshot.
+   * @param session - the room's Session, created or resumed.
+   * @param room - the scope the room was opened with.
+   */
+  private applyActor(session: Session, room: RoomSessionScope): void {
+    if (room.actor === undefined) return
+    const target = session as Session & { actor?: unknown }
+    target.actor = room.actor
   }
 
   private async open(roomId: string, room: RoomSessionScope): Promise<Session> {
@@ -439,6 +465,7 @@ export class RoomSessions {
 
     const resumed = await this.resolvePersisted(sessionId, directory)
     if (resumed !== undefined) {
+      this.applyActor(resumed, room)
       await this.installRoomModel(resumed, room, false)
       // Registered on every open, not only on creation: an image that predates this call (or a
       // workspace deleted and recreated under the room) still has to become selectable.
@@ -477,6 +504,7 @@ export class RoomSessions {
     if (session === undefined) {
       throw new Error(`group-chat could not open a session for room ${roomId}`)
     }
+    this.applyActor(session, room)
     await this.installRoomModel(session, room, true)
     this.titleRoomSession(session, room.name)
     return session
@@ -967,6 +995,7 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       // The room's name titles the workspace it registers. Absent is the common case and
       // means "derive the room's own directory", which `ensure` resolves.
       name: room.name,
+      ...room.actor === undefined ? {} : { actor: room.actor },
       ...room.cwd === null ? {} : { cwd: room.cwd },
       agentPreset: room.agentPreset ?? undefined,
       modelProvider: room.modelProvider ?? undefined,
@@ -1400,6 +1429,7 @@ export const handleRoomRequest = async (
     if (room === undefined) throw new RouteRefusal('this account is not a member of that room', 404)
     const session = await new RoomSessions(ctx).ensure(targetRoomId, {
       name: room.name,
+      ...room.actor === undefined ? {} : { actor: room.actor },
       ...room.cwd === null ? {} : { cwd: room.cwd },
       agentPreset: room.agentPreset ?? undefined,
       modelProvider: room.modelProvider ?? undefined,
@@ -1722,7 +1752,8 @@ const isString = (value: unknown): value is string => typeof value === 'string'
  */
 const readExecution = (
   payload: Record<string, unknown> | undefined,
-): { cwd?: string; agentPreset?: string } => ({
+): { cwd?: string; agentPreset?: string; actor?: unknown } => ({
+  ...payload?.['actor'] === undefined ? {} : { actor: payload['actor'] },
   ...typeof payload?.['cwd'] === 'string' && payload['cwd'].trim().length > 0
     ? { cwd: payload['cwd'].trim() } : {},
   ...typeof payload?.['agentPreset'] === 'string' && payload['agentPreset'].trim().length > 0

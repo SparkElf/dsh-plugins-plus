@@ -53,6 +53,13 @@ export interface RoomSummary {
    * boundary the room's agent may act within on any member's behalf.
    */
   readonly cwd: string | null
+  /**
+   * Opaque connector identity the room acts for, when one was attached at creation.
+   *
+   * The room server stores it verbatim; the base never interprets it and this plugin only hands it
+   * to the room's Session, where disclosure rules read it.
+   */
+  readonly actor?: unknown
   /** The room's agent preset, or null for the default. */
   readonly agentPreset: string | null
   /**
@@ -393,7 +400,7 @@ export class GroupChatBackend {
    */
   async createRoom(
     name: string,
-    execution?: { readonly cwd?: string; readonly agentPreset?: string },
+    execution?: { readonly cwd?: string; readonly agentPreset?: string; readonly actor?: unknown },
     signal?: AbortSignal,
   ): Promise<RoomSummary> {
     return this.request<RoomSummary>('POST', '/api/ai/chat/rooms', {
