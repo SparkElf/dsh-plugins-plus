@@ -383,10 +383,10 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
       joinPath(config.mountPoint, path),
       ensureExplorerSession,
     )
-    // The host column is a progressive enhancement: on a global panel it has no
-    // session surface to render into. The page always owns a readable fallback below,
-    // so the outcome only informs that the host tab may be showing the same file.
-    void outcome
+    // The host column is a progressive enhancement: on a global panel it has no session
+    // surface to render into. Remember why it failed so the page can fall back to its own
+    // preview; a successful open clears the previous failure.
+    setOpenFailure(outcome === 'opened' ? undefined : outcome)
   }
   const [refreshTick, setRefreshTick] = useState(0)
   /**
@@ -1012,7 +1012,12 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // and leaving the frame with a blank third track.
   // The page's own preview is always the visible surface; the host column, when it
   // exists, is allowed to show the same document beside it.
-  const documentInSidebar = false
+  const [openFailure, setOpenFailure] = useState<string | undefined>(undefined)
+  // A selected document lives in the host's right-hand file window. When that window is
+  // unavailable (`openInSidebar` answered anything but 'opened'), the page falls back to its
+  // own preview column; the value is derived, never hardcoded, because the fallback has to
+  // stay reachable on a host without the column.
+  const documentInSidebar = selection.kind === 'file' && openFailure === undefined
 
 
   // Follow the host column's own expanded flag while a document is selected.
@@ -1909,7 +1914,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 />}
               />
             )}
-            {scope !== 'graph' && rendered.kind === 'file' && (
+            {scope !== 'graph' && rendered.kind === 'file' && !documentInSidebar && (
               <KnowledgeFilePreview
                 path={rendered.path}
                 t={t}
