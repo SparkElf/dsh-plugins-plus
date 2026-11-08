@@ -25,6 +25,7 @@ import { AiToolManager } from './tool-manager.ts'
 import {
   AI_TOOL_ACCESS,
   declaredMcpToolName,
+  isSuperAdmin,
   sessionHidesSkill,
   sessionHidesTool,
   skillPermissions,
@@ -412,6 +413,35 @@ const connectorSkillProvider = {
   },
 }
 
+const PREFECT_SCRIPT_SKILL_NAME = 'prefect-script-authoring'
+const PREFECT_SCRIPT_SKILL_FILE = new URL('../skills/prefect-script-authoring/SKILL.md', import.meta.url)
+const PREFECT_SCRIPT_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+/** 该技能只对超级管理员展示：它驱动的四个 workflow MCP 工具同样只对超管注册。 */
+const PREFECT_SCRIPT_SKILL = {
+  name: PREFECT_SCRIPT_SKILL_NAME,
+  metadata: { permissions: ['automation:workflow:create'] },
+  description:
+    '用纯 Prefect Python（@flow/@task）编写 DataOps 工作流定义、发布部署并运行；通过 workflow_query / workflow_definition / workflow_deployment / workflow_run_control 操作时使用。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: PREFECT_SCRIPT_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: PREFECT_SCRIPT_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: PREFECT_SCRIPT_SKILL_FILE,
+} as const
+
+let prefectScriptSkillAllowed: () => boolean = () => false
+
+const prefectScriptSkillProvider = {
+  name: PREFECT_SCRIPT_SKILL_NAME,
+  list: () => Promise.resolve(prefectScriptSkillAllowed() ? [PREFECT_SCRIPT_SKILL] : []),
+  async get() {
+    if (!prefectScriptSkillAllowed()) throw new Error('prefect script skill is not available for this account')
+    return { ...PREFECT_SCRIPT_SKILL, content: await readFile(PREFECT_SCRIPT_SKILL_FILE, 'utf8') }
+  },
+}
+
 /** Serve the collection skill to the catalog. */
 const collectSkillProvider = {
   name: COLLECT_SKILL_NAME,
@@ -438,6 +468,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // triggers it, so the guidance must ship with the plugin rather than be pasted into a prompt.
   ctx.skills.registerProvider(() => collectSkillProvider)
   ctx.skills.registerProvider(() => connectorSkillProvider)
+  ctx.skills.registerProvider(() => prefectScriptSkillProvider)
 
   const ensureMcp = async (): Promise<void> => {
     if (mcpFiber !== undefined && mcpFiber.uid !== null) return
@@ -671,6 +702,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const scope = aiTools.currentScope()
     if (scope === undefined) return false
     return (scope.permissions ?? scope.permissionKeys ?? []).includes(CONNECTOR_SKILL_PERMISSION)
+  }
+  prefectScriptSkillAllowed = () => {
+    const scope = aiTools.currentScope()
+    return scope !== undefined && isSuperAdmin(scope)
   }
   ctx.effect(() => () => aiTools.dispose(), 'dataops-managed: skill and review tool disclosure')
 

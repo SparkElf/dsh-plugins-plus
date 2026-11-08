@@ -136,7 +136,7 @@ describe('apply', () => {
     await apply(context as never, CONFIG)
 
     expect((registered as Array<{ name: string }>).map((item) => item.name).sort())
-      .toEqual(['api-connector-authoring', 'dataops-collect', 'dataops-query'])
+      .toEqual(['api-connector-authoring', 'dataops-collect', 'dataops-query', 'prefect-script-authoring'])
     const provider = (registered as Array<{ name: string }>).find((item) => item.name === 'dataops-query') as unknown as {
       name: string
       list: () => Promise<{ name: string; locator: URL }[]>
