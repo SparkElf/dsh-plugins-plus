@@ -64,6 +64,23 @@ describe('the Session scope a disclosure rule reads', () => {
     expect(sessionHidesSkill(['data:resource:manage'], STAFF, LIMITED)).toBe(false)
   })
 
+
+  it('hides every tool whose access is not declared from a Session acting for someone else', () => {
+    // `dataops_open_resource_tab` and the notification readers carry no policy: they were written
+    // for the workspace principal, and a visitor must not inherit them.
+    const undeclared: AiToolName = 'dataops_open_resource_tab'
+    expect(isToolVisible(undeclared, STAFF)).toBe(true)
+    expect(sessionHidesTool(undeclared, STAFF, STAFF)).toBe(true)
+    // The same tool stays visible to an ordinary conversation, which is the workspace itself.
+    expect(sessionHidesTool(undeclared, undefined, STAFF)).toBe(false)
+  })
+
+  it('hides skills that declare nothing from a Session acting for someone else', () => {
+    expect(sessionHidesSkill([], STAFF, STAFF)).toBe(true)
+    expect(sessionHidesSkill([], undefined, STAFF)).toBe(false)
+    expect(sessionHidesSkill(['data:resource:manage'], STAFF, STAFF)).toBe(false)
+  })
+
   it('reads only well-formed permission declarations from frontmatter', () => {
     expect(skillPermissions({ permissions: ['a', 'b'] })).toEqual(['a', 'b'])
     expect(skillPermissions({ permissions: ['a', 3, null] })).toEqual(['a'])

@@ -245,12 +245,29 @@ export function isScopeActor(actor: unknown): actor is DataOpsScope {
  * @param workspaceScope - the scope the registration set was built from.
  * @returns true to hide the tool for this Session.
  */
+/**
+ * Whether a tool's access is declared at all.
+ *
+ * A tool without a policy was written for the workspace principal; a Session acting for a member
+ * must not inherit it, so the disclosure rule treats "no declaration" as "not for visitors".
+ * @param name - the registered tool name.
+ * @returns true when the catalog states who may use the tool.
+ */
+export function declaresAccessPolicy(name: AiToolName): boolean {
+  const policy: ToolAccessPolicy = AI_TOOL_ACCESS[name]
+  return policy.superAdminOnly === true || policy.adminOnly === true
+    || policy.reviewer === true || policy.permission !== undefined
+}
+
 export function sessionHidesTool(
   name: AiToolName,
   actor: unknown,
   workspaceScope: DataOpsScope | undefined,
 ): boolean {
   if (actor !== undefined) {
+    // A Session acting for someone else is only shown tools whose access is declared: a tool with
+    // no policy was written for the workspace principal, and a visitor must not inherit it.
+    if (!declaresAccessPolicy(name)) return true
     return !isScopeActor(actor) || !isToolVisible(name, actor)
   }
   // No workspace scope yet means nothing was registered; if a name still reaches here it cannot be
@@ -292,6 +309,9 @@ export function sessionHidesSkill(
 ): boolean {
   const effective = actor !== undefined ? (isScopeActor(actor) ? actor : undefined) : workspaceScope
   if (effective === undefined) return true
+  // A Session acting for someone else sees a skill only when the skill declares what it needs and
+  // the actor holds all of it; an undeclared skill was written for the workspace principal.
+  if (actor !== undefined && permissions.length === 0) return true
   const held = new Set(permissionList(effective) ?? [])
   return !permissions.every(permission => held.has(permission))
 }
