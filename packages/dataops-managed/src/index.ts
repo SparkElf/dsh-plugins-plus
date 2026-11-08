@@ -22,7 +22,14 @@ import {
 import { SkillPlaza, readLocalSkills } from './skill-plaza.ts'
 import { ReviewApi } from './review-api.ts'
 import { AiToolManager } from './tool-manager.ts'
-import { sessionHidesSkill, sessionHidesTool, skillPermissions, type AiToolName } from './tool-scope.ts'
+import {
+  AI_TOOL_ACCESS,
+  declaredMcpToolName,
+  sessionHidesSkill,
+  sessionHidesTool,
+  skillPermissions,
+  type AiToolName,
+} from './tool-scope.ts'
 import { mintScopedCredential, scopedCredentialRef } from './scoped-credential.ts'
 import {
   OpenResourceHub,
@@ -689,11 +696,28 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }) => () => void
     }
     const disposers: (() => void)[] = []
+    /**
+     * Resolve one model-facing name to the managed name this table declares.
+     *
+     * `dataops_*` tools are registered here and are already the declared name. The backend's MCP
+     * workflow tools arrive as `mcp__<serverName>__<rawName>`; mapping them back lets the same
+     * declaration hide them from a Session acting for a non-super-administrator, which is what the
+     * bridge cannot do before it executes the call.
+     */
+    const managedName = (name: string): AiToolName | undefined => name.startsWith('dataops_')
+      ? (Object.hasOwn(AI_TOOL_ACCESS, name) ? name as AiToolName : undefined)
+      : declaredMcpToolName(name, config.serverName)
     if (typeof tools.addVisibilityFilter === 'function') {
       disposers.push(tools.addVisibilityFilter({
-        // Only the tools this plugin registers; everything else in the process is not ours to judge.
-        appliesTo: tool => tool.name.startsWith('dataops_'),
-        hidden: (session, tool) => sessionHidesTool(tool.name as AiToolName, session?.actor, aiTools.currentScope()),
+        // Only the tools this plugin registers and the MCP tools its access table declares;
+        // everything else in the process is not ours to judge.
+        appliesTo: tool => managedName(tool.name) !== undefined,
+        hidden: (session, tool) => {
+          const name = managedName(tool.name)
+          // The base consults `hidden` only after `appliesTo` accepted the tool; a missing name
+          // means a changed contract, and hiding is the safe answer.
+          return name === undefined || sessionHidesTool(name, session?.actor, aiTools.currentScope())
+        },
       }))
     }
     if (typeof skills.addVisibilityFilter === 'function') {

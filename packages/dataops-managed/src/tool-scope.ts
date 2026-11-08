@@ -97,6 +97,12 @@ export const AI_TOOL_ACCESS = {
   review_notifications_list: {},
   review_notifications_read: {},
   dataops_api_docs: { superAdminOnly: true },
+  // 后端 MCP 工作流工具：只向超管披露；模型侧名称是 mcp__<serverName>__<name>，
+  // 由 declaredMcpToolName 映射回本表后参与会话级披露。
+  workflow_query: { superAdminOnly: true },
+  workflow_definition: { superAdminOnly: true },
+  workflow_deployment: { superAdminOnly: true },
+  workflow_run_control: { superAdminOnly: true },
   dataops_collect_preview: { permission: 'data:resource:manage' },
   dataops_collect_plan: { permission: 'data:resource:manage' },
   dataops_collect_execute: { permission: 'data:resource:manage' },
@@ -118,6 +124,24 @@ export const AI_TOOL_NAMES = Object.keys(AI_TOOL_ACCESS) as AiToolName[]
 
 /** One managed tool name. */
 export type AiToolName = keyof typeof AI_TOOL_ACCESS
+
+/**
+ * The declared managed tool behind a namespaced MCP tool name.
+ *
+ * The MCP bridge publishes a server's raw tool as `mcp__<serverName>__<rawName>`. A raw name that
+ * appears in {@link AI_TOOL_ACCESS} must reach the same disclosure rule as the plugin's own
+ * `dataops_*` tools; an MCP tool this table does not name is not the table's to judge and stays
+ * outside the filter.
+ * @param publicName - the ToolRuntime name the MCP bridge registered.
+ * @param serverName - the MCP server namespace from this plugin's config.
+ * @returns the declared tool name, or undefined when the table says nothing about the tool.
+ */
+export function declaredMcpToolName(publicName: string, serverName: string): AiToolName | undefined {
+  const prefix = `mcp__${serverName}__`
+  if (!publicName.startsWith(prefix)) return undefined
+  const rawName = publicName.slice(prefix.length)
+  return Object.hasOwn(AI_TOOL_ACCESS, rawName) ? rawName as AiToolName : undefined
+}
 
 /**
  * Backend permission aliases.

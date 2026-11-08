@@ -14,6 +14,11 @@ import { apply, type Config } from '../src/index.ts'
 
 type Tool = { name: string }
 type Route = { path: string; handler: (request: unknown, response: unknown) => Promise<void> }
+/** One disclosure rule as the Host registry hands it back. */
+type Filter = {
+  appliesTo: (tool: Tool) => boolean
+  hidden: (session: { actor?: unknown } | undefined, tool: Tool) => boolean
+}
 
 const cleanups: Array<() => void> = []
 
@@ -57,6 +62,7 @@ function responseRecorder() {
 function harness() {
   const routes = new Map<string, Route>()
   const tools = new Map<string, Tool>()
+  const filters: Filter[] = []
   const disposed: string[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const context = {
@@ -88,9 +94,16 @@ function harness() {
         tools.set(tool.name, tool)
         return () => { tools.delete(tool.name); disposed.push(tool.name) }
       },
+      addVisibilityFilter: (filter: Filter) => {
+        filters.push(filter)
+        return () => {
+          const index = filters.indexOf(filter)
+          if (index >= 0) filters.splice(index, 1)
+        }
+      },
     },
   }
-  return { context, routes, tools, disposed, listeners }
+  return { context, routes, tools, filters, disposed, listeners }
 }
 
 /** Simulate the committed credential write that fans out to configured listeners. */
@@ -182,5 +195,38 @@ describe('apply wires disclosure to the existing auth paths', () => {
     expect(f.tools.has('skill_enable')).toBe(false)
     // The route answer was reused, so it added exactly the one fetch the route itself makes.
     expect(contextCalls()).toBe(callsBefore + 1)
+  })
+
+  it('claims the declared workflow MCP tools and hides them from a member actor', async () => {
+    const superAdmin = {
+      userId: 'super',
+      roleCodes: ['超级管理员'],
+      primaryRole: '超级管理员',
+      permissions: ['skill:read'],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/api/ai/review/context')) return jsonResponse(200, superAdmin)
+      return jsonResponse(404, { error: 'not found' })
+    }))
+    const f = harness()
+
+    await apply(f.context as never, CONFIG)
+    await vi.waitFor(() => expect(f.tools.has('skill_list')).toBe(true))
+    expect(f.filters).toHaveLength(1)
+    const filter = f.filters[0]!
+
+    // The filter claims the plugin's own tools and exactly the MCP tools the table declares.
+    expect(filter.appliesTo({ name: 'dataops_api_docs' })).toBe(true)
+    expect(filter.appliesTo({ name: 'mcp__dataops__workflow_query' })).toBe(true)
+    expect(filter.appliesTo({ name: 'mcp__dataops__query' })).toBe(false)
+    expect(filter.appliesTo({ name: 'another_plugin_tool' })).toBe(false)
+
+    const workflowQuery = { name: 'mcp__dataops__workflow_query' }
+    // A room acting for a member hides it even though the workspace registered it.
+    expect(filter.hidden({ actor: { roleCodes: ['应用人员'], permissions: [] } }, workflowQuery)).toBe(true)
+    // A super-administrator actor keeps it, and an ordinary Session follows the workspace scope.
+    expect(filter.hidden({ actor: superAdmin }, workflowQuery)).toBe(false)
+    expect(filter.hidden(undefined, workflowQuery)).toBe(false)
   })
 })
