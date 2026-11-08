@@ -99,8 +99,11 @@ export function ReloginPrompt(props: ReloginPromptProps) {
       footer={(
         <>
           <Button onClick={dismiss}>{t('reloginDismiss')}</Button>
-          {/* The portal is the only issuer of a new session. Navigate its origin directly;
-              cross-origin frames may refuse top-level navigation, so open it separately. */}
+          {/* The portal is the only issuer of a new session, and this frame must never navigate its
+              parent: doing so replaced the whole workspace view with the portal home while the user
+              was working. Open the portal separately; after signing in there, the portal announces
+              the new session through the same postMessage this plugin already listens for, and the
+              frame re-synchronises in place. */}
           <Button variant="primary" onClick={() => {
             const portalOrigin = window.location.ancestorOrigins?.[0]
               ?? (document.referrer === '' ? undefined : new URL(document.referrer).origin)
@@ -108,16 +111,7 @@ export function ReloginPrompt(props: ReloginPromptProps) {
               window.location.reload()
               return
             }
-            const portalUrl = `${portalOrigin}/`
-            try {
-              if (window.top !== null && window.top !== window) {
-                window.top.location.href = portalUrl
-                return
-              }
-            } catch {
-              // Cross-origin top navigation can be blocked; opening the portal is the fallback.
-            }
-            window.open(portalUrl, '_blank', 'noopener')
+            window.open(`${portalOrigin}/`, '_blank', 'noopener')
           }}>
             {t('reloginAction')}
           </Button>
