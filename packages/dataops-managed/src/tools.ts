@@ -461,6 +461,9 @@ export function buildAiManagementTools(
           if (departmentCode === '' && userIds.length === 0) {
             throw new Error('department_skill_apply requires department_code or a non-empty user_ids list')
           }
+          if (departmentCode !== '' && userIds.length > 0) {
+            throw new Error('department_skill_apply accepts either department_code or user_ids, not both')
+          }
           const includeDescendants = args.include_descendants !== false
           await approve(
             'department_skill_apply',
