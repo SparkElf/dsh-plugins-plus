@@ -136,7 +136,7 @@ describe('apply', () => {
     await apply(context as never, CONFIG)
 
     expect((registered as Array<{ name: string }>).map((item) => item.name).sort())
-      .toEqual(['api-connector-authoring', 'dataops-collect', 'dataops-query', 'prefect-script-authoring'])
+      .toEqual(['api-connector-authoring', 'dataops-collect', 'dataops-query', 'prefect-script-authoring', 'skill-provisioning'])
     const provider = (registered as Array<{ name: string }>).find((item) => item.name === 'dataops-query') as unknown as {
       name: string
       list: () => Promise<{ name: string; locator: URL }[]>
@@ -169,5 +169,21 @@ describe('apply', () => {
     const { context } = contextWith(true)
     await apply(context as never, CONFIG)
     expect(context.logger.warn).toHaveBeenCalled()
+  })
+
+  it('gates the skill-provisioning skill until the account holds skill:manage', async () => {
+    // Activation with no scope must not advertise the provisioning playbook: the tools it drives
+    // are disclosed by the same capability, so an account without it would only see dead guidance.
+    const registered: Array<{ name: string; list: () => Promise<unknown[]>; get: () => Promise<unknown> }> = []
+    const { context } = contextWith(true)
+    ;(context as { skills: { registerProvider: (fn: () => unknown) => () => void } }).skills.registerProvider =
+      (provider: () => unknown) => { registered.push(provider() as never); return () => undefined }
+
+    await apply(context as never, CONFIG)
+
+    const provisioning = registered.find((item) => item.name === 'skill-provisioning')
+    expect(provisioning).toBeDefined()
+    expect(await provisioning!.list()).toEqual([])
+    await expect(provisioning!.get()).rejects.toThrow(/not available/)
   })
 })

@@ -92,6 +92,13 @@ export const AI_TOOL_ACCESS = {
   skill_disable: { permission: 'skill:manage' },
   skill_unshare: { permission: 'skill:manage' },
   skill_delete: { permission: 'skill:manage' },
+  // 部门/管理员技能分配：工具只负责发起，DataOps 在每次调用时校验目标用户/部门是否在
+  // 调用者的范围内（超管全部、管理员非超管、部门管理员本部门+子部门）。
+  skill_install_for_user: { permission: 'skill:manage' },
+  department_skill_bind: { permission: 'skill:manage' },
+  department_skill_unbind: { permission: 'skill:manage' },
+  department_skill_apply: { permission: 'skill:manage' },
+  department_skill_preview: { permission: 'skill:manage' },
   review_scan: { permission: 'skill:read', reviewer: true },
   review_decide: { permission: 'skill:review:decide', reviewer: true },
   review_notifications_list: {},

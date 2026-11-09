@@ -52,6 +52,35 @@ function rowsOf(body: unknown): Array<Record<string, unknown>> {
 
 const forbidden = (message: string): Error => new Error('Forbidden (403): ' + message)
 
+/** Validate one plaza skill id before a provisioning call. */
+const provisioningSkillId = (tool: string, value: number): number => {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(tool + ': skill_id must be a positive integer')
+  return value
+}
+
+/**
+ * Normalize one explicit user list for a provisioning call.
+ *
+ * DataOps user ids are UUID strings, and the provisioning endpoints take a batch. An empty or
+ * malformed list is a caller error: forwarding it would either match nobody or let the backend
+ * answer a scope the caller never named, so it never reaches the API.
+ */
+const provisioningUserIds = (tool: string, values: readonly unknown[] | undefined): string[] => {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error(tool + ': user_ids must be a non-empty array of DataOps user ids')
+  }
+  const ids = values.map(value => typeof value === 'string' ? value.trim() : '')
+  if (ids.some(id => id === '')) throw new Error(tool + ': user_ids must contain non-empty DataOps user ids')
+  return Array.from(new Set(ids))
+}
+
+/** Read one required department code from tool arguments. */
+const provisioningDepartmentCode = (tool: string, value: string | undefined): string => {
+  const code = typeof value === 'string' ? value.trim() : ''
+  if (code === '') throw new Error(tool + ': department_code is required')
+  return code
+}
+
 /**
  * Build every managed tool definition.
  *
@@ -320,6 +349,160 @@ export function buildAiManagementTools(
           await call('/api/ai/skill-plaza/skills/' + args.skill_id.toString() + '/permanent', { method: 'DELETE' })
           audit('skill_delete', exec, { skillId: args.skill_id, permanent: true })
           return { deleted: args.skill_id, permanent: true }
+        },
+      }),
+    },
+    {
+      name: 'skill_install_for_user',
+      definition: defineTool({
+        name: 'skill_install_for_user',
+        description: 'Install one plaza skill directly into the workspaces of the listed users, optionally overwriting an existing installation of the same skill key (overwrite=true). Administrator scope only; DataOps validates every target user and the caller\'s permitted range on the call. ONLY the listed users are affected — nobody else — and the installation takes effect the next time each target opens their workspace (a running workspace may pick it up immediately). Never use this for a whole department; use department_skill_preview + department_skill_bind + department_skill_apply. Requires user approval; audited.',
+        parameters: {
+          skill_id: { type: 'number', required: true, description: 'Plaza skill id.' },
+          user_ids: { type: 'array', items: { type: 'string' }, required: true, description: 'DataOps user ids (UUID strings) that should receive the skill.' },
+          overwrite: { type: 'boolean', description: 'Overwrite an existing installation of the same skill key. Defaults to false, which leaves an existing installation unchanged.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { skill_id: number; user_ids: string[]; overwrite?: boolean }, exec) => {
+          const skillId = provisioningSkillId('skill_install_for_user', args.skill_id)
+          const userIds = provisioningUserIds('skill_install_for_user', args.user_ids)
+          const overwrite = args.overwrite === true
+          await approve(
+            'skill_install_for_user',
+            exec,
+            'Install skill ' + skillId.toString() + ' for ' + userIds.length.toString() + ' user(s)' + (overwrite ? ' with overwrite' : ''),
+          )
+          const value = await call('/api/ai/skill-plaza/admin/install-for-users', {
+            method: 'POST',
+            body: JSON.stringify({ skillId, userIds, ...(args.overwrite === undefined ? {} : { overwrite: args.overwrite }) }),
+          })
+          audit('skill_install_for_user', exec, {
+            skillId,
+            userCount: userIds.length,
+            overwrite,
+            skillKey: typeof (value as { skillKey?: unknown }).skillKey === 'string' ? (value as { skillKey: string }).skillKey : null,
+          })
+          return value as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'department_skill_bind',
+      definition: defineTool({
+        name: 'department_skill_bind',
+        description: 'Bind one plaza skill as a DEPARTMENT DEFAULT. This changes configuration only: it does NOT touch any existing user\'s workspace — run department_skill_apply to reconcile the department\'s users. The binding applies to the department and, on apply, its sub-departments; DataOps enforces the caller\'s department range. Call department_skill_preview first and show the user the affected tree and user count. Requires user approval; audited.',
+        parameters: {
+          department_code: { type: 'string', required: true, description: 'Department code from the DataOps department tree.' },
+          skill_id: { type: 'number', required: true, description: 'Plaza skill id.' },
+          enabled: { type: 'boolean', description: 'Whether the binding is active. Defaults to true.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { department_code: string; skill_id: number; enabled?: boolean }, exec) => {
+          const departmentCode = provisioningDepartmentCode('department_skill_bind', args.department_code)
+          const skillId = provisioningSkillId('department_skill_bind', args.skill_id)
+          const enabled = args.enabled !== false
+          await approve(
+            'department_skill_bind',
+            exec,
+            (enabled ? 'Bind' : 'Disable') + ' skill ' + skillId.toString() + ' as a default for department ' + departmentCode,
+          )
+          const value = await call('/api/ai/skill-plaza/admin/department-skills/bind', {
+            method: 'POST',
+            body: JSON.stringify({ departmentCode, skillId, enabled }),
+          })
+          audit('department_skill_bind', exec, { departmentCode, skillId, enabled, spread: false })
+          return value as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'department_skill_unbind',
+      definition: defineTool({
+        name: 'department_skill_unbind',
+        description: 'Remove one plaza skill from a DEPARTMENT\'s default bindings. This changes configuration only: existing installations remain in the users\' workspaces until the next department_skill_apply reconciles them. DataOps enforces the caller\'s department range. Call department_skill_preview first. Requires user approval; audited.',
+        parameters: {
+          department_code: { type: 'string', required: true, description: 'Department code from the DataOps department tree.' },
+          skill_id: { type: 'number', required: true, description: 'Plaza skill id.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { department_code: string; skill_id: number }, exec) => {
+          const departmentCode = provisioningDepartmentCode('department_skill_unbind', args.department_code)
+          const skillId = provisioningSkillId('department_skill_unbind', args.skill_id)
+          await approve(
+            'department_skill_unbind',
+            exec,
+            'Unbind skill ' + skillId.toString() + ' from department ' + departmentCode,
+          )
+          const value = await call('/api/ai/skill-plaza/admin/department-skills/unbind', {
+            method: 'POST',
+            body: JSON.stringify({ departmentCode, skillId }),
+          })
+          audit('department_skill_unbind', exec, { departmentCode, skillId, spread: false })
+          return value as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'department_skill_apply',
+      definition: defineTool({
+        name: 'department_skill_apply',
+        description: 'Apply the department\'s CURRENT default-skill bindings to its users once: marks the affected users for reconciliation, which runs the next time each workspace starts (a running workspace may reconcile immediately). This is the step that makes earlier bind/unbind changes reach existing users. Target either a department (with optional sub-departments) or an explicit user list. Requires confirm=true plus user approval; audited. Preview the department tree and user count with department_skill_preview first, then show the user the exact scope and ask for explicit confirmation.',
+        parameters: {
+          department_code: { type: 'string', description: 'Department code to apply. Required unless user_ids is given.' },
+          include_descendants: { type: 'boolean', description: 'Also apply to sub-departments. Defaults to true when department_code is set.' },
+          user_ids: { type: 'array', items: { type: 'string' }, description: 'Explicit DataOps user ids; an alternative to department_code.' },
+          confirm: { type: 'boolean', required: true, description: 'Must be true: explicitly confirms applying the current bindings to the affected users.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { department_code?: string; include_descendants?: boolean; user_ids?: string[]; confirm: boolean }, exec) => {
+          if (args.confirm !== true) throw new Error('department_skill_apply requires confirm=true')
+          const departmentCode = typeof args.department_code === 'string' ? args.department_code.trim() : ''
+          const userIds = args.user_ids === undefined ? [] : provisioningUserIds('department_skill_apply', args.user_ids)
+          if (departmentCode === '' && userIds.length === 0) {
+            throw new Error('department_skill_apply requires department_code or a non-empty user_ids list')
+          }
+          const includeDescendants = args.include_descendants !== false
+          await approve(
+            'department_skill_apply',
+            exec,
+            departmentCode !== ''
+              ? 'Apply department default skills to ' + departmentCode + (includeDescendants ? ' including sub-departments' : '')
+              : 'Apply department default skills to ' + userIds.length.toString() + ' user(s)',
+          )
+          const value = await call('/api/ai/skill-plaza/admin/department-skills/apply', {
+            method: 'POST',
+            body: JSON.stringify({
+              ...(departmentCode === '' ? {} : { departmentCode, includeDescendants }),
+              ...(userIds.length === 0 ? {} : { userIds }),
+            }),
+          })
+          audit('department_skill_apply', exec, {
+            departmentCode: departmentCode === '' ? null : departmentCode,
+            includeDescendants: departmentCode === '' ? null : includeDescendants,
+            userCount: userIds.length,
+            confirmed: true,
+          })
+          return value as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'department_skill_preview',
+      definition: defineTool({
+        name: 'department_skill_preview',
+        description: 'Read-only preview of a department-default skill binding: the department plus its sub-departments, the affected user count, the users, and current installation/conflict details. Call this BEFORE department_skill_bind, department_skill_unbind or department_skill_apply and show the department tree, user count and overwrite/skip details to the user. It writes nothing.',
+        parameters: {
+          department_code: { type: 'string', required: true, description: 'Department code from the DataOps department tree.' },
+          skill_id: { type: 'number', required: true, description: 'Plaza skill id.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { department_code: string; skill_id: number }, exec) => {
+          const departmentCode = provisioningDepartmentCode('department_skill_preview', args.department_code)
+          const skillId = provisioningSkillId('department_skill_preview', args.skill_id)
+          const query = new URLSearchParams({ departmentCode, skillId: skillId.toString() })
+          const value = await call('/api/ai/skill-plaza/admin/department-skills/preview?' + query.toString())
+          audit('department_skill_preview', exec, { departmentCode, skillId })
+          return value as Record<string, Json>
         },
       }),
     },

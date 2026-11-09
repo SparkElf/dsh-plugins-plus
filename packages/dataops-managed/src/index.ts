@@ -25,6 +25,7 @@ import { AiToolManager } from './tool-manager.ts'
 import {
   AI_TOOL_ACCESS,
   declaredMcpToolName,
+  hasPermission,
   isSuperAdmin,
   sessionHidesSkill,
   sessionHidesTool,
@@ -442,6 +443,35 @@ const prefectScriptSkillProvider = {
   },
 }
 
+const PROVISIONING_SKILL_NAME = 'skill-provisioning'
+const PROVISIONING_SKILL_FILE = new URL('../skills/skill-provisioning/SKILL.md', import.meta.url)
+const PROVISIONING_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+/** 该技能只对持有 `skill:manage` 的身份展示：它驱动的分配工具使用同一能力。 */
+const PROVISIONING_SKILL = {
+  name: PROVISIONING_SKILL_NAME,
+  metadata: { permissions: ['skill:manage'] },
+  description:
+    '给指定用户或部门批量分配技能时使用。先预览部门+子部门、受影响用户数与覆盖/冲突，用户明确确认后才绑定或应用；部门绑定只改配置，现有用户需 apply 才生效。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: PROVISIONING_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: PROVISIONING_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: PROVISIONING_SKILL_FILE,
+} as const
+
+let provisioningSkillAllowed: () => boolean = () => false
+
+const provisioningSkillProvider = {
+  name: PROVISIONING_SKILL_NAME,
+  list: () => Promise.resolve(provisioningSkillAllowed() ? [PROVISIONING_SKILL] : []),
+  async get() {
+    if (!provisioningSkillAllowed()) throw new Error('skill provisioning is not available for this account')
+    return { ...PROVISIONING_SKILL, content: await readFile(PROVISIONING_SKILL_FILE, 'utf8') }
+  },
+}
+
 /** Serve the collection skill to the catalog. */
 const collectSkillProvider = {
   name: COLLECT_SKILL_NAME,
@@ -469,6 +499,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.skills.registerProvider(() => collectSkillProvider)
   ctx.skills.registerProvider(() => connectorSkillProvider)
   ctx.skills.registerProvider(() => prefectScriptSkillProvider)
+  ctx.skills.registerProvider(() => provisioningSkillProvider)
 
   const ensureMcp = async (): Promise<void> => {
     if (mcpFiber !== undefined && mcpFiber.uid !== null) return
@@ -706,6 +737,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   prefectScriptSkillAllowed = () => {
     const scope = aiTools.currentScope()
     return scope !== undefined && isSuperAdmin(scope)
+  }
+  provisioningSkillAllowed = () => {
+    const scope = aiTools.currentScope()
+    return scope !== undefined && hasPermission(scope, 'skill:manage')
   }
   ctx.effect(() => () => aiTools.dispose(), 'dataops-managed: skill and review tool disclosure')
 
