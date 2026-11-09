@@ -92,17 +92,20 @@ export function apply(ctx: ClientContext): void {
     const onLogoClick = (event: MouseEvent): void => {
       const target = event.target
       if (!(target instanceof Element)) return
-      let node: Element | null = target
-      for (let depth = 0; node !== null && depth < 5; depth += 1, node = node.parentElement) {
-        const rect = node.getBoundingClientRect()
-        if (rect.top > 120 || rect.left > 360 || rect.width <= 0 || rect.width > 520) break
-        if (/万相AI中台|Wanxiang AI/i.test((node.textContent ?? '').trim())) {
-          event.preventDefault()
-          event.stopPropagation()
-          window.parent.postMessage({ type: 'dataops:return-to', version: 1 }, '*')
-          return
-        }
-      }
+      // Match the brand button itself, never an ancestor that merely contains it.
+      // The sidebar wraps the logo, the new-session button and every panel row in the
+      // same container; matching `textContent` on that container made "new session"
+      // and panel switches post `return-to` and replaced the whole workbench with the
+      // portal home. The brand row is the only interactive element with a brand/logo
+      // class that also carries the product name.
+      const interactive = target.closest('button, a')
+      if (interactive === null) return
+      const className = typeof interactive.className === 'string' ? interactive.className : ''
+      if (!/brand|logo/i.test(className)) return
+      if (!/万相AI中台|Wanxiang AI/i.test((interactive.textContent ?? '').trim())) return
+      event.preventDefault()
+      event.stopPropagation()
+      window.parent.postMessage({ type: 'dataops:return-to', version: 1 }, '*')
     }
     document.addEventListener('click', onLogoClick, true)
     return () => document.removeEventListener('click', onLogoClick, true)
