@@ -120,6 +120,17 @@ export const readCollectFile = async (filePath: string): Promise<{ buffer: Buffe
   }
 }
 
+
+/** Multipart part MIME from the spreadsheet extension; Blob defaults to octet-stream otherwise. */
+function spreadsheetMimeType(fileName: string): string {
+  const extension = fileName.includes('.') ? fileName.split('.').pop()?.toLowerCase() ?? '' : ''
+  if (extension === 'csv') return 'text/csv'
+  if (extension === 'tsv') return 'text/tab-separated-values'
+  if (extension === 'xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  if (extension === 'xls') return 'application/vnd.ms-excel'
+  return 'application/octet-stream'
+}
+
 /** Spreadsheet import calls bound to one workspace credential. */
 export class CollectApi {
   constructor(private readonly reviewApi: ReviewApi) {}
@@ -127,7 +138,7 @@ export class CollectApi {
   async preview(filePath: string): Promise<CollectPreview> {
     const file = await readCollectFile(filePath)
     const form = new FormData()
-    form.append('file', new Blob([new Uint8Array(file.buffer)]), file.fileName)
+    form.append('file', new Blob([new Uint8Array(file.buffer)], { type: spreadsheetMimeType(file.fileName) }), file.fileName)
     const result = await this.reviewApi.request('/api/resources/spreadsheet-import/preview', {
       method: 'POST',
       body: form,
