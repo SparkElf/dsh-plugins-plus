@@ -57,6 +57,8 @@ describe('knowledge-base citation tokens', () => {
     expect(safeKbPath('docs/a.md')).toBeUndefined()
     expect(safeKbPath('global/a.md')).toBe('/workspace/kb/global/a.md')
     expect(safeKbPath('department/order/a.pdf')).toBe('/workspace/kb/department/order/a.pdf')
+    expect(safeKbPath('/workspace/01_低空起降点台账.csv')).toBeUndefined()
+    expect(safeKbPath('/workspace/department/order/a.pdf')).toBe('/workspace/kb/department/order/a.pdf')
   })
 
   it('opens through the injected opener with all viewer options', () => {

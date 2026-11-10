@@ -166,9 +166,13 @@ export function resolveKbPath(raw: string, mount: string = DEFAULT_KB_MOUNT): st
   } else if (relative.startsWith('/workspace/kb-')) {
     // A sibling path such as `/workspace/kb-other` is not inside this view.
     return undefined
-  } else if (relative.startsWith('/workspace/')) {
-    // Backend-relative paths are commonly reported as `/workspace/department/...`.
+  } else if (/^\/workspace\/(?:global|department|personal|rag-eval-fixtures)\//.test(relative)) {
+    // Legacy backend-relative citations spell the KB prefix under /workspace.
     relative = relative.slice('/workspace/'.length)
+  } else if (relative.startsWith('/workspace/')) {
+    // An ordinary workspace file is not a KB citation: `/workspace/report.zip`
+    // must keep its absolute path instead of becoming `/workspace/kb/report.zip`.
+    return undefined
   } else if (relative.startsWith('/kb/')) {
     relative = relative.slice('/kb/'.length)
   } else if (relative.startsWith('kb/')) {
