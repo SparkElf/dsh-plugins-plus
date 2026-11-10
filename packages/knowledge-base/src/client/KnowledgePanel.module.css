@@ -529,6 +529,26 @@
   font: var(--dsw-font-xs-13);
 }
 
+/* A document that could not reach the host's file window must say so in the
+   content column: the fallback preview alone looks like the expected outcome,
+   so a reader never learns the right-hand window failed. */
+.openFailure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 12px 18px 0;
+  padding: 9px 12px;
+  border: 1px solid var(--dsw-alias-state-warn-primary, #b26a00);
+  border-radius: 8px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+.openFailure strong {
+  color: var(--dsw-alias-state-warn-primary, #b26a00);
+  font-weight: 600;
+}
+
 /* ---- The content region's empty / loading / failure state ----
 
    Follows the product's shared panel state (`ui-schedule/TaskManagerPage.module.css`

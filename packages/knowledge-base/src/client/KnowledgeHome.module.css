@@ -221,6 +221,16 @@
   border-bottom: none;
 }
 
+/* The row itself is a second way in: a click anywhere that is not a control opens
+   the document, so the whole card reads as one target. */
+.docRow {
+  cursor: pointer;
+}
+
+.docRow:hover td {
+  background: var(--dsw-alias-bg-layer-1);
+}
+
 /* A row's title is the way into the document, so it is the interactive cell. */
 .rowLink {
   padding: 0;

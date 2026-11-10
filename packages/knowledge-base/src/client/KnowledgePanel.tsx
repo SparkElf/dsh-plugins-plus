@@ -1047,6 +1047,18 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   useEffect(() => {
     if (!documentInSidebar) setColumnOpenedOnce(false)
   }, [documentInSidebar])
+  // `openInSidebar` can answer 'opened' on a host that has the controller but no
+  // session surface to render into: `openResource` returns without throwing, the
+  // track never expands, and suppressing this column would leave a blank frame.
+  // Give the host a moment to reveal the track; if it never does, fall back to the
+  // page's own preview and say why instead of silently showing nothing.
+  useEffect(() => {
+    if (!documentInSidebar || columnOpenedOnce) return
+    const timer = window.setTimeout(() => {
+      if (!columnOpenedOnce) setOpenFailure('no-column')
+    }, 2000)
+    return () => { window.clearTimeout(timer) }
+  }, [documentInSidebar, columnOpenedOnce])
   /** True while the reader is actually on screen holding this page's document. */
   const readerOnScreen = documentInSidebar && columnExpanded
 
@@ -1828,6 +1840,12 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
               ? { padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }
               : undefined}
           >
+            {selection.kind === 'file' && openFailure !== undefined && (
+              <div className={styles.openFailure} role="alert">
+                <strong>{t('openFailureTitle')}</strong>
+                <span>{t('openFailureBody')}</span>
+              </div>
+            )}
             {scope === 'graph' && (
               <KnowledgeGraphView
                 state={graph}

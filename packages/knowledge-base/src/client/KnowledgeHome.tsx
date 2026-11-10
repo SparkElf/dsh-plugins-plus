@@ -1127,6 +1127,16 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
             {docPageRows.rows.map(row => (
               <tr
                 key={row.relPath}
+                className={styles.docRow}
+                // A click anywhere on the row opens the document, not only on the
+                // title text: the row is the card the reader aims at. Controls inside
+                // the row (star, status, action menu) keep their own behaviour; a
+                // click that lands on one of them must not also open the document.
+                onClick={(event) => {
+                  const target = event.target as HTMLElement
+                  if (target.closest('button, input, a, summary, [role="button"]') !== null) return
+                  props.onOpen(row.relPath)
+                }}
                 // On the row root, not on a cell: a right-click lands on whichever
                 // <td> the pointer happens to be over, and a handler on one cell would
                 // silently miss the other four. `preventDefault` is what suppresses the
