@@ -2310,6 +2310,99 @@ export async function actualRelPathForView(
   return relPath
 }
 
+/** The caller's usable department chain, falling back to the leaf code. */
+function callerDepartmentCodes(caller: KnowledgeCaller): readonly string[] {
+  if (caller.departmentPathCodes !== undefined && caller.departmentPathCodes.length > 0) {
+    return caller.departmentPathCodes
+  }
+  return caller.departmentCode === undefined || caller.departmentCode === ''
+    ? []
+    : [caller.departmentCode]
+}
+
+/**
+ * Resolve the three knowledge-graph scope roots for one caller.
+ *
+ * `actualRelPathForView` is the authority for a FILE: it matches a view entry to its
+ * source by inode. A scope directory has no view hardlink (directories cannot be hard
+ * linked), so for `department/知识图谱` and `personal/知识图谱` it answers the view
+ * spelling. The caller's own owner/chain segment therefore has to be composed here,
+ * exactly as {@link bucketOf} composes it for the view: the personal root is
+ * `personal/<uid>/知识图谱`, and the department root is
+ * `department/<chain>/知识图谱` (legacy flat: `department/<code>/知识图谱`).
+ *
+ * The department view prefix is not always `department/知识图谱`: with an organization
+ * path the view mirrors the chain, so the graph's view path carries it too. Choosing
+ * the wrong one made every department document link point at a folder the view never
+ * creates. The layout is picked from what exists on disk, with a legacy flat fallback.
+ */
+export async function knowledgeGraphScopeRoots(
+  host: Context,
+  config: Config,
+  caller: KnowledgeCaller,
+): Promise<KnowledgeGraphScopeRoot[]> {
+  const graphViewPath = (scope: 'global' | 'department' | 'personal'): string =>
+    scope + '/' + KNOWLEDGE_GRAPH_FOLDER
+  const plan = localConfig(config)
+  const isDirectory = async (relPath: string): Promise<boolean> =>
+    stat(join(plan.actualRoot, relPath)).then(info => info.isDirectory()).catch(() => false)
+
+  const personalRoot = async (): Promise<string> => {
+    const viewPath = graphViewPath('personal')
+    const resolved = await actualRelPathForView(host, config, viewPath, caller).catch(() => viewPath)
+    const prefix = 'personal/' + caller.userId + '/'
+    return resolved.startsWith(prefix) ? resolved : prefix + KNOWLEDGE_GRAPH_FOLDER
+  }
+
+  /**
+   * The department root and the view prefix its documents actually land under.
+   *
+   * Two layouts coexist. With an organization path the view mirrors the caller's
+   * chain (`department/D1/D2/知识图谱/...`), so the graph's view path must carry
+   * the same chain or its document links would point at a folder the view never
+   * creates. A legacy flat graph (`department/OWN/知识图谱`) is linked at the
+   * bucket root instead (`department/知识图谱/...`). Pick by what exists on disk;
+   * when neither exists keep the nested shape so an empty tree still has the right
+   * spelling.
+   */
+  const departmentRoot = async (): Promise<{ actualPath: string; viewPath: string } | undefined> => {
+    const codes = callerDepartmentCodes(caller)
+    if (codes.length === 0) return undefined
+    const hasPath = caller.departmentPathCodes !== undefined && caller.departmentPathCodes.length > 0
+    const chainActual = 'department/' + codes.join('/') + '/' + KNOWLEDGE_GRAPH_FOLDER
+    const flatActual = 'department/' + codes[codes.length - 1] + '/' + KNOWLEDGE_GRAPH_FOLDER
+    if (await isDirectory(chainActual)) {
+      // `bucketOf` mirrors the chain only when the backend reported one; with only a
+      // leaf code the department bucket keeps its legacy one-level spelling.
+      return { actualPath: chainActual, viewPath: hasPath ? chainActual : graphViewPath('department') }
+    }
+    if (await isDirectory(flatActual)) {
+      return { actualPath: flatActual, viewPath: graphViewPath('department') }
+    }
+    return { actualPath: chainActual, viewPath: hasPath ? chainActual : graphViewPath('department') }
+  }
+
+  const roots: KnowledgeGraphScopeRoot[] = []
+  const globalViewPath = graphViewPath('global')
+  const globalRoot = await actualRelPathForView(host, config, globalViewPath, caller).catch(() => globalViewPath)
+  roots.push({ key: 'global', actualPath: globalRoot, viewPath: globalViewPath, groupKey: '', groupLabel: '' })
+
+  const department = await departmentRoot()
+  if (department !== undefined) {
+    const codes = callerDepartmentCodes(caller)
+    roots.push({
+      key: 'department',
+      actualPath: department.actualPath,
+      viewPath: department.viewPath,
+      groupKey: codes.join('/'),
+      groupLabel: (caller.departmentPathNames ?? []).join(' / ') || caller.departmentName || codes.join(' / '),
+    })
+  }
+
+  roots.push({ key: 'personal', actualPath: await personalRoot(), viewPath: graphViewPath('personal'), groupKey: '', groupLabel: '' })
+  return roots
+}
+
 export async function extractBeside(
   config: Config,
   relPath: string,
@@ -3504,69 +3597,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               return writeJson(res, 403, { error: 'unsafe caller id', code: 'forbidden' })
             }
             const plan = localConfig(config)
-            const graphViewPath = (scope: 'global' | 'department' | 'personal'): string =>
-              scope + '/' + KNOWLEDGE_GRAPH_FOLDER
-            /**
-             * Resolve one scope root to its authoritative path.
-             *
-             * `actualRelPathForView` is the authority for a FILE: it matches the view
-             * entry to the source by inode. A directory does not share that inode, so
-             * for an existing scope directory the function falls back to its input.
-             * The personal root therefore uses the uid from `fetchCaller` -- the same
-             * identity `actualRelPathForView` reads -- and never a path supplied by the
-             * browser. Department roots still go through the resolver because
-             * `department/知识图谱` is not a view path: only the caller's chain is.
-             */
-            const scopeActual = async (scope: 'global' | 'department' | 'personal'): Promise<string | undefined> => {
-              const viewPath = graphViewPath(scope)
-              const resolved = await actualRelPathForView(host, config, viewPath, caller).catch(() => viewPath)
-              if (scope === 'personal') {
-                const prefix = 'personal/' + caller.userId + '/'
-                return resolved.startsWith(prefix) ? resolved : prefix + KNOWLEDGE_GRAPH_FOLDER
-              }
-              // A department root that did not resolve to the caller's chain is not
-              // this caller's tree; reading `department/知识图谱` would show a generic
-              // folder that no grant names. The global root is legitimately the same
-              // string as its view path, so only the department case is refused here.
-              if (scope === 'department' && resolved === viewPath) return undefined
-              return resolved
-            }
-            const departmentCodes = (caller.departmentPathCodes !== undefined && caller.departmentPathCodes.length > 0)
-              ? caller.departmentPathCodes
-              : (caller.departmentCode === undefined || caller.departmentCode === '' ? [] : [caller.departmentCode])
-            const roots: KnowledgeGraphScopeRoot[] = []
-            const globalRoot = await scopeActual('global')
-            if (globalRoot !== undefined) {
-              roots.push({
-                key: 'global',
-                actualPath: globalRoot,
-                viewPath: graphViewPath('global'),
-                groupKey: '',
-                groupLabel: '',
-              })
-            }
-            if (departmentCodes.length > 0) {
-              const departmentRoot = await scopeActual('department')
-              if (departmentRoot !== undefined) {
-                roots.push({
-                  key: 'department',
-                  actualPath: departmentRoot,
-                  viewPath: graphViewPath('department'),
-                  groupKey: departmentCodes.join('/'),
-                  groupLabel: (caller.departmentPathNames ?? []).join(' / ') || caller.departmentName || departmentCodes.join(' / '),
-                })
-              }
-            }
-            const personalRoot = await scopeActual('personal')
-            if (personalRoot !== undefined) {
-              roots.push({
-                key: 'personal',
-                actualPath: personalRoot,
-                viewPath: graphViewPath('personal'),
-                groupKey: '',
-                groupLabel: '',
-              })
-            }
+            const roots = await knowledgeGraphScopeRoots(host, config, caller)
             const graphCaller: KnowledgeGraphCaller = {
               userId: caller.userId,
               label: caller.label,
@@ -7115,32 +7146,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       const caller = await fetchCaller(host, config)
       if (!isSafeUserId(caller.userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
       const plan = localConfig(config)
-      const scopeViewPath = (scope: 'global' | 'department' | 'personal'): string => scope + '/' + KNOWLEDGE_GRAPH_FOLDER
-      const scopeActual = async (scope: 'global' | 'department' | 'personal'): Promise<string | undefined> => {
-        const viewPath = scopeViewPath(scope)
-        const resolved = await actualRelPathForView(host, config, viewPath, caller).catch(() => viewPath)
-        if (scope === 'personal') {
-          const prefix = 'personal/' + caller.userId + '/'
-          return resolved.startsWith(prefix) ? resolved : prefix + KNOWLEDGE_GRAPH_FOLDER
-        }
-        if (scope === 'department' && resolved === viewPath) return undefined
-        return resolved
-      }
-      const codes = (caller.departmentPathCodes !== undefined && caller.departmentPathCodes.length > 0)
-        ? caller.departmentPathCodes
-        : (caller.departmentCode === undefined || caller.departmentCode === '' ? [] : [caller.departmentCode])
-      const roots: KnowledgeGraphScopeRoot[] = []
-      const globalRoot = await scopeActual('global')
-      if (globalRoot !== undefined) roots.push({ key: 'global', actualPath: globalRoot, viewPath: scopeViewPath('global'), groupKey: '', groupLabel: '' })
-      if (codes.length > 0) {
-        const departmentRoot = await scopeActual('department')
-        if (departmentRoot !== undefined) roots.push({
-          key: 'department', actualPath: departmentRoot, viewPath: scopeViewPath('department'),
-          groupKey: codes.join('/'), groupLabel: (caller.departmentPathNames ?? []).join(' / ') || caller.departmentName || codes.join(' / '),
-        })
-      }
-      const personalRoot = await scopeActual('personal')
-      if (personalRoot !== undefined) roots.push({ key: 'personal', actualPath: personalRoot, viewPath: scopeViewPath('personal'), groupKey: '', groupLabel: '' })
+      const roots = await knowledgeGraphScopeRoots(host, config, caller)
       const tree = await scanKnowledgeGraphs({
         actualRoot: plan.actualRoot,
         roots,

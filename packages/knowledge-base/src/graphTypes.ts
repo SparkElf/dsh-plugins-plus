@@ -29,7 +29,7 @@ export const KNOWLEDGE_GRAPH_TRASH_FOLDER = '_trash'
 export interface KnowledgeGraphDocument {
   /** Human title: the document's first H1, else the file name without extension. */
   title: string
-  /** File name alone, relative to the topic folder. */
+  /** Path relative to the topic folder, e.g. `岗位/张三.md`. */
   file: string
   /** View-relative path, for opening the document from a future write surface. */
   path: string
@@ -61,7 +61,7 @@ export interface KnowledgeGraphTopic {
   folder: string
   /** View-relative topic folder path. */
   path: string
-  /** Documents beside `index.md`. */
+  /** Documents below the topic folder, including nested document folders. */
   documents: KnowledgeGraphDocument[]
 }
 

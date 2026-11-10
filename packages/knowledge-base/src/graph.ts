@@ -8,6 +8,7 @@
  * <scope>/知识图谱/<graph>/
  *   <topic>/index.md          # the topic card, visible
  *   <topic>/<document>.md     # documents, visible
+ *   <topic>/<folder>/<doc>.md # documents grouped below the topic, visible
  *   .kg/links/<a>--<b>.md     # relations, hidden from the file tree and search
  * ```
  *
@@ -239,6 +240,60 @@ async function visibleFiles(path: string): Promise<Array<{ name: string; path: s
   }
 }
 
+/** How deep below a topic folder the scanner follows nested document folders. */
+const MAX_TOPIC_DOCUMENT_DEPTH = 8
+
+/** One file below a topic folder, with its POSIX path relative to that folder. */
+interface TopicDocumentFile {
+  /** File name alone, used as the last-resort title. */
+  readonly name: string
+  /** Absolute path for reading its text. */
+  readonly path: string
+  /** Path relative to the topic folder, e.g. `岗位/张三.md`. */
+  readonly relative: string
+}
+
+/**
+ * Collect the visible documents below one topic folder, recursively.
+ *
+ * A topic's documents are not always written beside `index.md`: a `工作轨迹` topic
+ * groups them into one folder per 岗位, and reading only the first level made those
+ * documents invisible to `kg_get` and absent from the graph's document count. The
+ * topic's own `index.md` is the card and is skipped; an `index.md` deeper in the tree
+ * is a document like any other. Hidden entries are skipped at every level, which keeps
+ * `.kg` and editor scratch files out.
+ */
+async function visibleTopicDocuments(topicPath: string): Promise<TopicDocumentFile[]> {
+  const found: TopicDocumentFile[] = []
+  const walk = async (directory: string, prefix: string, depth: number): Promise<void> => {
+    if (depth > MAX_TOPIC_DOCUMENT_DEPTH || found.length >= MAX_TOPIC_DOCUMENTS) return
+    let entries
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch {
+      return
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+    for (const entry of entries) {
+      if (found.length >= MAX_TOPIC_DOCUMENTS) return
+      if (entry.name.startsWith('.')) continue
+      const absolute = join(directory, entry.name)
+      const relative = prefix === '' ? entry.name : prefix + '/' + entry.name
+      if (entry.isDirectory()) {
+        await walk(absolute, relative, depth + 1)
+        continue
+      }
+      if (!entry.isFile()) continue
+      // Only the topic's OWN index.md is the card. A nested index.md belongs to the
+      // document folder and is listed like every other file.
+      if (relative === 'index.md') continue
+      found.push({ name: entry.name, path: absolute, relative })
+    }
+  }
+  await walk(topicPath, '', 0)
+  return found.sort((a, b) => a.relative.localeCompare(b.relative, 'zh-Hans-CN'))
+}
+
 /** Join one view-relative parent with a child name, keeping POSIX separators. */
 function viewJoin(parent: string, name: string): string {
   return parent === '' ? name : parent + '/' + name
@@ -264,8 +319,7 @@ export async function readGraphTopic(
   const body = card?.body ?? ''
   const meta = card?.meta ?? {}
   const documents: KnowledgeGraphDocument[] = []
-  for (const file of (await visibleFiles(topicPath)).slice(0, MAX_TOPIC_DOCUMENTS)) {
-    if (file.name === 'index.md') continue
+  for (const file of await visibleTopicDocuments(topicPath)) {
     const text = await readGraphText(file.path)
     const documentBody = text === undefined ? undefined : parseGraphFrontMatter(text)
     const title = documentBody === undefined
@@ -274,8 +328,8 @@ export async function readGraphTopic(
     const date = await dateOf(file.path)
     const document: KnowledgeGraphDocument = {
       title,
-      file: file.name,
-      path: viewJoin(viewTopicPath, file.name),
+      file: file.relative,
+      path: viewJoin(viewTopicPath, file.relative),
       ...(date === undefined ? {} : { date }),
       ...(documentBody === undefined ? {} : { summary: firstSummary(documentBody.body) }),
     }

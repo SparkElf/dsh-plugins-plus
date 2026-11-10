@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -15,7 +15,8 @@ import {
   knowledgeGraphsOf,
   type KnowledgeGraphNode,
 } from '../src/graphTypes.ts'
-import { permissionForKbRoute } from '../src/index.ts'
+import { knowledgeGraphScopeRoots, permissionForKbRoute, type Config } from '../src/index.ts'
+import { expectedViewPathFor, syncView, viewPathFor } from '../src/views.ts'
 
 const roots: string[] = []
 
@@ -144,6 +145,7 @@ describe('the graph scanner', () => {
       label: '来源与展示面',
       updated: '2026-10-28',
       body: '群聊是任务的来源与展示面。',
+      file: 'task-bus--group-chat.md',
     }])
     // One permission question per graph, never one per file or per `.kg` entry.
     expect(canRead).toHaveBeenCalledTimes(1)
@@ -329,5 +331,192 @@ describe('the graph tree filter', () => {
     const tree = emptyKnowledgeGraphTree()
     expect(tree.scopes.map(scope => scope.key)).toEqual(['global', 'department', 'personal'])
     expect(knowledgeGraphsOf(tree)).toEqual([])
+  })
+})
+
+describe('nested topic documents', () => {
+  it('lists documents under a personal topic sub-folder and keeps the relative path', async () => {
+    const actualRoot = await tempRoot()
+    const graph = join(actualRoot, 'personal', 'uid-1', '知识图谱', '工作轨迹')
+    await write(join(graph, '主题', 'index.md'), '# 主题\n\n卡片。\n')
+    await write(join(graph, '主题', '岗位A', '张三.md'), '# 张三\n\n张三的工作记录。\n')
+    await write(join(graph, '主题', '岗位A', '李四.md'), '# 李四\n')
+    // A nested index.md belongs to the 岗位 folder, not to the topic card.
+    await write(join(graph, '主题', '岗位A', 'index.md'), '# 岗位A\n')
+    await write(join(graph, '主题', '岗位B', '子目录', '王五.md'), '# 王五\n')
+    await write(join(graph, '主题', '.hidden', 'secret.md'), '# secret\n')
+
+    const tree = await scanKnowledgeGraphs({
+      actualRoot,
+      roots: [{
+        key: 'personal',
+        actualPath: 'personal/uid-1/知识图谱',
+        viewPath: 'personal/知识图谱',
+        groupKey: '',
+        groupLabel: '',
+      }],
+      caller: { userId: 'uid-1', label: '我' },
+      canRead: async () => true,
+    })
+
+    const graphNode = knowledgeGraphsOf(tree)[0]
+    const topic = graphNode?.topics[0]
+    expect(topic?.documents).toHaveLength(4)
+    expect(graphNode?.counts.documents).toBe(4)
+    const byFile = new Map(topic?.documents.map(document => [document.file, document]))
+    expect(byFile.get('岗位A/张三.md')).toMatchObject({
+      title: '张三',
+      path: 'personal/知识图谱/工作轨迹/主题/岗位A/张三.md',
+      summary: '张三的工作记录。',
+    })
+    // Nested index.md is a document; the topic's own index.md is the card.
+    expect(byFile.get('岗位A/index.md')).toMatchObject({ title: '岗位A' })
+    expect(byFile.has('index.md')).toBe(false)
+    // Hidden folders are skipped at every level, so `.kg`-like roots cannot leak.
+    expect(topic?.documents.some(document => document.file.includes('.hidden'))).toBe(false)
+  })
+
+  it('lists documents under a department topic sub-folder', async () => {
+    const actualRoot = await tempRoot()
+    const graph = join(actualRoot, 'department', 'D1', 'D2', '知识图谱', '部门图谱')
+    await write(join(graph, '主题', 'index.md'), '# 主题\n')
+    await write(join(graph, '主题', '岗位X', '文档.md'), '# 部门文档\n\n正文。\n')
+
+    const viewRoot = await tempRoot()
+    const config = {
+      baseUrl: 'http://dataops.test', credentialRef: 'c', actualRoot, mountPoint: viewRoot, viewRoot,
+    } as unknown as Config
+    await mkdir(join(viewRoot, 'u-1', 'department', 'D1', 'D2', '知识图谱'), { recursive: true })
+    const roots = await knowledgeGraphScopeRoots({} as never, config, {
+      userId: 'u-1', label: '部门用户', roleCodes: [], departmentCode: 'D2',
+      departmentPathCodes: ['D1', 'D2'], departmentPathNames: ['一部', '二部'],
+    })
+    const tree = await scanKnowledgeGraphs({
+      actualRoot,
+      roots,
+      caller: { userId: 'u-1', label: '部门用户' },
+      canRead: async () => true,
+    })
+
+    const graphNode = knowledgeGraphsOf(tree)[0]
+    expect(graphNode?.group).toBe('一部 / 二部')
+    expect(graphNode?.counts.documents).toBe(1)
+    expect(graphNode?.path).toBe('department/D1/D2/知识图谱/部门图谱')
+    expect(graphNode?.topics[0]?.documents[0]).toMatchObject({
+      title: '部门文档',
+      file: '岗位X/文档.md',
+      path: 'department/D1/D2/知识图谱/部门图谱/主题/岗位X/文档.md',
+    })
+  })
+
+  it('keeps the flat global topic document count unchanged', async () => {
+    const actualRoot = await tempRoot()
+    const graph = join(actualRoot, 'global', '知识图谱', '平台建设')
+    await write(join(graph, '任务总线', 'index.md'), '# 任务总线\n')
+    await write(join(graph, '任务总线', 'state-machine.md'), '# 任务状态机\n')
+
+    const tree = await scanKnowledgeGraphs({
+      actualRoot,
+      roots: [{
+        key: 'global',
+        actualPath: 'global/知识图谱',
+        viewPath: 'global/知识图谱',
+        groupKey: '',
+        groupLabel: '',
+      }],
+      caller: { userId: 'u1', label: '测试用户' },
+      canRead: async () => true,
+    })
+
+    expect(knowledgeGraphsOf(tree)[0]?.counts.documents).toBe(1)
+  })
+})
+
+describe('graph scope roots', () => {
+  it('composes nested department and personal roots from the caller, not a directory inode', async () => {
+    const root = await tempRoot()
+    const actualRoot = join(root, 'actual')
+    const viewRoot = join(root, 'views')
+    await mkdir(join(actualRoot, 'department/D1/D2/知识图谱'), { recursive: true })
+    await mkdir(join(actualRoot, 'personal/u-1/知识图谱'), { recursive: true })
+    await mkdir(join(viewRoot, 'u-1/department/知识图谱'), { recursive: true })
+    await mkdir(join(viewRoot, 'u-1/personal/知识图谱'), { recursive: true })
+    const config = {
+      baseUrl: 'http://dataops.test', credentialRef: 'c', actualRoot, viewRoot, mountPoint: viewRoot,
+    } as unknown as Config
+
+    const roots = await knowledgeGraphScopeRoots({} as never, config, {
+      userId: 'u-1',
+      label: 'u',
+      roleCodes: [],
+      departmentCode: 'D2',
+      departmentPathCodes: ['D1', 'D2'],
+      departmentPathNames: ['一部', '二部'],
+    })
+
+    expect(roots.find(root => root.key === 'department')).toMatchObject({
+      actualPath: 'department/D1/D2/知识图谱',
+      viewPath: 'department/D1/D2/知识图谱',
+      groupKey: 'D1/D2',
+      groupLabel: '一部 / 二部',
+    })
+    expect(roots.find(root => root.key === 'personal')).toMatchObject({
+      actualPath: 'personal/u-1/知识图谱',
+      viewPath: 'personal/知识图谱',
+    })
+    expect(roots.find(root => root.key === 'global')?.actualPath).toBe('global/知识图谱')
+  })
+
+  it('falls back to the legacy flat department root when the backend reports only a code', async () => {
+    const root = await tempRoot()
+    const actualRoot = join(root, 'actual')
+    const viewRoot = join(root, 'views')
+    await mkdir(join(actualRoot, 'department/OPS/知识图谱'), { recursive: true })
+    await mkdir(join(viewRoot, 'u-1/department/知识图谱'), { recursive: true })
+    const config = {
+      baseUrl: 'http://dataops.test', credentialRef: 'c', actualRoot, viewRoot, mountPoint: viewRoot,
+    } as unknown as Config
+
+    const roots = await knowledgeGraphScopeRoots({} as never, config, {
+      userId: 'u-1', label: 'u', roleCodes: [], departmentCode: 'OPS',
+    })
+
+    expect(roots.find(root => root.key === 'department')).toMatchObject({
+      actualPath: 'department/OPS/知识图谱',
+      groupKey: 'OPS',
+    })
+  })
+})
+
+describe('nested documents in the view', () => {
+  it('links a nested department document into the chain-mirrored view path', async () => {
+    const root = await tempRoot()
+    const actualRoot = join(root, 'actual')
+    const viewRoot = join(root, 'views')
+    const options = {
+      actualRoot, viewRoot, userId: 'u-1', departmentCode: 'D2', departmentPathCodes: ['D1', 'D2'],
+    }
+    const relPath = 'department/D1/D2/知识图谱/部门图谱/主题/岗位X/文档.md'
+    await write(join(actualRoot, relPath), '# 部门文档\n')
+
+    await syncView(options, [{ relPath }])
+
+    expect(expectedViewPathFor(options, relPath)).toBe(relPath)
+    await expect(readFile(join(viewPathFor(options), relPath), 'utf8')).resolves.toBe('# 部门文档\n')
+  })
+
+  it('links a personal topic sub-folder document into the same nested view path', async () => {
+    const root = await tempRoot()
+    const actualRoot = join(root, 'actual')
+    const viewRoot = join(root, 'views')
+    const options = { actualRoot, viewRoot, userId: 'u-1' }
+    const relPath = 'personal/u-1/知识图谱/工作轨迹/主题/岗位A/张三.md'
+    await write(join(actualRoot, relPath), '# 张三\n')
+
+    await syncView(options, [{ relPath }])
+
+    expect(expectedViewPathFor(options, relPath)).toBe('personal/知识图谱/工作轨迹/主题/岗位A/张三.md')
+    await expect(readFile(join(viewPathFor(options), 'personal/知识图谱/工作轨迹/主题/岗位A/张三.md'), 'utf8'))
+      .resolves.toBe('# 张三\n')
   })
 })
