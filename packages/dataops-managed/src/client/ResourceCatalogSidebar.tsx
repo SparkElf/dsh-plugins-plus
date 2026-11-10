@@ -28,6 +28,9 @@ interface FolderNode {
 
 interface FolderTreeResponse {
   nodes?: Array<Record<string, unknown>>
+  total?: number
+  assignedTotal?: number
+  ungrouped?: { name?: string; resourceCount?: number }
 }
 
 interface ListResponse { items?: Array<{ id: number }>; total?: number }
@@ -125,6 +128,14 @@ export function ResourceCatalogSidebar({ onFilter }: { onFilter: (filter: Resour
         if (!treeResponse.ok) throw new Error('HTTP ' + String(treeResponse.status))
         const tree = await treeResponse.json() as FolderTreeResponse
         const roots = (tree.nodes ?? []).map(normalizeNode)
+        // The tree counts include system/platform resources while the plain list endpoint
+        // defaults to non-system rows. Keep one universe: use the tree total and show the
+        // resources that are not attached to any folder as an explicit bucket.
+        const accounted = roots.reduce((sum, node) => sum + node.count, 0)
+        const treeTotal = typeof tree.total === 'number' ? tree.total : accounted
+        if (treeTotal > accounted) {
+          roots.push({ id: -1, name: '未纳入目录', label: '未纳入目录', count: treeTotal - accounted, children: [] })
+        }
         setFolders(roots)
         if (!expandedOnce) {
           setOpenKeys(new Set(roots.filter((node) => node.children.length > 0).map((node) => node.id)))
@@ -132,7 +143,7 @@ export function ResourceCatalogSidebar({ onFilter }: { onFilter: (filter: Resour
         }
         if (listResponse.ok) {
           const list = await listResponse.json() as ListResponse
-          setTotal(typeof list.total === 'number' ? list.total : (list.items ?? []).length)
+          setTotal(typeof tree.total === 'number' ? tree.total : (typeof list.total === 'number' ? list.total : (list.items ?? []).length))
         }
         if (favoriteResponse.ok) {
           const page = await favoriteResponse.json() as PreferencePage
