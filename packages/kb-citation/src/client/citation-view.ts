@@ -74,6 +74,10 @@ export interface ChunkProvenance {
   readonly chunkText?: string
   readonly paragraphs?: readonly { text: string; ordinal?: number; page?: number }[]
   readonly chunkOrdinal?: number
+  /** First derived-markdown line of the chunk, in the same space as the citation's `line`. */
+  readonly lineStart?: number
+  /** Last derived-markdown line of the chunk, inclusive. */
+  readonly lineEnd?: number
   readonly sheet?: string
   readonly cell?: string
 }
@@ -121,16 +125,60 @@ const CHUNK_CACHE_TTL_MS = 5 * 60_000
 const chunkCache = new Map<string, { at: number; value: ChunkProvenance }>()
 const chunkPending = new Map<string, Promise<ChunkProvenance | undefined>>()
 const sourceTextCache = new Map<string, { at: number; text: string }>()
+const sourceTextPending = new Map<string, Promise<string | undefined>>()
 const resolveCache = new Map<string, { at: number; value: ChunkProvenance }>()
 const resolvePending = new Map<string, Promise<ChunkProvenance | undefined>>()
 
-/** Drop cached chunk provenance, source text, and line resolutions, for tests or after an index rebuild. */
+/**
+ * Chunks already resolved for a document, with the derived-markdown line range each one owns.
+ *
+ * A message often cites several lines of the same document. The KB resolve endpoint answers one
+ * line at a time, so without this index every chip paid its own `/resolve`; a resolved chunk
+ * already states `lineStart`/`lineEnd`, and any later citation inside that range with matching
+ * text is the same chunk and needs no second round trip.
+ */
+interface ResolvedLineRange {
+  readonly lineStart: number
+  readonly lineEnd: number
+  readonly key: string
+  readonly value: ChunkProvenance
+}
+const resolvedLineRanges = new Map<string, ResolvedLineRange[]>()
+/** Resolved chunks retained per document; beyond this the oldest range is dropped. */
+const MAX_RESOLVED_RANGES_PER_DOCUMENT = 64
+
+/**
+ * One same-document resolve queue.
+ *
+ * Every chip in a rendered message enqueues in the same task, so a single request can answer the
+ * chunks around it before the next line asks. Resolving one document at a time also stops a long
+ * answer from opening dozens of SQLite reads at once; different documents still run in parallel.
+ */
+const documentResolveTails = new Map<string, { tail: Promise<unknown>; pending: number }>()
+
+/** Counts for field diagnosis; published through `recordCitationDebug` when debug is enabled. */
+const resolveDiagnostics = {
+  resolveRequests: 0,
+  sourceReads: 0,
+  rangeHits: 0,
+  sourceReadHits: 0,
+}
+
+function bumpResolveDiagnostic(key: keyof typeof resolveDiagnostics): void {
+  resolveDiagnostics[key] += 1
+  recordCitationDebug('resolve-cache', { ...resolveDiagnostics })
+}
+
+/** Drop cached chunk provenance, source text, line resolutions and line ranges, for tests or after an index rebuild. */
 export function clearChunkCache(): void {
   chunkCache.clear()
   chunkPending.clear()
   sourceTextCache.clear()
+  sourceTextPending.clear()
   resolveCache.clear()
   resolvePending.clear()
+  resolvedLineRanges.clear()
+  documentResolveTails.clear()
 }
 
 /**
@@ -238,6 +286,7 @@ async function fetchChunkGroupsUncached(docId: string | undefined, chunkId: stri
 /** One raw resolve response, before its chunk is checked against the cited line. */
 async function fetchResolveAt(path: string, line?: number): Promise<ChunkProvenance | undefined> {
   try {
+    bumpResolveDiagnostic('resolveRequests')
     const response = await fetch('/knowledge-base/api/resolve', {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -258,6 +307,9 @@ async function fetchResolveAt(path: string, line?: number): Promise<ChunkProvena
       cell?: unknown
       chunkOrdinal?: unknown
       ordinal?: unknown
+      line?: unknown
+      lineStart?: unknown
+      lineEnd?: unknown
       boxes?: readonly { page?: unknown; bbox?: unknown }[]
       unionBoxes?: readonly { page?: unknown; bbox?: unknown }[]
     }
@@ -265,6 +317,12 @@ async function fetchResolveAt(path: string, line?: number): Promise<ChunkProvena
     const resolved = typeof body.path === 'string' ? resolveKbPath(body.path) : undefined
     const ordinalValue = typeof body.chunkOrdinal === 'number' ? body.chunkOrdinal : body.ordinal
     const chunkOrdinal = typeof ordinalValue === 'number' && Number.isInteger(ordinalValue) && ordinalValue >= 0 ? ordinalValue : undefined
+    const lineStartValue = typeof body.lineStart === 'number' ? body.lineStart : body.line
+    const lineStart = typeof lineStartValue === 'number' && Number.isInteger(lineStartValue) && lineStartValue > 0 ? lineStartValue : undefined
+    const lineEndValue = typeof body.lineEnd === 'number' ? body.lineEnd : undefined
+    const lineEnd = typeof lineEndValue === 'number' && Number.isInteger(lineEndValue) && lineStart !== undefined && lineEndValue >= lineStart
+      ? lineEndValue
+      : lineStart
     const sheet = typeof body.sheet === 'string' && body.sheet.trim() !== '' ? body.sheet : undefined
     const cell = typeof body.cell === 'string' && body.cell.trim() !== '' ? body.cell : undefined
     return {
@@ -272,6 +330,8 @@ async function fetchResolveAt(path: string, line?: number): Promise<ChunkProvena
       ...(typeof body.docId === 'number' ? { docId: String(body.docId) } : {}),
       ...(typeof body.chunkId === 'number' ? { chunkId: String(body.chunkId) } : {}),
       ...(typeof body.chunkKey === 'string' && body.chunkKey.trim() !== '' ? { chunkKey: body.chunkKey } : {}),
+      ...(lineStart === undefined ? {} : { lineStart }),
+      ...(lineEnd === undefined ? {} : { lineEnd }),
       ...(typeof body.quote === 'string' && body.quote.trim() !== '' ? { quote: body.quote } : {}),
       ...(typeof body.heading === 'string' && body.heading.trim() !== '' ? { heading: body.heading } : {}),
       ...(typeof body.paragraphText === 'string' && body.paragraphText.trim() !== '' ? { paragraphText: body.paragraphText } : {}),
@@ -317,7 +377,29 @@ async function fetchSourceText(path: string): Promise<string | undefined> {
   const relative = path.replace(/^\/workspace\/kb\//, '').replace(/^\/workspace\//, '')
   if (relative === '') return undefined
   const cached = sourceTextCache.get(relative)
-  if (cached !== undefined && Date.now() - cached.at < CHUNK_CACHE_TTL_MS) return cached.text
+  if (cached !== undefined && Date.now() - cached.at < CHUNK_CACHE_TTL_MS) {
+    bumpResolveDiagnostic('sourceReadHits')
+    return cached.text
+  }
+  // One in-flight read per document: a message with N line citations used to start N reads of
+  // the same (often large) derived markdown before the first one landed.
+  const pending = sourceTextPending.get(relative)
+  if (pending !== undefined) {
+    bumpResolveDiagnostic('sourceReadHits')
+    return pending
+  }
+  bumpResolveDiagnostic('sourceReads')
+  const task = fetchSourceTextUncached(relative)
+    .then(text => {
+      if (text !== undefined) sourceTextCache.set(relative, { at: Date.now(), text })
+      return text
+    })
+    .finally(() => { sourceTextPending.delete(relative) })
+  sourceTextPending.set(relative, task)
+  return task
+}
+
+async function fetchSourceTextUncached(relative: string): Promise<string | undefined> {
   try {
     const response = await fetch('/knowledge-base/api/read', {
       method: 'POST',
@@ -327,7 +409,6 @@ async function fetchSourceText(path: string): Promise<string | undefined> {
     if (!response.ok) return undefined
     const body = await response.json() as { kind?: unknown; content?: unknown }
     if (body.kind !== 'text' || typeof body.content !== 'string') return undefined
-    sourceTextCache.set(relative, { at: Date.now(), text: body.content })
     return body.content
   } catch {
     return undefined
@@ -376,6 +457,69 @@ export function citationTokenForChunk(chunk: Pick<ChunkProvenance, 'docId' | 'ch
   return 'kb://doc/' + chunk.docId + '/chunk/' + key
 }
 
+/** Normalize a cited path to the spelling the resolve body and the source cache use. */
+function relativeResolvePath(path: string): string {
+  return path.replace(/^\/workspace\/kb\//, '').replace(/^\/workspace\//, '')
+}
+
+/** Cache the derived-markdown line range a verified chunk owns. */
+function rememberResolvedRange(path: string, chunk: ChunkProvenance): void {
+  const lineStart = chunk.lineStart
+  const lineEnd = chunk.lineEnd ?? lineStart
+  if (lineStart === undefined || lineEnd === undefined) return
+  const key = relativeResolvePath(path)
+  if (key === '') return
+  const identity = chunk.chunkKey ?? chunk.chunkId ?? (chunk.chunkOrdinal === undefined ? '' : 'ord:' + String(chunk.chunkOrdinal))
+  if (identity === '') return
+  const ranges = resolvedLineRanges.get(key) ?? []
+  if (ranges.some(entry => entry.key === identity && entry.lineStart === lineStart && entry.lineEnd === lineEnd)) return
+  ranges.push({ lineStart, lineEnd, key: identity, value: chunk })
+  while (ranges.length > MAX_RESOLVED_RANGES_PER_DOCUMENT) ranges.shift()
+  resolvedLineRanges.set(key, ranges)
+}
+
+/**
+ * Whether an already resolved chunk owns this line.
+ *
+ * The range alone is not proof: chunker versions disagree about whether `line` is a source line
+ * or a paragraph ordinal, so the cited text must also appear in the chunk. A miss falls through
+ * to the resolve endpoint, which has the full index.
+ */
+function cachedResolveForLine(path: string, line: number, lineText: string): ChunkProvenance | undefined {
+  for (const entry of resolvedLineRanges.get(relativeResolvePath(path)) ?? []) {
+    if (line < entry.lineStart || line > entry.lineEnd) continue
+    if (!chunkContainsSourceLine(provenanceText(entry.value), lineText)) continue
+    bumpResolveDiagnostic('rangeHits')
+    return entry.value
+  }
+  return undefined
+}
+
+/**
+ * Queue one resolve behind the previous request for the same document.
+ *
+ * The first chip resolves its chunk; chips inside the same chunk then answer from
+ * {@link cachedResolveForLine} instead of sending their own request. Different documents keep
+ * their own queues, so an answer citing several files still resolves them in parallel.
+ */
+function enqueueDocumentResolve<T>(path: string, task: () => Promise<T>): Promise<T> {
+  const key = relativeResolvePath(path)
+  const entry = documentResolveTails.get(key) ?? { tail: Promise.resolve(), pending: 0 }
+  entry.pending += 1
+  const run = entry.tail.catch(() => undefined).then(task)
+  entry.tail = run as Promise<unknown>
+  documentResolveTails.set(key, entry)
+  return run.finally(() => {
+    entry.pending -= 1
+    if (entry.pending === 0 && documentResolveTails.get(key) === entry) documentResolveTails.delete(key)
+  })
+}
+
+/** Milliseconds for the opt-in citation timeline. */
+function nowMs(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now()
+}
+
 /**
  * Resolve a path+line citation to the chunk that owns that line, and prove it owns the line.
  *
@@ -391,11 +535,17 @@ export async function fetchResolve(path: string, line?: number): Promise<ChunkPr
   if (cached !== undefined && Date.now() - cached.at < CHUNK_CACHE_TTL_MS) return cached.value
   const pending = resolvePending.get(key)
   if (pending !== undefined) return pending
-  const task = fetchVerifiedResolve(path, line)
+  const startedAt = nowMs()
+  const task = enqueueDocumentResolve(path, () => fetchVerifiedResolve(path, line))
     .then(value => {
       // A failed/mismatched resolution is never cached: the next click after an index rebuild
       // must be allowed to recover without waiting for the five-minute window.
       if (value !== undefined) resolveCache.set(key, { at: Date.now(), value })
+      markCitationTiming(
+        'citation-resolve',
+        path + ':' + String(line ?? '') + ' ' + Math.round(nowMs() - startedAt).toString() + 'ms '
+          + (value === undefined ? 'miss' : 'hit'),
+      )
       return value
     })
     .finally(() => { resolvePending.delete(key) })
@@ -403,19 +553,55 @@ export async function fetchResolve(path: string, line?: number): Promise<ChunkPr
   return task
 }
 
+/** The derived source text when it is already cached; never starts a read. */
+function cachedSourceText(path: string): string | undefined {
+  const cached = sourceTextCache.get(relativeResolvePath(path))
+  if (cached === undefined || Date.now() - cached.at >= CHUNK_CACHE_TTL_MS) return undefined
+  return cached.text
+}
+
 /** The uncached half of {@link fetchResolve}: resolve, check the line, retry once. */
 async function fetchVerifiedResolve(path: string, line?: number): Promise<ChunkProvenance | undefined> {
+  if (line === undefined) {
+    const resolved = await fetchResolveAt(path)
+    if (resolved !== undefined) rememberResolvedRange(path, resolved)
+    return resolved
+  }
+  // A document already read for an earlier chip can answer a line inside one of its resolved
+  // chunks without touching the resolve endpoint. Only the cache is consulted here: the first
+  // chip still resolves before reading, so this adds no request to the cold path.
+  const knownSource = cachedSourceText(path)
+  if (knownSource !== undefined) {
+    const knownAt = sourceLineAt(knownSource, line)
+    if (knownAt !== undefined && knownAt.text !== '') {
+      const local = cachedResolveForLine(path, line, knownAt.text)
+      if (local !== undefined) {
+        recordCitationDebug('resolve-range-hit', { path, line, chunkOrdinal: local.chunkOrdinal ?? null, range: [local.lineStart ?? null, local.lineEnd ?? null] })
+        return local
+      }
+    }
+  }
   const first = await fetchResolveAt(path, line)
-  if (first === undefined || line === undefined) return first
+  if (first === undefined) return undefined
   const source = await fetchSourceText(path)
-  if (source === undefined) return first
+  if (source === undefined) {
+    rememberResolvedRange(path, first)
+    return first
+  }
   const at = sourceLineAt(source, line)
   if (at === undefined) return undefined
-  if (at.text === '') return first
-  if (chunkContainsSourceLine(provenanceText(first), at.text)) return first
+  if (at.text === '') {
+    rememberResolvedRange(path, first)
+    return first
+  }
+  if (chunkContainsSourceLine(provenanceText(first), at.text)) {
+    rememberResolvedRange(path, first)
+    return first
+  }
   if (at.paragraphOrdinal !== line) {
     const retry = await fetchResolveAt(path, at.paragraphOrdinal)
     if (retry !== undefined && chunkContainsSourceLine(provenanceText(retry), at.text)) {
+      rememberResolvedRange(path, retry)
       recordCitationDebug('resolve-line-retry', {
         path, line, paragraphOrdinal: at.paragraphOrdinal,
         rejectedOrdinal: first.chunkOrdinal ?? null, chunkOrdinal: retry.chunkOrdinal ?? null,

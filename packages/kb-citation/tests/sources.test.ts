@@ -950,3 +950,99 @@ describe('hover title source path', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('same-document resolve batching', () => {
+  const SOURCE = '第一条\n第二条\n第三条'
+  const CHUNK = {
+    path: 'global/制度.docx', chunkId: 335, chunkKey: 'chunk-335', chunkOrdinal: 4,
+    lineStart: 1, lineEnd: 3, chunkText: SOURCE, boxes: [],
+  }
+
+  /**
+   * A fetch double that answers `/read` and `/resolve` with separate Response objects.
+   *
+   * `mockResolvedValue(new Response(...))` cannot be reused across two requests: the second
+   * `json()` throws "Body is unusable", which looks like a resolve failure in the caller.
+   */
+  function citationFetch() {
+    const calls: string[] = []
+    const mock = vi.fn(async (url: string) => {
+      calls.push(url)
+      const body = url === '/knowledge-base/api/read'
+        ? { kind: 'text', content: SOURCE }
+        : CHUNK
+      return new Response(JSON.stringify(body), { status: 200 })
+    })
+    return { mock, calls }
+  }
+
+  it('answers a second cited line from the resolved chunk without another resolve', async () => {
+    const { fetchResolve } = await import('../src/client/citation-view.ts')
+    const { mock, calls } = citationFetch()
+    vi.stubGlobal('fetch', mock)
+
+    const first = await fetchResolve('global/制度.docx.md', 1)
+    const second = await fetchResolve('global/制度.docx.md', 2)
+
+    expect(first?.chunkOrdinal).toBe(4)
+    expect(second?.chunkOrdinal).toBe(4)
+    expect(calls.filter(url => url === '/knowledge-base/api/resolve')).toHaveLength(1)
+    expect(calls.filter(url => url === '/knowledge-base/api/read')).toHaveLength(1)
+    vi.unstubAllGlobals()
+  })
+
+  it('labels three citations of one chunk with one resolve and one read', async () => {
+    const { normalizeFileLinkLabels } = await import('../src/client/link-label.ts')
+    const { mock, calls } = citationFetch()
+    vi.stubGlobal('fetch', mock)
+    document.body.innerHTML = [
+      '<button class="_fileLink_x" title="global/制度.docx.md:1">制度.docx.md:1</button>',
+      '<button class="_fileLink_x" title="global/制度.docx.md:2">制度.docx.md:2</button>',
+      '<button class="_fileLink_x" title="global/制度.docx.md:3">制度.docx.md:3</button>',
+    ].join('')
+
+    normalizeFileLinkLabels(document)
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    expect([...document.querySelectorAll('button')].map(button => button.textContent))
+      .toEqual(['制度.docx:第5块', '制度.docx:第5块', '制度.docx:第5块'])
+    expect(calls.filter(url => url === '/knowledge-base/api/resolve')).toHaveLength(1)
+    expect(calls.filter(url => url === '/knowledge-base/api/read')).toHaveLength(1)
+    vi.unstubAllGlobals()
+  })
+
+  it('records a citation-resolve mark on the opt-in timeline', async () => {
+    const { fetchResolve } = await import('../src/client/citation-view.ts')
+    const { citationTimingEvents, resetCitationTiming } = await import('../src/client/timing.ts')
+    const { mock } = citationFetch()
+    vi.stubGlobal('fetch', mock)
+    vi.stubGlobal('__KB_CITATION_TIMING__', true)
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    resetCitationTiming()
+
+    await fetchResolve('global/制度.docx.md', 1)
+
+    const marks = citationTimingEvents().filter(event => event.name === 'citation-resolve')
+    expect(marks).toHaveLength(1)
+    expect(marks[0]?.detail).toContain('global/制度.docx.md:1')
+    debug.mockRestore()
+    vi.unstubAllGlobals()
+    resetCitationTiming()
+  })
+
+  it('still resolves every line when the citations fall in different chunks', async () => {
+    const { fetchResolve } = await import('../src/client/citation-view.ts')
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(url)
+      if (url === '/knowledge-base/api/read') return new Response(JSON.stringify({ kind: 'text', content: SOURCE }), { status: 200 })
+      return new Response(JSON.stringify({ ...CHUNK, lineStart: 1, lineEnd: 1, chunkOrdinal: 1 }), { status: 200 })
+    }))
+
+    await fetchResolve('global/制度.docx.md', 1)
+    await fetchResolve('global/制度.docx.md', 2)
+
+    expect(calls.filter(url => url === '/knowledge-base/api/resolve')).toHaveLength(2)
+    vi.unstubAllGlobals()
+  })
+})
