@@ -53,6 +53,10 @@ describe('knowledge-base citation tokens', () => {
     expect(safeKbPath('/workspace/kb/global/../a.md')).toBe('/workspace/kb/a.md')
     expect(safeKbPath('../../etc/passwd')).toBeUndefined()
     expect(safeKbPath('/workspace/kb-other/a.md')).toBeUndefined()
+    expect(safeKbPath('交投相关资产备份_20261106.zip')).toBeUndefined()
+    expect(safeKbPath('docs/a.md')).toBeUndefined()
+    expect(safeKbPath('global/a.md')).toBe('/workspace/kb/global/a.md')
+    expect(safeKbPath('department/order/a.pdf')).toBe('/workspace/kb/department/order/a.pdf')
   })
 
   it('opens through the injected opener with all viewer options', () => {

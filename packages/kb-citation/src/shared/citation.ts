@@ -173,8 +173,14 @@ export function resolveKbPath(raw: string, mount: string = DEFAULT_KB_MOUNT): st
     relative = relative.slice('/kb/'.length)
   } else if (relative.startsWith('kb/')) {
     relative = relative.slice('kb/'.length)
+  } else if (/^(?:global|department|personal|rag-eval-fixtures)\//.test(relative)) {
+    // Explicit backend-relative KB prefixes stay supported.
   } else if (relative.startsWith('/')) {
     // A foreign absolute path must not be silently folded into the KB view.
+    return undefined
+  } else {
+    // A bare name or arbitrary relative path is not a KB citation. Folding it into
+    // /workspace/kb silently turns ordinary Markdown file links into wrong KB paths.
     return undefined
   }
   const parts: string[] = []
