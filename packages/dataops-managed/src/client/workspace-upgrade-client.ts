@@ -1,7 +1,7 @@
 /** Same-origin calls for the workspace image upgrade banner. */
 
 /** Route the plugin's Host half serves for upgrade detection and start. */
-export const WORKSPACE_UPGRADE_PATH = '/integrations/dataops/workspace-upgrade'
+export const WORKSPACE_UPGRADE_PATH = 'integrations/dataops/workspace-upgrade'
 
 /** A DSH session that will receive "继续" after the restart. */
 export interface WorkspaceUpgradeSession {

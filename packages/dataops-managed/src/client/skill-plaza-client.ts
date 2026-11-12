@@ -4,7 +4,7 @@ import type { ReviewStatus, ResourceVisibility } from './review-types.ts'
 import { normalizeReviewStatus, normalizeVisibility } from './review-types.ts'
 
 /** Route the plugin's Host half serves for the plaza. */
-export const SKILL_PLAZA_PATH = '/integrations/dataops/skill-plaza'
+export const SKILL_PLAZA_PATH = 'integrations/dataops/skill-plaza'
 
 /** One plaza entry as the section reads it. */
 export interface PlazaSkill {

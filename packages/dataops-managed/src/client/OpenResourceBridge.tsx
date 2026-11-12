@@ -37,7 +37,7 @@ interface OpenResourceEvent {
 
 /** Tab id shared with the client registration. */
 export const RESOURCE_TAB_TYPE = 'dataops-resources'
-const EVENTS_PATH = '/integrations/dataops/open-resource/events'
+const EVENTS_PATH = 'integrations/dataops/open-resource/events'
 
 const isOpenResourceEvent = (value: unknown): value is OpenResourceEvent => {
   if (typeof value !== 'object' || value === null) return false

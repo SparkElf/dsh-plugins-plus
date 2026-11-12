@@ -159,7 +159,7 @@ export function DataOpsResourcesTab({ tab, scope, insertResourceReference }: Dat
     let live = true
     const load = async (): Promise<void> => {
       try {
-        const response = await fetch('/integrations/dataops/resource-tab/config', { cache: 'no-store' })
+        const response = await fetch('integrations/dataops/resource-tab/config', { cache: 'no-store' })
         if (!response.ok) throw new Error('HTTP ' + response.status.toString())
         const body = await response.json() as ResourceTabConfig
         if (!live) return

@@ -16,17 +16,17 @@ import type {
 } from './review-types.ts'
 
 /** Caller identity and review capability. */
-export const REVIEW_CONTEXT_PATH = '/integrations/dataops/review-context'
+export const REVIEW_CONTEXT_PATH = 'integrations/dataops/review-context'
 /** Notification list and read receipts. */
-export const NOTIFICATIONS_PATH = '/integrations/dataops/review-notifications'
+export const NOTIFICATIONS_PATH = 'integrations/dataops/review-notifications'
 /** AI scan and the human decision. */
-export const REVIEW_ACTION_PATH = '/integrations/dataops/review'
+export const REVIEW_ACTION_PATH = 'integrations/dataops/review'
 /** Role matrix, members, departments, and resource scopes. */
-export const RBAC_PATH = '/integrations/dataops/rbac'
+export const RBAC_PATH = 'integrations/dataops/rbac'
 /** The three plaza-review switches in the DataOps settings panel. */
-export const REVIEW_SETTINGS_PATH = '/integrations/dataops/review-settings'
+export const REVIEW_SETTINGS_PATH = 'integrations/dataops/review-settings'
 /** Department CRUD bridge (task-67). */
-export const DEPARTMENTS_PATH = '/integrations/dataops/departments'
+export const DEPARTMENTS_PATH = 'integrations/dataops/departments'
 
 /** One permission point in the role matrix. */
 export interface PermissionPoint {

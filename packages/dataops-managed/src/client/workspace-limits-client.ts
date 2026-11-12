@@ -1,7 +1,7 @@
 /** Same-origin workspace-limits calls from the DataOps settings surface. */
 
 /** Route the plugin's Host half serves for workspace limits. */
-export const WORKSPACE_LIMITS_PATH = '/integrations/dataops/workspace-limits'
+export const WORKSPACE_LIMITS_PATH = 'integrations/dataops/workspace-limits'
 
 /** The two byte ceilings, as the panel edits them. */
 export interface WorkspaceLimits {

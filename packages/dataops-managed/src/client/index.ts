@@ -44,7 +44,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 const NS = 'settings.dataops-managed'
 const AUTH_UPDATED_MESSAGE = 'dataops-auth-updated'
-const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
+const MANAGED_AUTH_PATH = 'integrations/dataops/managed-auth'
 
 /** Sidebar entry and main page id for the permission centre. */
 const PERMISSION_PANEL_ID = 'dataops-permissions'

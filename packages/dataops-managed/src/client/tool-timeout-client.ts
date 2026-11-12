@@ -1,7 +1,7 @@
 /** Same-origin tool-call timeout calls from the DataOps settings surface. */
 
 /** Route the plugin's Host half serves for the tool-call timeout. */
-export const TOOL_TIMEOUT_PATH = '/integrations/dataops/tool-timeout'
+export const TOOL_TIMEOUT_PATH = 'integrations/dataops/tool-timeout'
 
 /** The two ends a timeout may take, in seconds, matching what the Host enforces. */
 export const TOOL_TIMEOUT_MIN_SECONDS = 1

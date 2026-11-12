@@ -1,7 +1,7 @@
 /** Same-origin model-sync calls from the DataOps settings surface. */
 
 /** Route the plugin's Host half serves for model sharing. */
-export const MODEL_SYNC_PATH = '/integrations/dataops/model-sync'
+export const MODEL_SYNC_PATH = 'integrations/dataops/model-sync'
 
 /** One model this workspace holds, and whether it is offered to other users. */
 export interface ModelSyncModel {
