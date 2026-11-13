@@ -346,7 +346,10 @@ describe('kb-summarize skill registration', () => {
   it('lists both bundled candidates and reads each SKILL.md', async () => {
     const provider = knowledgeBaseSkillProvider()
     const candidates = await provider.list({})
-    expect(candidates.map(candidate => candidate.name).sort()).toEqual([KB_SUMMARIZE_SKILL_NAME, KB_VECTORIZE_SKILL_NAME, KNOWLEDGE_SKILL_NAME].sort())
+    expect(candidates.map(candidate => candidate.name).sort()).toEqual([
+      KB_SUMMARIZE_SKILL_NAME, KB_VECTORIZE_SKILL_NAME, KNOWLEDGE_SKILL_NAME,
+      'memory-guardian', 'memory-extract', 'memory-sop-evaluate', 'knowledge-graph',
+    ].sort())
     const summarize = candidates.find(candidate => candidate.name === KB_SUMMARIZE_SKILL_NAME)
     expect(summarize).toMatchObject({ source: 'bundled', provider: 'dsh-knowledge-base' })
     const loaded = await provider.get(summarize!, {})

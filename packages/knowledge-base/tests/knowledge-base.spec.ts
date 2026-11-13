@@ -383,6 +383,15 @@ describe('host plugin', () => {
       'kb_review_list',
       'kb_sync',
       'kb_vectorize',
+      'kg_add',
+      'kg_del',
+      'kg_get',
+      'kg_set',
+      'memory_context',
+      'memory_guardian_run',
+      'memory_guardian_send',
+      'memory_promote_sop',
+      'memory_record',
       'workflow_list',
       'workflow_review_decide',
       'workflow_review_list',
@@ -428,7 +437,7 @@ describe('host plugin', () => {
     apply(ctx as never, { ...CONFIG, baseUrl: '' })
     // No backend to ask: the local owner holds every key, so the surface is already
     // complete when `apply` returns rather than waiting on a microtask.
-    expect(tools).toHaveLength(27)
+    expect(tools).toHaveLength(36)
     expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining([
       'kb_search', 'kb_file_write', 'kb_config_get', 'workflow_publish', 'workflow_review_decide',
     ]))
@@ -662,7 +671,7 @@ describe('host plugin', () => {
     })
     apply(ctx as never, CONFIG)
     await knowledgeBaseToolDisclosure(ctx as never)?.syncToolDisclosure()
-    expect(tools).toHaveLength(27)
+    expect(tools).toHaveLength(36)
     // 18 are this plugin's kb_* tools; DataOps `kb_read` is external.
     expect(tools.filter(tool => tool.name.startsWith('kb_'))).toHaveLength(20)
     for (const removed of ['kb_file_read', 'kb_file_search', 'kb_index', 'kb_bucket_list', 'kb_file_list', 'kb_status']) {
@@ -2175,22 +2184,18 @@ describe('management page layout', () => {
     expect(source).toMatch(/catch \{/u)
   })
 
-  it('orders the menu home, permissions, trash, audit, settings', async () => {
+  it('orders the menu home, memory, trash, audit, settings', async () => {
     const source = await read('KnowledgePanel.tsx')
     const order = [...source.matchAll(/key: '(menu\.[a-z]+)'/gu)].map(m => m[1])
     expect(order).toEqual([
       'menu.home',
-      'menu.permissions',
+      'menu.memory',
       'menu.trash',
       'menu.audit',
       'menu.settings',
     ])
-    // Permissions is still gated on the Host's answer, so the rows above are the
-    // maximum and the fail-closed condition is unchanged. Audit sits among the
-    // content surfaces rather than last, because a review queue is a worklist an
-    // operator opens to get through, not configuration; settings stays last for
-    // exactly that reason.
-    expect(source).toMatch(/canManageGrants \? \[\{ kind: 'permissions'/u)
+    // Memory sits beside the content surfaces; settings stays last because it is
+    // configuration rather than a worklist.
   })
 
   it('hides the whole pinned band when nothing is pinned', async () => {

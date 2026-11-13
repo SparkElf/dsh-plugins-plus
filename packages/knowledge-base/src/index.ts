@@ -22,8 +22,10 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -76,15 +78,38 @@ import {
   type KnowledgeSshView,
   type KnowledgeStatus,
 } from './protocol.ts'
-import { localizedScopeForPath, resolveScopeAlias, type ScopeLocale } from './scopeAliases.ts'
+import { localizedScopeForPath, resolveScopeAlias, scopeFromAlias, type ScopeLocale } from './scopeAliases.ts'
 import { scanKnowledgeGraphs, type KnowledgeGraphScopeRoot } from './graph.ts'
+import { listGraphs, loadGraph, type LoadedGraph } from './graphModel.ts'
+import {
+  graphScopeBase,
+  mergeProjectedGraphs,
+  projectGraphJsonScope,
+  type ProjectedGraphJsonNode,
+} from './graphJsonProjection.ts'
 import { GRAPH_CANVAS_HTML } from './graphCanvas.ts'
 import {
   KNOWLEDGE_GRAPH_FOLDER,
   knowledgeGraphsOf,
   type KnowledgeGraphCaller,
+  type KnowledgeGraphScopeKey,
 } from './graphTypes.ts'
 import { createKnowledgeGraphTools, type KnowledgeGraphToolHost } from './graphTools.ts'
+import { applySummaryWriteback, summarySnapshotPathFor } from './summaryWriteback.ts'
+import { createMemoryTools, type MemoryToolHost } from './memoryTools.ts'
+import { ensurePersonalMemoryGraph } from './memoryGraphBootstrap.ts'
+import { MemoryStore } from './memoryStore.ts'
+import { MemorySettingsStore } from './memorySettings.ts'
+import { handleMemoryRoute } from './memoryRoutes.ts'
+import { MemoryGraphWriter, PERSONAL_MEMORY_FOLDER } from './memoryGraphWriter.ts'
+import {
+  GuardianSessionStore,
+  type GuardianAgentRef,
+  type GuardianSessionHost,
+} from './guardianSession.ts'
+import { createMemoryGuardianTools, type MemoryGuardianToolHost } from './memoryGuardianTool.ts'
+import { installMemoryTriggers } from './memoryTriggers.ts'
+import { createMemoryRecordTools, type MemoryRecordToolHost } from './memoryRecordTool.ts'
 import {
   appendAuditEntry,
   isContainedRelPath,
@@ -219,8 +244,9 @@ export const name = 'dsh-knowledge-base'
  * reaches the next request without a restart. `webServer` serves the
  * same-origin routes the Settings panel reads. The SSH transport is reached
  * over HTTP at the ssh-manager's own route, so it is not injected here.
+ * `systemPrompt` is the runtime memory instruction section's registry.
  */
-export const inject = ['credentials', 'webServer', 'tools']
+export const inject = ['credentials', 'webServer', 'tools', 'systemPrompt', 'agentLoop', 'agents', 'sessionTitle', 'agentDefaultModel']
 
 /** Plugin configuration. */
 export interface Config {
@@ -263,6 +289,12 @@ export interface Config {
   viewRoot: string
   /** Local deployments: authoritative storage base, default `~/kb`. */
   storageRoot: string
+  /** Where personal memory bindings live; empty means `<actualRoot>/.memory/users`. */
+  memoryUsersRoot: string
+  /** Where promoted skills are written; empty means `$DSH_HOME/skills` (or `~/.dsh/skills`). */
+  memorySkillsRoot: string
+  /** Idle minutes before a normal session notifies the memory guardian. */
+  memoryIdleMinutes: number
   /** Comma-separated export spec of clients allowed to mount the NFS export. */
   permitted: string
   /** Host serving the export, as an address or `address:/path` pseudo root. */
@@ -375,6 +407,13 @@ export const Config: z<Config> = z.object({
   // Local deployments keep the authoritative copy here. Team deployments keep
   // using actualRoot/viewRoot; this field is ignored for them.
   storageRoot: z.string().default('~/kb'),
+  // Personal bindings are local state, never Git content; the default keeps them
+  // under the knowledge root's hidden `.memory/` directory.
+  memoryUsersRoot: z.string().default(''),
+  // Promoted SOPs become DSH skills. Empty keeps the standard home: $DSH_HOME/skills.
+  memorySkillsRoot: z.string().default(''),
+  // The idle debounce is a product default; operators may tune it.
+  memoryIdleMinutes: z.number().default(30),
   permitted: z.string().default('*'),
     // Host serving the export. The mount step builds `address:/` from it, because `fsid=0`
     // in the export makes the share the NFSv4 pseudo root: clients mount the server root
@@ -2310,6 +2349,56 @@ export async function actualRelPathForView(
   return relPath
 }
 
+/**
+ * The canonical VIEW path a model-facing file-tool path names.
+ *
+ * The `kb_file_*` tools speak view coordinates (`global/…`, `department/…`,
+ * `personal/…` or a bare path). A bare path has no bucket, and the old code left
+ * it untouched: `createKnowledgeEntry` then wrote it at the authoritative top
+ * level, which the view renders as `global/…` because {@link bucketOf} treats an
+ * unknown head as global. That is how a personal memory write silently became a
+ * global document.
+ *
+ * On a team deployment a bare path belongs to the caller's PERSONAL bucket — the
+ * only bucket one caller owns — so it is spelled `personal/<path>`. Explicit
+ * scope spellings, including the localized aliases, are already canonical after
+ * {@link resolveScopeAlias} and are returned unchanged. A local deployment keeps
+ * the legacy flat tree, where there are no buckets, so nothing is prefixed.
+ *
+ * @param relPath - model-supplied path, already validated/alias-resolved or not.
+ * @param team - `isTeamDeployment(config)`; false keeps the flat local layout.
+ */
+export function toolScopedViewPath(relPath: string, team: boolean): string {
+  const canonical = resolveScopeAlias(relPath)
+  if (!team || canonical === '') return canonical
+  const head = canonical.split('/')[0] ?? ''
+  return scopeFromAlias(head) === undefined ? `personal/${canonical}` : canonical
+}
+
+/**
+ * The AUTHORITATIVE path a model-facing file-tool path names.
+ *
+ * A view drops the personal owner segment (`personal/note.md`), but the actual
+ * tree keeps it (`personal/<uid>/note.md`). Writes, overwrites and existence
+ * checks must use this form; reads/listings stay in view coordinates and use the
+ * view root. Global and department paths are unchanged: their view and actual
+ * spellings are already identical (or handled by their own layout rules).
+ *
+ * A path that already carries the caller's own id is returned untouched, so the
+ * resolver is idempotent and graph tools (which pass actual paths) are safe.
+ *
+ * @param relPath - model-supplied path (view or already-actual).
+ * @param userId - the caller whose personal tree owns a bare/personal path.
+ * @param team - `isTeamDeployment(config)`; false keeps the flat local layout.
+ */
+export function toolScopedActualPath(relPath: string, userId: string, team: boolean): string {
+  const viewPath = toolScopedViewPath(relPath, team)
+  if (!team || viewPath === '' || viewPath === 'personal' || !viewPath.startsWith('personal/')) return viewPath
+  const rest = viewPath.slice('personal/'.length)
+  if (rest === userId || rest.startsWith(`${userId}/`)) return viewPath
+  return `personal/${userId}/${rest}`
+}
+
 /** The caller's usable department chain, falling back to the leaf code. */
 function callerDepartmentCodes(caller: KnowledgeCaller): readonly string[] {
   if (caller.departmentPathCodes !== undefined && caller.departmentPathCodes.length > 0) {
@@ -2336,6 +2425,83 @@ function callerDepartmentCodes(caller: KnowledgeCaller): readonly string[] {
  * the wrong one made every department document link point at a folder the view never
  * creates. The layout is picked from what exists on disk, with a legacy flat fallback.
  */
+/**
+ * Load every `.graphs/<id>/graph.json` graph under the caller's scope roots and
+ * project it into the graph tab's domain shape.
+ *
+ * The graph route and the Host-side `kg_*` tools share this one loader so the
+ * browser and the tools cannot disagree about which graphs exist. A graph folder
+ * the Host denies is skipped before its manifest is read: a denied name is still
+ * a disclosure. An absent `.graphs/` is normal, not an error.
+ */
+interface GraphJsonScopeSet {
+  root: KnowledgeGraphScopeRoot
+  graphs: LoadedGraph[]
+}
+
+/**
+ * Load every `.graphs/<id>/graph.json` graph under the caller's scope roots.
+ *
+ * One loader serves the graph tab, the `kg_*` tools and the memory runtime, so
+ * the three cannot disagree about which graphs exist. A graph folder the Host
+ * denies is skipped before its manifest is read; an absent `.graphs/` is normal.
+ */
+async function loadGraphJsonScopeSets(
+  host: Context,
+  config: Config,
+  roots: readonly KnowledgeGraphScopeRoot[],
+  personalUserId?: string,
+): Promise<GraphJsonScopeSet[]> {
+  const sets: GraphJsonScopeSet[] = []
+  // `root.actualPath` is relative to the knowledge root (that is what the
+  // scanner reports and what the browser must never see); the loader needs the
+  // absolute scope root, and the permission check needs the relative path.
+  const actualRoot = localConfig(config).actualRoot
+  for (const root of roots) {
+    const actualRelBase = graphScopeBase(root.actualPath)
+    const loadRoot = join(actualRoot, actualRelBase)
+    if (root.key === 'personal' && personalUserId !== undefined) {
+      // The graph tab is a catalogue of manifests; a user who never subscribed
+      // has no personal graph, which reads as a missing feature. Create the
+      // empty private manifest once so the tree always has a memory home.
+      await ensurePersonalMemoryGraph({ scopeRoot: loadRoot, userId: personalUserId }).catch(() => undefined)
+    }
+    try {
+      const summaries = await listGraphs(loadRoot)
+      const graphs: LoadedGraph[] = []
+      for (const summary of summaries) {
+        if (!await canReadPath(host, config, [actualRelBase, '.graphs', summary.id].join('/'))) continue
+        graphs.push(await loadGraph(loadRoot, summary.id))
+      }
+      if (graphs.length > 0) sets.push({ root, graphs })
+    } catch {
+      // No `.graphs/` under this scope (or an unreadable manifest) is not an
+      // error: the legacy tree still answers.
+    }
+  }
+  return sets
+}
+
+async function projectGraphJsonScopes(
+  host: Context,
+  config: Config,
+  roots: readonly KnowledgeGraphScopeRoot[],
+  personalUserId?: string,
+): Promise<Partial<Record<KnowledgeGraphScopeKey, ProjectedGraphJsonNode[]>>> {
+  const projectedByScope: Partial<Record<KnowledgeGraphScopeKey, ProjectedGraphJsonNode[]>> = {}
+  for (const { root, graphs } of await loadGraphJsonScopeSets(host, config, roots, personalUserId)) {
+    projectedByScope[root.key] = projectGraphJsonScope({
+      key: root.key,
+      viewBase: graphScopeBase(root.viewPath),
+      actualBase: graphScopeBase(root.actualPath),
+      groupKey: root.groupKey,
+      groupLabel: root.groupLabel,
+      graphs,
+    })
+  }
+  return projectedByScope
+}
+
 export async function knowledgeGraphScopeRoots(
   host: Context,
   config: Config,
@@ -2661,6 +2827,11 @@ export function permissionForKbRoute(method: string): string | undefined {
   if (method === 'list' || method === 'read' || method === 'search' || method === 'graph') return 'kb:file:read'
   if (method === 'create' || method === 'edit' || method === 'move' || method === 'upload' || method === 'rename') return 'kb:file:write'
   if (method === 'trash' || method === 'trash.remove' || method === 'trash.restore') return 'kb:file:delete'
+  // Memory management is a product surface over the caller's own personal tree:
+  // reading the page needs read, correcting needs write, forgetting needs delete.
+  if (method === 'memory.list' || method === 'memory.get' || method === 'memory.settings') return 'kb:file:read'
+  if (method === 'memory.update' || method === 'memory.set-enabled') return 'kb:file:write'
+  if (method === 'memory.forget') return 'kb:file:delete'
   if (method === 'index' || method === 'extract.retry') return 'kb:file:extract'
   if (method === 'index.status') return 'kb:file:read'
   if (method === 'audit.list') return 'kb:audit:read'
@@ -3075,6 +3246,31 @@ export function knowledgeGraphSkillPath(): string {
   return join(moduleDirectory, '..', 'skills', KNOWLEDGE_GRAPH_SKILL_NAME, 'SKILL.md')
 }
 
+/** The guardian's own operating skill. */
+export const MEMORY_GUARDIAN_SKILL_NAME = 'memory-guardian'
+/** The extraction subagent's skill. */
+export const MEMORY_EXTRACT_SKILL_NAME = 'memory-extract'
+/** The SOP evaluation subagent's skill. */
+export const MEMORY_SOP_EVALUATE_SKILL_NAME = 'memory-sop-evaluate'
+
+/** Where the bundled `memory-guardian` skill lives. */
+export function memoryGuardianSkillPath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
+  return join(moduleDirectory, '..', 'skills', MEMORY_GUARDIAN_SKILL_NAME, 'SKILL.md')
+}
+
+/** Where the bundled `memory-extract` skill lives. */
+export function memoryExtractSkillPath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
+  return join(moduleDirectory, '..', 'skills', MEMORY_EXTRACT_SKILL_NAME, 'SKILL.md')
+}
+
+/** Where the bundled `memory-sop-evaluate` skill lives. */
+export function memorySopEvaluateSkillPath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
+  return join(moduleDirectory, '..', 'skills', MEMORY_SOP_EVALUATE_SKILL_NAME, 'SKILL.md')
+}
+
 /**
  * Where this package's tutorial document lives, from either build layout.
  *
@@ -3171,6 +3367,39 @@ export function knowledgeBaseSkillProvider(): {
       resourceBase: { kind: 'directory', path: dirname(knowledgeGraphSkillPath()) },
       rank: 36,
       locator: knowledgeGraphSkillPath(),
+    },
+    {
+      name: MEMORY_GUARDIAN_SKILL_NAME,
+      description: '记忆守护会话的唯一写入者准则：串行处理空闲、压缩与 dream 消息，派抽取和 SOP 评估子代理，维护日文档与偏好、踩坑、事实、SOP，评估并晋升 SOP，处理隐私与 dream 快照。',
+      invocation: KNOWLEDGE_SKILL_INVOCATION,
+      source: 'bundled',
+      provider: KNOWLEDGE_SKILL_PROVIDER,
+      path: memoryGuardianSkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(memoryGuardianSkillPath()) },
+      rank: 670,
+      locator: memoryGuardianSkillPath(),
+    },
+    {
+      name: MEMORY_EXTRACT_SKILL_NAME,
+      description: '记忆抽取子代理的工作准则：读一次会话的新增消息和工具轨迹，只提取可长期复用的偏好、踩坑、情景、事实与 SOP 候选，给出证据并避开秘密与闲聊。',
+      invocation: KNOWLEDGE_SKILL_INVOCATION,
+      source: 'bundled',
+      provider: KNOWLEDGE_SKILL_PROVIDER,
+      path: memoryExtractSkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(memoryExtractSkillPath()) },
+      rank: 680,
+      locator: memoryExtractSkillPath(),
+    },
+    {
+      name: MEMORY_SOP_EVALUATE_SKILL_NAME,
+      description: 'SOP 评估子代理的工作准则：对照活跃 SOP 与当天会话轨迹，判断是否被使用、是否有效、证据是什么，给出修订、晋升、保留或淘汰建议。',
+      invocation: KNOWLEDGE_SKILL_INVOCATION,
+      source: 'bundled',
+      provider: KNOWLEDGE_SKILL_PROVIDER,
+      path: memorySopEvaluateSkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(memorySopEvaluateSkillPath()) },
+      rank: 690,
+      locator: memorySopEvaluateSkillPath(),
     },
   ]
   return {
@@ -3614,6 +3843,22 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               caller: graphCaller,
               canRead: relPath => canReadPath(host, config, relPath),
             })
+            // `.graphs/<id>/graph.json` is the current model; the folder tree above is
+            // the legacy layout. Both are scanned so a half-migrated scope still
+            // browses, but only the new model is writable. A graph folder the Host
+            // denies is dropped before its manifest is read, exactly like the legacy
+            // scanner: a denied name is still a disclosure.
+            const projectedByScope = await projectGraphJsonScopes(host, config, roots, caller.userId)
+            for (const scope of graphTree.scopes) {
+              for (const group of scope.groups) {
+                for (const graph of group.graphs) {
+                  const tagged = graph as typeof graph & { format?: 'legacy' | 'graph-json'; readOnly?: boolean }
+                  tagged.format ??= 'legacy'
+                  tagged.readOnly = true
+                }
+              }
+            }
+            mergeProjectedGraphs(graphTree, projectedByScope)
             // The scanner keeps each graph's authoritative path for the Host-side
             // tools. It must not cross into the browser: on a personal scope that
             // path contains the caller's uid.
@@ -5973,6 +6218,31 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const found = [...runs].reverse().find(run => run.stepId === jobId)
             return writeJson(res, 200, found ?? { error: 'no such run' })
           }
+          case 'memory.list':
+          case 'memory.get':
+          case 'memory.update':
+          case 'memory.forget':
+          case 'memory.settings':
+          case 'memory.set-enabled': {
+            // The memory page manages ONLY the caller's own personal tree. Identity
+            // comes from the request (never the body); the stores are built from the
+            // same `<actualRoot>/personal/<userId>` root the guardian writes.
+            const caller = await fetchCaller(host, config)
+            if (!isSafeUserId(caller.userId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id; memory is scoped to the authenticated user' })
+            }
+            const body = await readJsonBody(req)
+            const personalScope = personalScopeRootFor(caller.userId)
+            const result = await handleMemoryRoute({
+              method,
+              body,
+              caller: { userId: caller.userId, ...(caller.label === undefined ? {} : { label: caller.label }) },
+              store: new MemoryStore(join(personalScope, PERSONAL_MEMORY_FOLDER)),
+              settings: new MemorySettingsStore(memoryUsersRoot),
+              graphWriter: new MemoryGraphWriter({ scopeRoot: personalScope }),
+            })
+            return writeJson(res, result.status, result.body)
+          }
           default:
             return writeJson(res, 404, { error: `unknown knowledge-base method: ${method}` })
         }
@@ -6397,6 +6667,21 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       indexPath: knowledgeIndexPath(),
       autoGenerateSummaries: config.outline?.autoGenerate === true,
     })
+    // Summaries follow the same incremental signal the index just produced: only
+    // changed/added/removed documents are reconsidered, and a model-authored
+    // (`llm`) summary is never overwritten. A summary failure must not fail the
+    // index pass, so it is logged and retried on the next change.
+    if (stats.indexed > 0 || stats.removed > 0 || !existsSync(summarySnapshotPathFor(stats.indexPath))) {
+      try {
+        await applySummaryWriteback({
+          root: localConfig(config).actualRoot,
+          indexPath: stats.indexPath,
+        })
+      } catch (error) {
+        host.logger?.warn?.('knowledge-base: incremental summary write-back failed: '
+          + (error instanceof Error ? error.message : String(error)))
+      }
+    }
     lastIndexStats = stats
     lastIndexSyncAt = Date.now()
     if (scheduleAuto) scheduleVectorAutoIndex()
@@ -6446,11 +6731,37 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     }
   }
 
+  /**
+   * Resolve one model tool path for the two coordinate systems it has to cross.
+   *
+   * `toolViewPath` stays in the caller's view (what the tree shows and what
+   * `mountPoint` contains). `toolActualPath` gains the personal owner segment for
+   * writes/overwrites/permission checks, which live under `actualRoot`. Both are
+   * idempotent for paths that already carry a scope or an owner id, so graph
+   * tools that pass authoritative paths keep working unchanged.
+   */
+  const toolViewPath = (relPath: string): string => toolScopedViewPath(relPath, isTeamDeployment(config))
+  const toolActualPath = async (relPath: string, caller?: { userId: string }): Promise<string> => {
+    const team = isTeamDeployment(config)
+    const viewPath = toolScopedViewPath(relPath, team)
+    // Global/department paths and local trees need no owner segment, so they never
+    // pay for a caller lookup.
+    if (!team || viewPath === '' || viewPath === 'personal' || !viewPath.startsWith('personal/')) return viewPath
+    const rest = viewPath.slice('personal/'.length)
+    if (caller !== undefined && (rest === caller.userId || rest.startsWith(`${caller.userId}/`))) return viewPath
+    const who = caller ?? await fetchCaller(host, config)
+    if (!isSafeUserId(who.userId)) {
+      throw new KnowledgeToolError('forbidden', 'unsafe caller id; cannot resolve a personal path')
+    }
+    return toolScopedActualPath(viewPath, who.userId, true)
+  }
+
   const knowledgeToolHost: KnowledgeFileToolHost = {
     vectorize: async input => {
       try {
         await syncKnowledgeIndex(false, false)
-        return await vectorizeTargets(input) as unknown as Record<string, unknown>
+        const scoped = input.path === undefined ? input : { ...input, path: await toolActualPath(input.path) }
+        return await vectorizeTargets(scoped) as unknown as Record<string, unknown>
       } catch (error) {
         // The explicit tool reports a disabled/misconfigured vector feature as a
         // structured failure; it never silently runs a pure-FTS pass.
@@ -6661,11 +6972,15 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       const caller = await fetchCaller(host, config)
       return { userId: caller.userId, ...(caller.label === undefined ? {} : { label: caller.label }) }
     },
-    canRead: relPath => canReadPath(host, config, relPath),
-    canWrite: relPath => canWritePath(host, config, relPath),
+    // A bare path is the caller's personal tree on a team deployment; the local
+    // layout has no buckets, so it keeps the legacy flat spelling.
+    defaultScope: () => (isTeamDeployment(config) ? 'personal' : undefined),
+    canRead: relPath => toolActualPath(relPath).then(scoped => canReadPath(host, config, scoped)),
+    canWrite: relPath => toolActualPath(relPath).then(scoped => canWritePath(host, config, scoped)),
     list: async (relPath, caller) => {
       const root = localConfig(config).mountPoint
-      const target = relPath === '' ? root : join(root, relPath)
+      const scoped = toolViewPath(relPath)
+      const target = scoped === '' ? root : join(root, scoped)
       const entries = await listDirectoryWithPermissions(host, config, root, target, caller.userId)
       const present = new Set(entries.map(entry => entry.name))
       return entries.map((entry): KnowledgeFileEntry => {
@@ -6686,27 +7001,34 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         ? hits
         : hits.map((hit): KnowledgeFileHit => ({ ...hit, relPath: scope + '/' + hit.relPath }))
     },
-    readAuthorized: relPath => readAuthorized(host, config, relPath),
+    readAuthorized: relPath => readAuthorized(host, config, toolViewPath(relPath)),
     statEntry: async (relPath) => {
-      relPath = resolveScopeAlias(relPath)
+      const viewPath = toolViewPath(relPath)
+      const actualPath = await toolActualPath(viewPath)
       const plan = localConfig(config)
-      for (const root of [plan.mountPoint, plan.actualRoot]) {
+      // A personal document exists in the view as `personal/<inner>` and in the
+      // actual tree as `personal/<owner>/<inner>`; both are legitimate answers.
+      const candidates: Array<{ root: string; relPath: string }> = [{ root: plan.mountPoint, relPath: viewPath }]
+      if (actualPath !== viewPath) candidates.push({ root: plan.actualRoot, relPath: actualPath })
+      candidates.push({ root: plan.actualRoot, relPath: viewPath })
+      for (const candidate of candidates) {
         try {
-          const info = await stat(join(root, relPath))
+          const info = await stat(join(candidate.root, candidate.relPath))
           if (info.isDirectory()) return { kind: 'directory' }
           if (info.isFile()) return { kind: 'file', size: info.size }
         } catch {
-          // Try the next root: a personal deployment may keep bytes outside the view.
+          // Try the next spelling: a personal deployment may keep bytes outside the view.
         }
       }
       return undefined
     },
-    createEntry: (relPath, options) => createKnowledgeEntry(config, relPath, options),
+    createEntry: async (relPath, options) => createKnowledgeEntry(config, await toolActualPath(relPath), options),
     overwriteFile: async (relPath, content) => {
-      if (!isContainedRelPath(relPath)) {
+      const scoped = await toolActualPath(relPath)
+      if (!isContainedRelPath(scoped)) {
         throw new KnowledgeToolError('escapes-knowledge-root', 'the path leaves the knowledge root', relPath)
       }
-      const full = join(localConfig(config).actualRoot, relPath)
+      const full = join(localConfig(config).actualRoot, scoped)
       const info = await stat(full)
       if (!info.isFile()) {
         throw new KnowledgeToolError('not-a-file', 'not a regular file', relPath)
@@ -6714,14 +7036,14 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       // In-place write: a write-temp-then-rename would replace the inode and leave the
       // caller's view hardlink pointing at the old bytes (the edit route explains this).
       await writeFile(full, content, 'utf8')
-      markInternalMutation(relPath)
+      markInternalMutation(scoped)
     },
     moveEntry: async (from, to, caller) => {
       const plan = localConfig(config)
       return moveEntry(
         { actualRoot: plan.actualRoot, viewRoot: plan.viewRoot, userId: caller.userId },
-        from,
-        to,
+        await toolActualPath(from, caller),
+        to === '' ? '' : await toolActualPath(to, caller),
       )
     },
     deleteToTrash: async (caller, relPath, kind) => {
@@ -6732,12 +7054,17 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         throw new KnowledgeToolError('write-failed', 'the trash record is unreadable: ' + existing.reason, relPath)
       }
       const entries = existing.kind === 'ready' ? existing.entries : []
+      // Tombstones store the AUTHORITATIVE path, which is what `syncView` maps to
+      // its view spelling when deciding what to hide. A bare personal path must
+      // therefore gain the owner segment here; storing it as a view path would be
+      // dropped one level short by `bucketOf`.
+      const tombstonePath = await toolActualPath(relPath, caller)
       const next = addTombstone(entries, {
-        relPath,
+        relPath: tombstonePath,
         kind,
         removedBy: caller.label ?? caller.userId,
         removedAt: new Date().toISOString(),
-        originalPath: relPath,
+        originalPath: tombstonePath,
       })
       await writeTrash(viewDir, next)
     },
@@ -6753,34 +7080,35 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       const plan = localConfig(config)
       await parkPendingWrite(plan.actualRoot, {
         userId: caller.userId,
-        relPath,
+        relPath: await toolActualPath(relPath, caller),
         content,
         at: new Date().toISOString(),
       })
     },
     enqueueExtraction: async (relPath, caller) => {
       const plan = localConfig(config)
-      if (isAlreadyMarkdown(relPath)) return { outcome: 'already-markdown' }
-      if (!isExtractable(relPath)) return { outcome: 'unsupported' }
+      const scopedRelPath = toolViewPath(relPath)
+      if (isAlreadyMarkdown(scopedRelPath)) return { outcome: 'already-markdown' }
+      if (!isExtractable(scopedRelPath)) return { outcome: 'unsupported' }
       // The tool receives a view-relative path; the source lives under actualRoot
       // with a different personal/department shape. Resolve by the view hardlink,
       // never by joining actualRoot to the view path.
-      const actualRelPath = await actualRelPathForView(host, config, relPath)
+      const actualRelPath = await actualRelPathForView(host, config, scopedRelPath)
       const source = await stat(join(plan.actualRoot, actualRelPath)).catch(() => undefined)
       if (source === undefined || !source.isFile()) {
-        throw new KnowledgeToolError('not-found', 'no such document', relPath)
+        throw new KnowledgeToolError('not-found', 'no such document', scopedRelPath)
       }
       const sibling = markdownSiblingOf(actualRelPath)
       const existing = await stat(join(plan.actualRoot, sibling)).catch(() => undefined)
       if (existing !== undefined && existing.isFile()) {
-        return { outcome: 'exists', markdown: markdownSiblingOf(relPath) }
+        return { outcome: 'exists', markdown: markdownSiblingOf(scopedRelPath) }
       }
       const settings = await readSettings(viewPathFor({
         actualRoot: plan.actualRoot,
         viewRoot: plan.viewRoot,
         userId: caller.userId,
       }))
-      return { outcome: 'queued', task: extractionQueue.enqueue(relPath, settings.mineruBaseUrl) }
+      return { outcome: 'queued', task: extractionQueue.enqueue(scopedRelPath, settings.mineruBaseUrl) }
     },
     listExtractCandidates: async (limit) => {
       const plan = localConfig(config)
@@ -7142,6 +7470,26 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       if (read.kind !== 'text') throw new KnowledgeToolError('binary', 'this document is binary', viewPath)
       return read.content
     },
+    // `.graphs/` is hidden plumbing; the view tree may not link it. This reader is
+    // rooted at the authoritative tree and applies the same path permission as
+    // `readText`, so the graph tools can read a manifest without a second policy.
+    readActual: async (relPath) => {
+      if (!isContainedRelPath(relPath)) throw new KnowledgeToolError('invalid', 'unsafe path', relPath)
+      if (!await canReadPath(host, config, relPath)) {
+        throw new KnowledgeToolError('forbidden', 'the caller may not read this path', relPath)
+      }
+      return readFile(join(localConfig(config).actualRoot, relPath), 'utf8')
+    },
+    statActual: async (relPath) => {
+      if (!isContainedRelPath(relPath)) return undefined
+      if (!await canReadPath(host, config, relPath)) return undefined
+      try {
+        const info = await stat(join(localConfig(config).actualRoot, relPath))
+        return { kind: info.isDirectory() ? 'directory' : 'file', size: info.size }
+      } catch {
+        return undefined
+      }
+    },
     listGraphs: async () => {
       const caller = await fetchCaller(host, config)
       if (!isSafeUserId(caller.userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
@@ -7158,8 +7506,183 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         },
         canRead: relPath => canReadPath(host, config, relPath),
       })
+      // The tools see the same two sources the graph tab does: legacy folders and
+      // `.graphs/<id>/graph.json`. A graph-json node carries `format` and an
+      // actualPath under `.graphs/`, which is what the tools branch on.
+      mergeProjectedGraphs(tree, await projectGraphJsonScopes(host, config, roots, caller.userId))
       return knowledgeGraphsOf(tree)
     },
+  }
+
+  // Personal bindings are local state. The default keeps them under the
+  // knowledge root's hidden `.memory/` directory, never inside a document folder
+  // and never in Git.
+  const memoryUsersRoot = (() => {
+    const configured = (config.memoryUsersRoot ?? '').trim()
+    return configured === ''
+      ? join(localConfig(config).actualRoot, '.memory', 'users')
+      : resolveStorageRoot(configured)
+  })()
+  const memorySettings = new MemorySettingsStore(memoryUsersRoot)
+  const memoryToolHost: MemoryToolHost = {
+    resolveCaller: async () => {
+      const caller = await managementHost.context()
+      const department = caller.departmentCode ?? undefined
+      const visible = [...new Set([
+        ...caller.dataScope.departmentCodes,
+        ...(department === undefined ? [] : [department]),
+      ])]
+      return {
+        userId: caller.userId,
+        isAdmin: isGlobalAdmin(caller) || caller.roleCodes.includes('DEPT_ADMIN'),
+        isSuperAdmin: isGlobalAdmin(caller),
+        ...(department === undefined ? {} : { departmentCode: department }),
+        visibleDepartmentCodes: visible,
+        manageableDepartmentCodes: [...new Set([
+          ...caller.dataScope.departmentCodes,
+          ...caller.review.departments,
+        ])],
+      }
+    },
+    usersRoot: memoryUsersRoot,
+    loadGraphs: async () => {
+      const caller = await fetchCaller(host, config)
+      if (!isSafeUserId(caller.userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
+      const roots = await knowledgeGraphScopeRoots(host, config, caller)
+      const sets = await loadGraphJsonScopeSets(host, config, roots, caller.userId)
+      return sets.flatMap(set => set.graphs)
+    },
+    canManage: async () => {
+      const caller = await managementHost.context()
+      return hasPermission(caller, 'kb:config:manage')
+    },
+    isMemoryEnabled: async viewer => memorySettings.isEnabled(viewer.userId),
+  }
+
+  const memorySkillsRoot = (() => {
+    const configured = (config.memorySkillsRoot ?? '').trim()
+    if (configured !== '') return resolveStorageRoot(configured)
+    const dshHome = (process.env.DSH_HOME ?? '').trim()
+    return join(dshHome !== '' ? dshHome : join(homedir(), '.dsh'), 'skills')
+  })()
+  const personalScopeRootFor = (userId: string): string => {
+    if (!isSafeUserId(userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
+    return join(localConfig(config).actualRoot, 'personal', userId)
+  }
+
+  // Guardian runtime: a standard-mode DSH agent (no custom preset). The state
+  // file is the identity; the title is display-only. `ctx.agentLoop` is the real
+  // AgentFactory in this release (`ctx.agents` only carries the registry).
+  interface GuardianRuntimeAgent extends GuardianAgentRef {
+    readonly id: string
+    readonly status?: 'idle' | 'running'
+    readonly session?: { readonly id?: string }
+    followup(message: unknown): void
+  }
+  interface GuardianAgentOptions {
+    provider: string
+    model: string
+    reasoningEffort?: string
+  }
+  const guardianLoop = (ctx as unknown as {
+    agentLoop?: {
+      createAgent(ownerCtx: unknown, options: {
+        sessionId: string
+        meta?: { cwd?: string }
+        agentOptions?: GuardianAgentOptions
+      }): Promise<{ agent: GuardianRuntimeAgent }>
+      resume(ownerCtx: unknown, options: {
+        resumeSessionId: string
+        agentOptions?: GuardianAgentOptions
+      }): Promise<{ agent: GuardianRuntimeAgent }>
+    }
+  }).agentLoop
+  const guardianRegistry = (ctx as unknown as {
+    agents?: { get(id: string): GuardianRuntimeAgent | undefined }
+  }).agents
+  const guardianTitles = (ctx as unknown as {
+    sessionTitle?: { rename(session: unknown, title: string): unknown }
+  }).sessionTitle
+  const guardianDefaultModel = (ctx as unknown as {
+    agentDefaultModel?: {
+      currentSelection(): { provider: string; model: string; reasoningEffort?: string }
+    }
+  }).agentDefaultModel
+  const guardianAgentOptions = ((): GuardianAgentOptions | undefined => {
+    if (guardianDefaultModel === undefined) return undefined
+    try {
+      const selected = guardianDefaultModel.currentSelection()
+      return {
+        provider: selected.provider,
+        model: selected.model,
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+      }
+    } catch {
+      return undefined
+    }
+  })()
+  const makeGuardianUserMessage = (text: string): unknown => Object.freeze({
+    id: randomUUID(),
+    role: 'user',
+    content: Object.freeze([Object.freeze({ type: 'text', text })]),
+    source: Object.freeze({ kind: 'user' }),
+  })
+  const guardianSessionHost: GuardianSessionHost = {
+    usersRoot: memoryUsersRoot,
+    cwd: process.cwd(),
+    getAgent: sessionId => guardianRegistry?.get(sessionId),
+    createAgent: async ({ sessionId, cwd, title }) => {
+      if (guardianLoop === undefined) throw new Error('the DSH agent loop is not available')
+      const handle = await guardianLoop.createAgent(ctx, {
+        sessionId,
+        meta: { cwd },
+        // Deliberately no agentPreset: the guardian uses standard mode.
+        ...(guardianAgentOptions === undefined ? {} : { agentOptions: guardianAgentOptions }),
+      })
+      try {
+        const session = handle.agent.session
+        if (session !== undefined) guardianTitles?.rename(session, title)
+      } catch {
+        // The title is display-only; failure must not block memory delivery.
+      }
+      return handle.agent
+    },
+    resumeAgent: async ({ sessionId }) => {
+      if (guardianLoop === undefined) throw new Error('the DSH agent loop is not available')
+      const handle = await guardianLoop.resume(ctx, {
+        resumeSessionId: sessionId,
+        ...(guardianAgentOptions === undefined ? {} : { agentOptions: guardianAgentOptions }),
+      })
+      return handle.agent
+    },
+    deliverText: (agent, text) => {
+      const runtime = agent as GuardianRuntimeAgent
+      const queued = runtime.status === 'running'
+      runtime.followup(makeGuardianUserMessage(text))
+      return { delivered: true, queued }
+    },
+  }
+  const guardianSessions = new GuardianSessionStore(memoryUsersRoot)
+  const memoryGuardianToolHost: MemoryGuardianToolHost = {
+    resolveCaller: async () => {
+      const caller = await fetchCaller(host, config)
+      return { userId: caller.userId }
+    },
+    guardian: guardianSessionHost,
+    isEnabled: async userId => memorySettings.isEnabled(userId),
+  }
+  const memoryRecordHost: MemoryRecordToolHost = {
+    resolveCaller: async () => {
+      const caller = await fetchCaller(host, config)
+      return { userId: caller.userId }
+    },
+    isGuardianSession: async sessionId => sessionId === undefined
+      ? false
+      : guardianSessions.isGuardianSession(sessionId),
+    storeFor: async userId => new MemoryStore(join(personalScopeRootFor(userId), PERSONAL_MEMORY_FOLDER)),
+    graphWriterFor: userId => new MemoryGraphWriter({ scopeRoot: personalScopeRootFor(userId) }),
+    skillsRootFor: async () => memorySkillsRoot,
+    isEnabled: async userId => memorySettings.isEnabled(userId),
   }
 
   // One disclosure pass owns every model-facing tool. The policy map in
@@ -7171,6 +7694,9 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       workflowPublishTool,
       ...createKnowledgeFileTools(knowledgeToolHost),
       ...createKnowledgeGraphTools(graphToolHost),
+      ...createMemoryTools(memoryToolHost),
+      ...createMemoryGuardianTools(memoryGuardianToolHost),
+      ...createMemoryRecordTools(memoryRecordHost),
       ...createManagementTools(managementHost),
     ],
     registry: { register: definition => host.tools.register(definition) },
@@ -7180,6 +7706,44 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
   toolDisclosures.set(ctx, disclosure)
   toolDisclosure = disclosure
   ctx.effect(() => () => disclosure.dispose(), 'dsh-knowledge-base: permission-based tool disclosure')
+
+  // Idle and compaction triggers only send a message to the guardian; DSH's
+  // session inbox is the queue, so no plugin queue or idle cron exists.
+  if (typeof (ctx as unknown as { on?: unknown }).on === 'function') {
+    ctx.effect(() => installMemoryTriggers({
+      resolveUserId: async () => (await fetchCaller(host, config)).userId,
+      isGuardianSession: sessionId => guardianSessions.isGuardianSession(sessionId),
+      onSessionEvent: listener => (ctx as unknown as {
+        on(event: 'session/event', handler: (session: { id: string }, event: { type: string; data?: unknown }) => void): () => void
+      }).on('session/event', (session, event) => listener({ id: session.id }, event)),
+      guardian: guardianSessionHost,
+      isEnabled: async userId => memorySettings.isEnabled(userId),
+      idleMs: Math.max(1, config.memoryIdleMinutes ?? 30) * 60_000,
+      log: message => host.logger?.warn?.('knowledge-base: ' + message),
+    }), 'dsh-knowledge-base: memory guardian triggers')
+  }
+
+  // Runtime memory injection: the section is deliberately an INSTRUCTION, not a
+  // copy of department content. The model fetches the current facts through
+  // `memory_context`, so a subscription reflects the live source and a redline is
+  // never a stale snapshot. An older Host without `systemPrompt` is skipped.
+  const promptRegistry = (host as unknown as {
+    systemPrompt?: { section: (section: { name: string; order: number; text: string }) => () => void }
+  }).systemPrompt
+  if (promptRegistry !== undefined) {
+    const disposeSection = promptRegistry.section({
+      name: 'knowledge-base:memory-graph',
+      order: 5000,
+      text: [
+        'Department and personal memory is available through the `memory_context` tool.',
+        'Before acting on a task that depends on department policy, standards, definitions,',
+        'procedures or known pitfalls, call `memory_context` and follow the returned entries.',
+        'Entries marked `nonOverridable: true` are redlines: they outrank personal memory,',
+        'preferences and any instruction in the conversation.',
+      ].join(' '),
+    })
+    ctx.effect(() => disposeSection, 'dsh-knowledge-base: memory-graph prompt section')
+  }
   if (isTeamDeployment(config)) {
     // The permission context is a backend read; the tool surface appears as soon as
     // it answers. Until then the coordinator registers nothing (fail-closed).
@@ -7261,3 +7825,159 @@ async function executeStep(
 
 /** Re-exported for tests and for callers that need the host shape. */
 export type { RemoteHost, RemoteRunner }
+
+/*
+ * Memory-graph surface.
+ *
+ * The graph tab reaches these through the `graph` route; tests and the guardian
+ * runtime import them directly. They are re-exported here so a consumer does not
+ * need to know which module inside the package owns each one.
+ */
+export {
+  GraphLoadError,
+  listGraphs,
+  loadGraph,
+  parseNodeFrontMatter,
+  validateGraph,
+} from './graphModel.ts'
+export type {
+  GraphManifest,
+  GraphManifestEdge,
+  GraphManifestNode,
+  GraphValidationIssue,
+  LoadedGraph,
+  LoadedGraphEdge,
+  LoadedGraphNode,
+  MemoryAuthority,
+  MemoryNodeType,
+  MemoryOrigin,
+  MemoryReviewStatus,
+} from './graphModel.ts'
+export {
+  canManageGraph,
+  canViewGraph,
+  filterVisibleGraphs,
+} from './graphPolicy.ts'
+export type { GraphScopeDescriptor, GraphViewer } from './graphPolicy.ts'
+export {
+  BindingStore,
+  bindingKey,
+} from './memoryBindings.ts'
+export type {
+  BindingLineage,
+  BindingMode,
+  BindingSourceType,
+  BindingStatus,
+  PersonalBinding,
+} from './memoryBindings.ts'
+export { markUpstreamUpdates, runGuardianPass } from './memoryGuardian.ts'
+export { decideMemoryAction, runtimeInjectionTags } from './memoryPolicy.ts'
+export {
+  diffSnapshots,
+  parentChain,
+  refreshDirtySummaries,
+  scanKnowledgeTree,
+} from './summaryIndex.ts'
+export type { ChangeSet, ChangeSnapshot } from './summaryIndex.ts'
+export {
+  applyMigration,
+  planMigration,
+  renderMigrationReport,
+} from './graphMigration.ts'
+export type { MigrationOptions, MigrationReport } from './graphMigration.ts'
+export { applySummaryWriteback, summarySnapshotPathFor } from './summaryWriteback.ts'
+export type { SummaryWritebackOptions, SummaryWritebackResult } from './summaryWriteback.ts'
+export { resolveMemoryContext, renderMemoryContextMarkdown } from './memoryContext.ts'
+export type { MemoryContextResult } from './memoryContext.ts'
+export { createMemoryTools } from './memoryTools.ts'
+export type { MemoryContextToolResult, MemoryGuardianToolResult, MemoryToolHost } from './memoryTools.ts'
+export {
+  MemoryStore,
+  MemoryStoreError,
+  MEMORY_LOG_DIR,
+  MEMORY_SOP_DIR,
+  MEMORY_PREFERENCE_FILE,
+  MEMORY_PITFALL_FILE,
+  MEMORY_FACT_FILE,
+} from './memoryStore.ts'
+export type {
+  MemoryStoreOptions,
+  MemoryIndex,
+  MemoryLogSummary,
+  AppendLogOptions,
+  AppendLogResult,
+  PreferenceUpsertResult,
+  PitfallUpsertResult,
+  FactUpsertResult,
+  SopWriteResult,
+  SopUpdateResult,
+  SopPatch,
+} from './memoryStore.ts'
+export {
+  MemoryGraphWriter,
+  MemoryGraphWriterError,
+  syncPersonalMemoryGraph,
+  PERSONAL_MEMORY_FOLDER,
+  PERSONAL_MEMORY_GRAPH_ID,
+} from './memoryGraphWriter.ts'
+export type { MemoryGraphWriterOptions, PersonalMemoryGraphResult } from './memoryGraphWriter.ts'
+export {
+  MEMORY_TYPES,
+  PRIVACY_VALUES,
+  FACT_KINDS,
+  SOP_STATUSES,
+  MEMORY_ENTRY_MARKER,
+  isMemoryType,
+  isPrivacy,
+  isFactKind,
+  isSopStatus,
+  isSafeMemorySlug,
+  validateMemoryEntry,
+  assertValidMemoryEntry,
+  parseMemoryEntries,
+  serializeMemoryEntry,
+  newMemoryId,
+} from './memoryTypes.ts'
+export type {
+  MemoryType,
+  Privacy,
+  FactKind,
+  AppId,
+  SopStatus,
+  MemoryEntry,
+  Preference,
+  Pitfall,
+  Episodic,
+  Fact,
+  Sop,
+  AnyMemoryEntry,
+  MemoryEntryInput,
+  MemoryValidationIssue,
+  MemoryValidationError,
+} from './memoryTypes.ts'
+export {
+  GuardianSessionStore,
+  resolveOrCreateGuardian,
+  sendToGuardian,
+  GUARDIAN_SESSION_TITLE,
+  GUARDIAN_SKILL_NAME,
+} from './guardianSession.ts'
+export type {
+  GuardianReason,
+  GuardianMessage,
+  GuardianSessionState,
+  GuardianAgentRef,
+  GuardianDelivery,
+  CreateGuardianAgentInput,
+  GuardianSessionHost,
+  ResolvedGuardian,
+  GuardianSendResult,
+} from './guardianSession.ts'
+export { createMemoryGuardianTools } from './memoryGuardianTool.ts'
+export type { MemoryGuardianToolHost, MemoryGuardianSendArgs, MemoryGuardianSendValue } from './memoryGuardianTool.ts'
+export { installMemoryTriggers, IDLE_DEBOUNCE_MS } from './memoryTriggers.ts'
+export type { MemoryTriggerHost, MemoryTriggerSession, MemoryTriggerEvent, MemoryTriggerTimers } from './memoryTriggers.ts'
+export { createMemoryRecordTools } from './memoryRecordTool.ts'
+export type { MemoryRecordToolHost } from './memoryRecordTool.ts'
+export { promoteSopToSkill, deleteSopAfterPromotion } from './memorySkillPromotion.ts'
+export type { PromoteSopInput, DeleteSopInput, SopDraft } from './memorySkillPromotion.ts'

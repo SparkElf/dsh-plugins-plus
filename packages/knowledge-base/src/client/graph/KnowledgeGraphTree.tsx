@@ -25,6 +25,7 @@ import {
   type KnowledgeGraphNode,
   type KnowledgeGraphScopeKey,
 } from '../../graphTypes.ts'
+import { OriginBadges } from './OriginBadges.tsx'
 import type { KnowledgeGraphLoadState } from './useKnowledgeGraph.ts'
 import { builtinFileIcon, builtinFolderIcon } from 'dsh-better-sidebar/src/client/file-icons.tsx'
 import styles from './KnowledgeGraphTree.module.css'
@@ -144,6 +145,8 @@ function TreeRow(props: {
   open?: boolean
   active?: boolean
   trailing?: string
+  /** Provenance chips shown after the name, before the trailing count. */
+  badges?: ReactNode
   glyph: ReactNode
   onClick: () => void
 }) {
@@ -173,6 +176,7 @@ function TreeRow(props: {
         : <span className={styles.chevronPlaceholder} aria-hidden="true" />}
       {props.glyph}
       <span className={styles.explorerName}>{props.label}</span>
+      {props.badges === undefined ? null : <span className={styles.rowBadges}>{props.badges}</span>}
       {props.trailing === undefined ? null : <span className={styles.explorerTime}>{props.trailing}</span>}
     </div>
   )
@@ -264,6 +268,7 @@ export function KnowledgeGraphTree(props: KnowledgeGraphTreeProps) {
           open={open}
           active={active}
           trailing={graph.counts.topics + ' · ' + graph.counts.links}
+          badges={<OriginBadges compact origin={graph.origin} reviewStatus={graph.reviewStatus} authority={graph.authority} />}
           glyph={<GraphFileGlyph />}
           onClick={() => {
             if (active && graph.topics.length > 0 && open) {
@@ -284,6 +289,7 @@ export function KnowledgeGraphTree(props: KnowledgeGraphTreeProps) {
                 testId="kg-topic"
                 attrs={{ 'data-topic-id': topic.id }}
                 active={topic.id === props.activeTopicId}
+                badges={<OriginBadges compact origin={topic.origin} reviewStatus={topic.reviewStatus} authority={topic.authority} />}
                 glyph={builtinFileIcon('index.md', 14)}
                 onClick={() => { props.onSelectTopic(graph.id, topic.id) }}
               />

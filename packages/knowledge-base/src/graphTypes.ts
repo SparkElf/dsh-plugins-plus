@@ -25,6 +25,15 @@ export const KNOWLEDGE_GRAPH_META_FOLDER = '.kg'
 /** The trash folder `kg_del` moves topics into; never a topic itself. */
 export const KNOWLEDGE_GRAPH_TRASH_FOLDER = '_trash'
 
+/** How a document or node was produced. Absent on content that predates the field. */
+export type KnowledgeGraphOrigin = 'human' | 'ai' | 'mixed'
+
+/** Review lifecycle. Absent means the scanner did not report one. */
+export type KnowledgeGraphReviewStatus = 'draft' | 'reviewed' | 'approved'
+
+/** Authority level. Absent means the scanner did not report one. */
+export type KnowledgeGraphAuthority = 'canonical' | 'advisory' | 'redline'
+
 /** One document inside a topic folder, as the detail panel lists it. */
 export interface KnowledgeGraphDocument {
   /** Human title: the document's first H1, else the file name without extension. */
@@ -37,6 +46,12 @@ export interface KnowledgeGraphDocument {
   date?: string
   /** First paragraph after the H1, when the file has one. */
   summary?: string
+  /** Optional provenance: `ai`/`mixed` renders the [AI 生成] badge. */
+  origin?: KnowledgeGraphOrigin
+  /** Optional review lifecycle: `reviewed`/`approved` renders [已审核]. */
+  reviewStatus?: KnowledgeGraphReviewStatus
+  /** Optional authority: `redline` renders [红线] and only permits subscription. */
+  authority?: KnowledgeGraphAuthority
 }
 
 /** One topic: a visible folder whose `index.md` is its card. */
@@ -63,6 +78,12 @@ export interface KnowledgeGraphTopic {
   path: string
   /** Documents below the topic folder, including nested document folders. */
   documents: KnowledgeGraphDocument[]
+  /** Optional provenance for the topic card; mirrors the node-level field. */
+  origin?: KnowledgeGraphOrigin
+  /** Optional review lifecycle for the topic card. */
+  reviewStatus?: KnowledgeGraphReviewStatus
+  /** Optional authority for the topic card; `redline` is subscribe-only. */
+  authority?: KnowledgeGraphAuthority
 }
 
 /** One relation document under `<graph>/.kg/links/`. */
@@ -99,6 +120,12 @@ export interface KnowledgeGraphNode {
   links: KnowledgeGraphLink[]
   /** What the header states beside the breadcrumb. */
   counts: { topics: number; links: number; documents: number }
+  /** Optional provenance for the graph row; absent on graphs scanned before it existed. */
+  origin?: KnowledgeGraphOrigin
+  /** Optional review lifecycle for the graph row. */
+  reviewStatus?: KnowledgeGraphReviewStatus
+  /** Optional authority for the graph row; `redline` is subscribe-only. */
+  authority?: KnowledgeGraphAuthority
   /**
    * Authoritative path relative to the knowledge root, used by Host-side graph
    * tools. Stripped before the tree is sent to the browser.

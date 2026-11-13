@@ -10,6 +10,10 @@ import {
   type ToolRegistryLike,
 } from '../src/toolDisclosure.ts'
 import { createKnowledgeFileTools } from '../src/knowledgeTools.ts'
+import { createKnowledgeGraphTools } from '../src/graphTools.ts'
+import { createMemoryTools } from '../src/memoryTools.ts'
+import { createMemoryGuardianTools } from '../src/memoryGuardianTool.ts'
+import { createMemoryRecordTools } from '../src/memoryRecordTool.ts'
 import {
   DEFAULT_DSH_PERMISSIONS,
   createManagementTools,
@@ -26,6 +30,12 @@ const toolDefinitions = () => [
   { name: 'workflow_publish' } as never,
   ...createKnowledgeFileTools({} as never),
   ...createManagementTools({} as never),
+  // The graph tools are registered through the same coordinator `apply` builds.
+  ...createKnowledgeGraphTools({} as never),
+  // Runtime memory tools share the disclosure map; their host is only touched at execute time.
+  ...createMemoryTools({} as never),
+  ...createMemoryGuardianTools({} as never),
+  ...createMemoryRecordTools({} as never),
 ]
 
 /** An ordinary caller with an explicit permission list and no role capability. */
@@ -101,7 +111,7 @@ function makeCoordinator(
 describe('tool disclosure policy map', () => {
   it('covers every model-facing tool and names it exactly once', () => {
     const names = toolDefinitions().map(definition => definition.name).sort()
-    expect(names).toHaveLength(27)
+    expect(names).toHaveLength(36)
     expect(Object.keys(KB_TOOL_ACCESS).sort()).toEqual(names)
     expect([...KNOWLEDGE_TOOL_NAMES].sort()).toEqual(names)
     // No group may silently lose a tool.
@@ -111,14 +121,16 @@ describe('tool disclosure policy map', () => {
 
   it('groups tools by the permission surface they belong to', () => {
     expect([...TOOL_GROUPS_OF.read].sort()).toEqual([
-      'kb_chunk_get', 'kb_outline', 'kb_outline_rewrite', 'kb_search', 'kb_vectorize', 'workflow_list',
+      'kb_chunk_get', 'kb_outline', 'kb_outline_rewrite', 'kb_search', 'kb_vectorize', 'kg_get', 'memory_context',
+      'memory_guardian_send', 'workflow_list',
     ])
     expect([...TOOL_GROUPS_OF.write].sort()).toEqual([
       'kb_file_delete', 'kb_file_extract', 'kb_file_mkdir', 'kb_file_move', 'kb_file_write', 'kb_outline_save',
+      'kg_add', 'kg_del', 'kg_set', 'memory_promote_sop', 'memory_record',
     ])
     expect([...TOOL_GROUPS_OF.manage].sort()).toEqual([
       'kb_audit_list', 'kb_config_get', 'kb_config_update', 'kb_grant_list', 'kb_grant_set',
-      'kb_index_rebuild', 'kb_review_decide', 'kb_review_list', 'kb_sync',
+      'kb_index_rebuild', 'kb_review_decide', 'kb_review_list', 'kb_sync', 'memory_guardian_run',
       'workflow_review_decide', 'workflow_review_list', 'workflow_review_scan', 'workflow_unpublish',
     ])
     expect([...TOOL_GROUPS_OF.publish].sort()).toEqual(['workflow_publish', 'workflow_update'])
@@ -311,14 +323,14 @@ describe('ToolDisclosureCoordinator', () => {
       return admin()
     })
     await coordinator.syncToolDisclosure()
-    expect(registry.names()).toHaveLength(27)
+    expect(registry.names()).toHaveLength(36)
 
     fail = true
     const snapshot = await coordinator.syncToolDisclosure()
     expect(snapshot.error).toBe('DataOps review context unavailable')
     expect(snapshot.registered).toEqual([])
     expect(registry.names()).toEqual([])
-    expect(registry.disposed).toHaveLength(27)
+    expect(registry.disposed).toHaveLength(36)
   })
 
   it('reports every registration failure as a denial instead of claiming it is live', async () => {
@@ -329,7 +341,7 @@ describe('ToolDisclosureCoordinator', () => {
     })
     const snapshot = await coordinator.syncToolDisclosure()
     expect(snapshot.registered).toEqual([])
-    expect(snapshot.denied).toHaveLength(27)
+    expect(snapshot.denied).toHaveLength(36)
     expect(snapshot.denied[0]?.missing).toEqual(['register-failed'])
     expect(coordinator.registeredTools).toEqual([])
   })
@@ -337,7 +349,7 @@ describe('ToolDisclosureCoordinator', () => {
   it('disposes every registration and makes later refreshes no-ops', async () => {
     const { coordinator, registry } = makeCoordinator(async () => admin())
     await coordinator.syncToolDisclosure()
-    expect(registry.names()).toHaveLength(27)
+    expect(registry.names()).toHaveLength(36)
     coordinator.dispose()
     expect(registry.names()).toEqual([])
     const snapshot = await coordinator.syncToolDisclosure(admin())

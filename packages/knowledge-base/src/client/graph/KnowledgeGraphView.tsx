@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KB_API, kbApiPath } from '../../api.ts'
 import { knowledgeGraphsOf, type KnowledgeGraphNode } from '../../graphTypes.ts'
 import type { KnowledgeGraphLoadState } from './useKnowledgeGraph.ts'
+import { OriginBadges, originBadgeItems } from './OriginBadges.tsx'
 import styles from './KnowledgeGraphView.module.css'
 
 /** Props for the canvas surface. */
@@ -89,6 +90,15 @@ export function KnowledgeGraphView(props: KnowledgeGraphViewProps) {
   const loadedTopicRef = useRef<string | undefined>(undefined)
   const graphs = useMemo(() => knowledgeGraphsOf(props.state.tree), [props.state.tree])
   const activeGraph = graphs.find(graph => graph.id === props.activeGraphId) ?? graphs[0]
+  const activeTopic = activeGraph?.topics.find(topic => topic.id === props.activeTopicId)
+  const graphBadges = activeGraph === undefined ? [] : originBadgeItems(activeGraph)
+  const topicBadges = activeTopic === undefined ? [] : originBadgeItems(activeTopic)
+  // The bar speaks for the subject currently on screen: the selected topic when it
+  // carries provenance, otherwise the graph itself. The tree already keeps the
+  // other level's chips visible, so the canvas does not need a second stack.
+  const topicHasBadges = activeTopic !== undefined && topicBadges.length > 0
+  const badgeSubject = topicHasBadges ? activeTopic : activeGraph
+  const badgeLabel = topicHasBadges && activeTopic !== undefined ? activeTopic.title : activeGraph?.name
   // Resolve against the ORIGIN the browser is actually on, not the document's
   // <base> (a gateway may inject one pointing at a container-internal host:port).
   // A relative URL alone is not enough when a base element is present.
@@ -242,6 +252,16 @@ export function KnowledgeGraphView(props: KnowledgeGraphViewProps) {
 
   return (
     <div className={styles.host}>
+      {graphBadges.length + topicBadges.length > 0 && badgeSubject !== undefined && (
+        <div className={styles.badgeBar} data-testid="kg-view-badges">
+          <span className={styles.badgeBarLabel}>{badgeLabel}</span>
+          <OriginBadges
+            origin={badgeSubject.origin}
+            reviewStatus={badgeSubject.reviewStatus}
+            authority={badgeSubject.authority}
+          />
+        </div>
+      )}
       <iframe
         ref={frameRef}
         className={styles.frame}

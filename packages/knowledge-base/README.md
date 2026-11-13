@@ -4,6 +4,40 @@ DeepSeek-Harness knowledge base: a left-sidebar destination, Settings configurat
 index tooling over a mounted directory. Runs standalone or against a DataOps backend.
 
 
+## 记忆图谱（0.2.0）
+
+图谱的权威拓扑从可见文件夹移到 `<scope>/.graphs/<graphId>/graph.json`：节点正文留在普通
+分类目录，frontmatter 携带 `id/type/title/authority/internalizable/origin/reviewStatus`；
+关系正文放在 `.graphs/<graphId>/links/`。旧 `<scope>/知识图谱/` 文件树仍会被扫描，但响应里
+标记 `format=legacy`、`readOnly=true`；迁移工具见 `scripts/migrate-graphs.mjs` 和
+`docs/migration-knowledge-graphs.md`（在 dataops 仓库）。
+
+- 权限：普通成员看本部门非私有；部门管理员看本部门及下级；管理员/超管看管理范围；
+  private 仅 owner。加载器在 Host 侧按 `canReadPath` 逐图谱门禁。
+- 个人绑定：`users/<id>/bindings/*.yaml`，`pending / subscribe / internalize`；
+  subscribe 是实时读源的代理，不复制正文；internalize 是独立个人分支。
+  守护会话用 `runGuardianPass` 或 `scripts/memory-guardian.mjs` 手动运行。
+- 红线：`authority: redline` 或 `internalizable: false` 在 Host 侧拒绝内化（节点与关系都
+  继承端点策略），只能订阅；运行时注入带 `nonOverridable` 标记。
+- AI 标签：`origin` / `reviewStatus` 在图谱行与选中条显示 `[AI 生成]` / `[已审核]` / `[红线]`。
+- 摘要变更：`src/summaryIndex.ts` 提供 sha256 快照、确定性父目录链 dirty 和只重算 dirty 文档的
+  入口；`src/summaryWriteback.ts` 已接到索引流程，把 changed/added/removed 文档的确定性摘要写回
+  `kb_docs`/SQLite 并按需重写 `index/md/<docId>.INDEX.md`（LLM 摘要不降级，快照最后原子写入）。
+- 运行时工具：`memory_context` 实时返回订阅代理、内化分支和红线（`nonOverridable`）；
+  `memory_guardian_run` 手动跑一次守护会话（需 `kb:config:manage`）。插件同时注册一条常驻
+  系统提示指令，要求模型在依赖部门口径/流程/红线时先调用 `memory_context`。
+- 图谱写入：`kg_get/kg_add/kg_set/kg_del` 对 `format: 'graph-json'` 的图谱读写
+  `.graphs/<id>/graph.json` 与节点 frontmatter，validator 失败回滚，删除只移入 `_trash`。
+- 文档级徽标：legacy 图谱的文档行与 topic 卡也显示 `[AI 生成]` / `[已审核]` / `[红线]`。
+
+## 个人记忆（0.3.0）
+
+- 五类记忆：`preference` 偏好、`pitfall` 踩坑、`episodic` 情景、`fact` 事实、`sop` 技能草稿；隐私维度 `normal/private/sensitive/secret`，`secret` 只存 `credentialRef`，不存明文。
+- 存储：`个人记忆图谱/记忆日志/YYYY-MM-DD.md`、`偏好.md`、`踩坑.md`、`事实.md`、`SOP/<slug>.md`；写入同时更新 `.graphs/personal-memory/graph.json`，图谱页可见。
+- 触发：普通会话空闲 30 分钟后调 `memory_guardian_send`；压缩时监听 `compaction/start` 发消息；每日 dream。没有插件队列/空闲 cron，消息投递本身就是队列。
+- 守护会话用标准模式（不新增 preset），由 `users/<uid>/guardian.json` 记录 sessionId，懒创建；它读 `memory-guardian` 技能，派 `memory-extract` / `memory-sop-evaluate` 子代理。
+- 写入工具：`memory_record`（仅守护会话）写五类记忆；`memory_promote_sop` 把有效 SOP 晋升为 `$DSH_HOME/skills/<slug>/SKILL.md` 并删除 SOP。
+
 ## 两种部署形态
 
 同一个包，一份代码，由**有没有配置 `baseUrl`** 决定跑哪种形态。这不是一个运行期开关，

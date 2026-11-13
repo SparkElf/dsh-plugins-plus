@@ -217,6 +217,16 @@
   white-space: nowrap;
 }
 
+/* Provenance chips sit between the name and the trailing count. The name keeps its
+   ellipsis; the chips keep their natural width so a redline badge is never the
+   thing that gets clipped. */
+.rowBadges {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+}
+
 .explorerTime {
   flex: none;
   margin-left: auto;

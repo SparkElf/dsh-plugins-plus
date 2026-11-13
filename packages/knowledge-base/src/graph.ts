@@ -148,6 +148,44 @@ export function parseGraphList(value: string | undefined): string[] {
     .filter(item => item !== '')
 }
 
+/** The provenance values the graph badges understand, in contract order. */
+const GRAPH_ORIGINS = ['human', 'ai', 'mixed'] as const
+const GRAPH_REVIEW_STATUSES = ['draft', 'reviewed', 'approved'] as const
+const GRAPH_AUTHORITIES = ['canonical', 'advisory', 'redline'] as const
+
+/**
+ * Read one optional enum front-matter value.
+ *
+ * Hand-edited cards are common, so an unknown value is ignored rather than
+ * promoted into the payload; quotes are stripped because the scanner's YAML
+ * subset does not unquote scalars.
+ */
+function graphChoice<T extends string>(value: string | undefined, allowed: readonly T[]): T | undefined {
+  if (value === undefined) return undefined
+  const normalized = value.trim().replace(/^['"]|['"]$/gu, '').toLowerCase()
+  return allowed.find(choice => choice === normalized)
+}
+
+/**
+ * The optional provenance fields a topic card or one of its documents may carry.
+ *
+ * Missing or malformed values simply omit the field, which keeps every legacy
+ * graph rendering exactly as before. The scanner must never fail a whole graph
+ * because one document's front matter was hand-edited badly.
+ */
+function graphProvenance(
+  meta: Record<string, string>,
+): Pick<KnowledgeGraphTopic, 'origin' | 'reviewStatus' | 'authority'> {
+  const origin = graphChoice(meta.origin, GRAPH_ORIGINS)
+  const reviewStatus = graphChoice(meta.reviewStatus, GRAPH_REVIEW_STATUSES)
+  const authority = graphChoice(meta.authority, GRAPH_AUTHORITIES)
+  return {
+    ...(origin === undefined ? {} : { origin }),
+    ...(reviewStatus === undefined ? {} : { reviewStatus }),
+    ...(authority === undefined ? {} : { authority }),
+  }
+}
+
 /** First H1 of a Markdown body, without the marker. */
 export function firstHeading(body: string): string | undefined {
   for (const line of body.split('\n')) {
@@ -332,6 +370,7 @@ export async function readGraphTopic(
       path: viewJoin(viewTopicPath, file.relative),
       ...(date === undefined ? {} : { date }),
       ...(documentBody === undefined ? {} : { summary: firstSummary(documentBody.body) }),
+      ...graphProvenance(documentBody?.meta ?? {}),
     }
     documents.push(document)
   }
@@ -348,6 +387,7 @@ export async function readGraphTopic(
     folder,
     path: viewTopicPath,
     documents,
+    ...graphProvenance(meta),
   }
 }
 

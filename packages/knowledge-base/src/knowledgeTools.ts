@@ -24,7 +24,7 @@ import type { OutlineSectionSubmission, OutlineSummaryKind } from './outlineGuar
 import type { OutlineSaveResult } from './ftsIndex.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { isContainedRelPath } from './views.ts'
-import { resolveScopeAlias } from './scopeAliases.ts'
+import { resolveScopeAlias, scopeFromAlias, type CanonicalScope } from './scopeAliases.ts'
 import type { KnowledgeAuditEntry } from './views.ts'
 
 /** Error codes a tool may report to the model. */
@@ -196,6 +196,14 @@ export interface KnowledgeFileToolHost {
   }): Promise<OutlineSaveResult | undefined>
   canRead(relPath: string): Promise<boolean>
   canWrite(relPath: string): Promise<boolean>
+  /**
+   * Default bucket for a path that names no scope at all.
+   *
+   * A team deployment answers `personal`: a bare relative path is the caller's
+   * own tree, never the shared root that the view renders as `global`. A local
+   * deployment omits this, keeping the legacy flat top-level path.
+   */
+  defaultScope?(): CanonicalScope | undefined
   /** One view directory level, already filtered by `canReadPath`. */
   list(relPath: string, caller: KnowledgeToolCaller): Promise<KnowledgeFileEntry[]>
   /** Search under one view-relative scope. */
@@ -280,8 +288,19 @@ export const asKnowledgeToolError = (error: unknown, path?: string): KnowledgeTo
  *
  * Empty is allowed only where the root itself is the argument (list/search/extract-all);
  * everything else is refused with the same four codes `checkLocalPath` uses.
+ *
+ * `defaultScope` decides what a path with NO bucket prefix means. When omitted
+ * the legacy behaviour is kept (a bare top-level path). A team deployment passes
+ * `personal`, so `个人记忆图谱/…` without a bucket resolves inside the caller's
+ * own tree instead of becoming an unowned top-level path that the view shows as
+ * `global`. Explicit `global/`, `department/` and `personal/` spellings (and
+ * their localized aliases) are never rewritten.
  */
-export const assertToolPath = (value: unknown, allowRoot = false): string => {
+export const assertToolPath = (
+  value: unknown,
+  allowRoot = false,
+  defaultScope?: CanonicalScope,
+): string => {
   const relPath = typeof value === 'string' ? value.trim() : ''
   if (relPath === '' && allowRoot) return ''
   if (relPath === '') throw new KnowledgeToolError('empty-path', 'the path is empty')
@@ -297,8 +316,19 @@ export const assertToolPath = (value: unknown, allowRoot = false): string => {
     )
   }
   // Every model entry accepts the localized virtual bucket names; ACL/index see canonical.
-  return resolveScopeAlias(relPath)
+  const canonical = resolveScopeAlias(relPath)
+  if (canonical === '' || defaultScope === undefined) return canonical
+  const head = canonical.split('/')[0] ?? ''
+  if (scopeFromAlias(head) !== undefined) return canonical
+  return `${defaultScope}/${canonical}`
 }
+
+/** `assertToolPath` with the host's deployment-specific default bucket applied. */
+const scopedToolPath = (
+  host: KnowledgeFileToolHost,
+  value: unknown,
+  allowRoot = false,
+): string => assertToolPath(value, allowRoot, host.defaultScope?.())
 
 const requireRead = async (host: KnowledgeFileToolHost, relPath: string): Promise<void> => {
   if (!await host.canRead(relPath)) {
@@ -372,7 +402,7 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { path: string; content: string; overwrite?: boolean }) => run(args.path, async () => {
-      const relPath = assertToolPath(args.path)
+      const relPath = scopedToolPath(host, args.path)
       const content = typeof args.content === 'string' ? args.content : ''
       await requireWrite(host, relPath)
       const caller = await host.resolveCaller()
@@ -428,8 +458,8 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { from: string; to: string }) => run(args.from, async () => {
-      const from = assertToolPath(args.from)
-      const to = assertToolPath(args.to, true)
+      const from = scopedToolPath(host, args.from)
+      const to = scopedToolPath(host, args.to, true)
       await requireWrite(host, from)
       const caller = await host.resolveCaller()
       const targetEntry = to === '' ? undefined : await host.statEntry(to)
@@ -564,7 +594,7 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
       if (args.scope !== undefined && !['personal', 'department', 'global'].includes(args.scope)) {
         throw new KnowledgeToolError('invalid', 'scope must be personal, department or global')
       }
-      const targetPath = hasPath ? assertToolPath(args.path) : undefined
+      const targetPath = hasPath ? scopedToolPath(host, args.path) : undefined
       if (hasDocId && (!Number.isInteger(args.docId) || (args.docId as number) <= 0)) {
         throw new KnowledgeToolError('invalid', 'docId must be a positive integer')
       }
@@ -772,7 +802,7 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { path: string }) => run(args.path, async () => {
-      const relPath = assertToolPath(args.path)
+      const relPath = scopedToolPath(host, args.path)
       await requireWrite(host, relPath)
       const caller = await host.resolveCaller()
       const entry = await host.statEntry(relPath)
@@ -801,7 +831,7 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { path: string }) => run(args.path, async () => {
-      const relPath = assertToolPath(args.path)
+      const relPath = scopedToolPath(host, args.path)
       await requireWrite(host, relPath)
       const caller = await host.resolveCaller()
       const created = await host.createEntry(relPath, { directory: true })
@@ -820,7 +850,7 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: { path?: string }) => run(args.path, async () => {
-      const relPath = assertToolPath(args.path ?? '', true)
+      const relPath = scopedToolPath(host, args.path ?? '', true)
       const caller = await host.resolveCaller()
       if (relPath === '') {
         const candidates = await host.listExtractCandidates(20)

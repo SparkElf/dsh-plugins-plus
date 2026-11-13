@@ -95,6 +95,16 @@ export const KB_TOOL_ACCESS: Readonly<Record<string, ToolAccessRule>> = Object.f
   // Graph tools: read for get, write for add/set, delete for del. Path-level
   // `canWritePath` still runs on the graph folder before any write.
   kg_get: { group: 'read', permissions: ['kb:file:read'] },
+  // Runtime memory context: a read surface over the caller's own bindings. The
+  // resolver applies graph visibility itself and never writes.
+  memory_context: { group: 'read', permissions: ['kb:file:read'] },
+  // Any authenticated caller may notify their OWN guardian; the tool accepts no
+  // user/target argument, so it is a read-surface action rather than management.
+  memory_guardian_send: { group: 'read', permissions: ['kb:file:read'] },
+  // Guardian-only write surface. The tools check the live session against the
+  // guardian state; the permission gate keeps them off a reader's tool list.
+  memory_record: { group: 'write', permissions: ['kb:file:write'] },
+  memory_promote_sop: { group: 'write', permissions: ['kb:file:write'] },
   kg_add: { group: 'write', permissions: ['kb:file:write'] },
   kg_set: { group: 'write', permissions: ['kb:file:write'] },
   kg_del: { group: 'write', permissions: ['kb:file:delete'] },
@@ -114,6 +124,9 @@ export const KB_TOOL_ACCESS: Readonly<Record<string, ToolAccessRule>> = Object.f
   kb_sync: { group: 'manage', capability: 'reviewer' },
   // Rebuilding the index is a deployment-wide admin action.
   kb_index_rebuild: { group: 'manage', permissions: ['kb:config:manage'] },
+  // The guardian pass mutates personal bindings on the caller's behalf, so it is
+  // a configuration-management action rather than a read.
+  memory_guardian_run: { group: 'manage', permissions: ['kb:config:manage'] },
   workflow_unpublish: { group: 'manage', permissions: ['workflow:manage'] },
   workflow_review_list: { group: 'manage', permissions: ['workflow:review:decide'] },
   workflow_review_scan: { group: 'manage', permissions: ['workflow:review:decide'] },

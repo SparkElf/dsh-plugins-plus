@@ -22,6 +22,7 @@ import {
   IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
   IconChevronUpOutlineRegular,
+  IconLightOutlineRegular,
   IconPanelLeftOutlineRegular,
   IconPlusOutlineRegular,
   IconSearchOutlineRegular,
@@ -68,6 +69,7 @@ import { KnowledgeTrash } from './KnowledgeTrash.tsx'
 import { KnowledgeMenuBrand, sectionGlyph } from './MenuGlyphs.tsx'
 import { KnowledgeAudit } from './KnowledgeAudit.tsx'
 import { KnowledgeSettings } from './KnowledgeSettings.tsx'
+import { KnowledgeMemory, type MemoryEntryView } from './KnowledgeMemory.tsx'
 import { KnowledgeSearch, useKnowledgeSearch } from './KnowledgeSearch.tsx'
 import { KB_DRAG_MIME, KnowledgeListing } from './KnowledgeListing.tsx'
 import { KnowledgeProgressPopover } from './KnowledgeProgressPopover.tsx'
@@ -184,6 +186,7 @@ function relativeToRoot(mountPoint: string, absolute: string): string {
  */
 function sectionTitle(t: (key: string) => string, selection: Selection): string {
   if (selection.kind === 'home') return t('menu.home')
+  if (selection.kind === 'memory') return t('menu.memory')
   if (selection.kind === 'trash') return t('menu.trash')
   if (selection.kind === 'audit') return t('menu.audit')
   if (selection.kind === 'settings') return t('menu.settings')
@@ -198,6 +201,7 @@ function sectionTitle(t: (key: string) => string, selection: Selection): string 
 type Selection =
   | { kind: 'search' }
   | { kind: 'home' }
+  | { kind: 'memory' }
   | { kind: 'trash' }
   | { kind: 'audit' }
   | { kind: 'settings' }
@@ -703,6 +707,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const hasPermission = (key: string): boolean =>
     permissionKeys === undefined ? true : permissionKeys.includes(key)
   const canSeeHome = permissionKeys === undefined || hasPermission('kb:file:read')
+  // Memory is part of the knowledge base's own read surface: anyone who may read
+  // the tree may see and manage their own memory page.
+  const canSeeMemory = permissionKeys === undefined || hasPermission('kb:file:read')
   const canSeeTrash = permissionKeys === undefined || hasPermission('kb:file:delete')
   const canSeeAudit = permissionKeys === undefined || hasPermission('kb:audit:read')
   const canSeeSettings = permissionKeys === undefined || hasPermission('kb:config:manage')
@@ -983,15 +990,16 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   // The rail only offers surfaces the backend permission keys allow; reset a surface
   // that was selected before a role change so it cannot linger as a dead end.
   useEffect(() => {
-    if (canSeeTrash && canSeeAudit && canSeeSettings && canSeeHome) return
+    if (canSeeTrash && canSeeAudit && canSeeSettings && canSeeHome && canSeeMemory) return
     setSelection(current => {
+      if (current.kind === 'memory' && !canSeeMemory) return { kind: 'search' }
       if (current.kind === 'trash' && !canSeeTrash) return { kind: 'search' }
       if (current.kind === 'audit' && !canSeeAudit) return { kind: 'search' }
       if (current.kind === 'settings' && !canSeeSettings) return { kind: 'search' }
       if (current.kind === 'home' && !canSeeHome) return { kind: 'search' }
       return current
     })
-  }, [canSeeAudit, canSeeHome, canSeeSettings, canSeeTrash])
+  }, [canSeeAudit, canSeeHome, canSeeMemory, canSeeSettings, canSeeTrash])
 
   /**
    * Whether the selected document is being drawn by the host's file window.
@@ -1184,6 +1192,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    */
   const SECTIONS = [
     ...(canSeeHome ? [{ kind: 'home', key: 'menu.home' }] as const : []),
+    ...(canSeeMemory ? [{ kind: 'memory', key: 'menu.memory' }] as const : []),
     ...(canSeeTrash ? [{ kind: 'trash', key: 'menu.trash' }] as const : []),
     ...(canSeeAudit ? [{ kind: 'audit', key: 'menu.audit' }] as const : []),
     ...(canSeeSettings ? [{ kind: 'settings', key: 'menu.settings' }] as const : []),
@@ -1282,7 +1291,11 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                   setSelection({ kind: section.kind } as Selection)
                 }}
               >
-                <span className={styles.menuGlyph}>{sectionGlyph(section.kind)}</span>
+                <span className={styles.menuGlyph}>
+                  {section.kind === 'memory'
+                    ? <IconLightOutlineRegular size={16} />
+                    : sectionGlyph(section.kind)}
+                </span>
                 {!folded && <span className={styles.menuLabel}>{t(section.key)}</span>}
               </button>
             )
@@ -1908,6 +1921,25 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 // The one per-caller permission answer this client has: it decides
                 // whether the shared buckets join "Owned by me".
                 canManageGrants={false}
+              />
+            )}
+            {scope !== 'graph' && rendered.kind === 'memory' && (
+              <KnowledgeMemory
+                t={t}
+                {...(props.locale === undefined ? {} : { locale: props.locale })}
+                onOpenSource={(entry: MemoryEntryView) => {
+                  const sessionId = entry.source?.sessionId ?? entry.sourceRefs?.[0]?.sessionId
+                  if (sessionId === undefined || sessionId === '') return
+                  try {
+                    const navigator = (props.ctx as { get?: (name: string) => unknown } | undefined)?.get
+                    const workspace = typeof navigator === 'function'
+                      ? navigator.call(props.ctx, 'uiWorkspace') as { openSession?: (target: unknown) => void } | undefined
+                      : undefined
+                    workspace?.openSession?.({ kind: 'known', sessionId })
+                  } catch {
+                    // Keeping the memory page usable beats failing navigation loudly.
+                  }
+                }}
               />
             )}
             {scope !== 'graph' && rendered.kind === 'trash' && <KnowledgeTrash t={t} />}
