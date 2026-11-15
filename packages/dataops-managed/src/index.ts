@@ -1,7 +1,8 @@
 /** DataOps-managed JWT intake and credential-backed MCP composition. */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { currentAuthState, noteAccepted, noteExpired, resetAuthState } from './auth-state.ts'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
@@ -40,11 +41,16 @@ import {
   resolveResourceTabConfig,
 } from './resource-tab.ts'
 import {
+  BROWSER_BRIDGE_CONNECTOR_ID,
+  BROWSER_BRIDGE_INSTALLER_PATH,
   CONNECTORS_PATH,
   DATAOPS_CONNECTOR_ID,
+  buildBrowserBridgeConnectorView,
   buildConnectorView,
   hasCapability,
+  readBrowserBridgeState,
   readConnectorState,
+  writeBrowserBridgeState,
   writeConnectorState,
 } from './connector-state.ts'
 import {
@@ -54,6 +60,10 @@ import {
   setWorkspaceLimits,
 } from './workspace-limits.ts'
 import { WorkspaceUpgrade, WorkspaceUpgradeError, recoverWorkspaceUpgradeAfterBoot } from './workspace-upgrade.ts'
+import {
+  BrowserBridgeSession,
+  type BrowserBridgeMcpHandle,
+} from './browser-bridge-session.ts'
 
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
@@ -443,6 +453,31 @@ const prefectScriptSkillProvider = {
   },
 }
 
+/** The skill that teaches the model how to use the local browser companion. */
+const BROWSER_SKILL_NAME = 'browser-bridge-companion'
+const BROWSER_SKILL_FILE = new URL('../skills/browser-bridge-companion/SKILL.md', import.meta.url)
+const BROWSER_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+const BROWSER_SKILL = {
+  name: BROWSER_SKILL_NAME,
+  description:
+    '用户要在自己的本地 Chrome/Edge 里打开内网系统、登录、点页面、填表、截图或做网页自动化时使用。先完成 8 位配对码配对、确认 Companion 在线且连接器显示已连接，再调用 browser_* 工具；登录/验证码必须让用户接管，不要索取密码，不要导出 Cookie。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: BROWSER_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: BROWSER_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: BROWSER_SKILL_FILE,
+} as const
+
+const browserSkillProvider = {
+  name: BROWSER_SKILL_NAME,
+  list: () => Promise.resolve([BROWSER_SKILL]),
+  async get() {
+    return { ...BROWSER_SKILL, content: await readFile(BROWSER_SKILL_FILE, 'utf8') }
+  },
+}
+
 const PROVISIONING_SKILL_NAME = 'skill-provisioning'
 const PROVISIONING_SKILL_FILE = new URL('../skills/skill-provisioning/SKILL.md', import.meta.url)
 const PROVISIONING_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -488,6 +523,18 @@ const collectSkillProvider = {
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const baseUrl = new URL(config.baseUrl).origin
+  /**
+   * 门户 origin：本机 Companion 的配对 API 需要用它作为 serverUrl，才能经门户
+   * 的同源代理（`/api` 与 `/browser-bridge-ws`）回到 backend。优先取配置的第一个
+   * `webBaseUrl`，否则退回 backend origin。
+   */
+  const portalOrigin = (): string => {
+    const configured = (config.webBaseUrl ?? '')
+      .split(',')
+      .map(value => value.trim())
+      .find(value => value !== '' && URL.canParse(value))
+    return configured === undefined ? baseUrl : new URL(configured).origin
+  }
   const accessRef = credentialRef(config.credentialRef)
   let mcpFiber: Fiber | undefined
 
@@ -500,6 +547,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.skills.registerProvider(() => connectorSkillProvider)
   ctx.skills.registerProvider(() => prefectScriptSkillProvider)
   ctx.skills.registerProvider(() => provisioningSkillProvider)
+  ctx.skills.registerProvider(() => browserSkillProvider)
 
   const ensureMcp = async (): Promise<void> => {
     if (mcpFiber !== undefined && mcpFiber.uid !== null) return
@@ -514,6 +562,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     mcpFiber = fiber
     try {
       await fiber.await()
+      ctx.logger.warn('dataops-managed: browser bridge MCP connected')
     } catch (error) {
       if (mcpFiber === fiber) mcpFiber = undefined
       await fiber.dispose()
@@ -521,10 +570,51 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
   }
 
+  /**
+   * The browser bridge, reached through the DataOps gateway.
+   *
+   * The gateway is the only entry. With the current DataOps JWT the plugin asks for a session
+   * and receives an `mcpUrl` whose ticket is the connection capability; the profile and the
+   * environment carry no bridge address, so a workspace cannot point itself at another user's
+   * companion. `connectMcp` creates exactly one MCP client per session; the session module
+   * owns token refresh and closure.
+   */
+  const browserBridge = new BrowserBridgeSession({
+    baseUrl,
+    resolveToken: async () => (await ctx.credentials.resolve(accessRef))?.value,
+    isEnabled: async () => (await readBrowserBridgeState()).enabled,
+    connectMcp: async (mcpUrl, bridgeToken): Promise<BrowserBridgeMcpHandle> => {
+      const fiber = ctx.plugin(McpClient, {
+        transport: 'streamable-http',
+        serverName: 'browser-bridge',
+        url: mcpUrl,
+        headers: { authorization: `Bearer ${bridgeToken}` },
+        toolCallTimeoutMs: volatileValue(config.toolCallTimeoutMs, DEFAULT_TOOL_CALL_TIMEOUT_MS),
+      })
+      try {
+        await fiber.await()
+      } catch (error) {
+        if (fiber.uid !== null) await fiber.dispose()
+        throw error
+      }
+      return {
+        alive: () => fiber.uid !== null,
+        dispose: async () => {
+          if (fiber.uid !== null) await fiber.dispose()
+        },
+      }
+    },
+    // The logger receives already-sanitized text: the MCP URL carries a session ticket and
+    // never reaches a log line.
+    logger: { warn: message => ctx.logger.warn(message) },
+  })
+
   ctx.effect(() => async () => {
     const fiber = mcpFiber
     mcpFiber = undefined
     if (fiber !== undefined && fiber.uid !== null) await fiber.dispose()
+    // Closes the bridge session best-effort and clears every timer the session owns.
+    await browserBridge.dispose()
   }, 'dataops-managed: MCP lifecycle')
 
   /**
@@ -553,6 +643,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       ctx.logger.warn('dataops-managed: connecting the DataOps MCP server failed; the settings routes stay up so a new JWT can be connected')
       ctx.logger.warn(error)
     }
+    // The bridge is optional and off by default. `start` reads the persisted connector switch
+    // and returns without a request when it is off; when it is on, the first attempt must not
+    // delay activation, so an offline companion is reported rather than thrown.
+    void browserBridge.start()
   }
 
   /**
@@ -807,6 +901,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // A new token can belong to a different principal, so supersede any read that may still
     // be answering for the previous one.
     void aiTools.refresh(true)
+    // The bridge control plane speaks with this same JWT. A login after an expiry resumes the
+    // session's clocks without disturbing the MCP connection its ticket already authorizes.
+    void browserBridge.onCredentialRefresh()
   }), 'dataops-managed: tool disclosure follows the DataOps credential')
   const workspaceLimits = new WorkspaceLimits(ctx, { baseUrl, credentialRef: config.credentialRef })
   setWorkspaceLimits(workspaceLimits)
@@ -886,6 +983,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       // next model turn. It stays off the response path for the same reason as activation;
       // `force` makes it win over a read that captured the old token.
       void aiTools.refresh(true)
+      // The same new JWT is what the bridge control plane needs after an expiry. The
+      // credential event above also observes it; the explicit call keeps the intake route
+      // working the same way even if the value was re-adopted without a change notification.
+      void browserBridge.onCredentialRefresh()
       await ensureMcp()
       await adoptNow()
       response.writeHead(204, { 'cache-control': 'no-store' })
@@ -1513,6 +1614,65 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }), 'dataops-managed: auth state route')
 
   /**
+   * 本机一键配对的配对码来源。
+   *
+   * DSH 页面里的客户端脚本先探测 `127.0.0.1:8932/status`；未配对时调用本路由拿
+   * 一次性配对码，再直接 POST 给本机 Companion。配对码不经过用户、不写日志。
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/integrations/dataops/browser-bridge/auto-pair',
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      if ((request.method ?? 'GET').toUpperCase() !== 'POST') {
+        response.writeHead(405, { allow: 'POST', 'content-length': '0' })
+        response.end()
+        return
+      }
+      try {
+        const bridgeState = await readBrowserBridgeState()
+        if (!bridgeState.enabled) {
+          writeJson(response, 409, { error: '浏览器桥接连接器未启用' })
+          return
+        }
+        const token = await ctx.credentials.resolve(accessRef)
+        if (token === undefined || token.value === '') {
+          writeJson(response, 401, { error: '工作区尚未登录 DataOps' })
+          return
+        }
+        const upstream = await fetch(new URL('/api/ai/browser-bridge/pair/start', baseUrl), {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${token.value}`,
+            'content-type': 'application/json',
+          },
+          body: '{}',
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (!upstream.ok) {
+          writeJson(response, upstream.status === 401 ? 401 : 502, {
+            error: upstream.status === 401 ? 'DataOps 登录已过期' : '配对码生成失败',
+          })
+          return
+        }
+        const payload = await upstream.json() as { code?: unknown; expiresAt?: unknown }
+        if (typeof payload.code !== 'string' || typeof payload.expiresAt !== 'string') {
+          writeJson(response, 502, { error: '配对码响应格式不正确' })
+          return
+        }
+        writeJson(response, 200, {
+          code: payload.code,
+          expiresAt: payload.expiresAt,
+          serverUrl: portalOrigin(),
+        })
+      } catch (error) {
+        ctx.logger.warn('dataops-managed: browser bridge auto-pair failed')
+        ctx.logger.warn(error)
+        writeJson(response, 502, { error: '自动配对失败' })
+      }
+    },
+  }), 'dataops-managed: browser bridge auto pair')
+
+  /**
    * The skill center's connector tab. The route is a same-origin presentation bridge: reads
    * return only capabilities the current scope can use, and writes persist the connector's own
    * enable state. It never substitutes for a DataOps authorization decision.
@@ -1525,13 +1685,41 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         if (request.method === 'GET') {
           if (aiTools.currentScope() === undefined) await aiTools.refresh()
           const state = await readConnectorState()
-          writeJson(response, 200, { connectors: [buildConnectorView(aiTools.currentScope(), state)] })
+          const bridgeState = await readBrowserBridgeState()
+          writeJson(response, 200, {
+            connectors: [
+              buildConnectorView(aiTools.currentScope(), state),
+              buildBrowserBridgeConnectorView(bridgeState, browserBridge.status()),
+            ],
+          })
           return
         }
         if (request.method === 'POST') {
           const body = await readJson(request)
           if (body === null) {
             writeJson(response, 400, { error: 'connector state requires a JSON body' })
+            return
+          }
+          if (body.connectorId === BROWSER_BRIDGE_CONNECTOR_ID) {
+            if (typeof body.enabled !== 'boolean') {
+              writeJson(response, 400, { error: 'connector state requires enabled:boolean' })
+              return
+            }
+            const bridgeState = await readBrowserBridgeState()
+            bridgeState.enabled = body.enabled
+            await writeBrowserBridgeState(bridgeState)
+            // The switch is the one runtime control: enable asks the gateway for a session now
+            // and disable closes the session this workspace holds, both without a DSH restart.
+            // The attempt runs off the response path so an offline companion cannot stall the
+            // connector panel, which is exactly where the reason is shown.
+            void browserBridge.setEnabled(body.enabled)
+            const state = await readConnectorState()
+            writeJson(response, 200, {
+              connectors: [
+                buildConnectorView(aiTools.currentScope(), state),
+                buildBrowserBridgeConnectorView(bridgeState, browserBridge.status()),
+              ],
+            })
             return
           }
           if (body.connectorId !== DATAOPS_CONNECTOR_ID) {
@@ -1565,7 +1753,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           // Capability switches own whole tool groups: reconcile now so a disabled capability
           // takes its tools out of the model's surface without waiting for the next role sync.
           await aiTools.refreshCapabilities()
-          writeJson(response, 200, { connectors: [buildConnectorView(aiTools.currentScope(), state)] })
+          const bridgeState = await readBrowserBridgeState()
+          writeJson(response, 200, {
+            connectors: [
+              buildConnectorView(aiTools.currentScope(), state),
+              buildBrowserBridgeConnectorView(bridgeState, browserBridge.status()),
+            ],
+          })
           return
         }
         response.writeHead(405, { allow: 'GET, POST', 'content-length': '0' })
@@ -1577,6 +1771,62 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'dataops-managed: skill-center connector catalogue')
+
+  /**
+   * Installer download for the browser-bridge connector.
+   *
+   * The file is local state, not a model tool and not an arbitrary proxy: an
+   * operator places a signed installer at DSH_BROWSER_BRIDGE_INSTALLER_PATH
+   * (default under DSH_HOME) and this route streams that exact file.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: BROWSER_BRIDGE_INSTALLER_PATH,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      if (request.method !== 'GET') {
+        response.writeHead(405, { allow: 'GET', 'content-length': '0' })
+        response.end()
+        return
+      }
+      // A release artifact URL keeps the installer out of both the image and the
+      // workspace volume. Offline deployments can fall back to a file placed in
+      // the runtime-connectors mount instead.
+      const artifactUrl = process.env.DSH_BROWSER_BRIDGE_INSTALLER_URL?.trim() ?? ''
+      if (artifactUrl !== '') {
+        response.writeHead(302, {
+          location: artifactUrl,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        })
+        response.end()
+        return
+      }
+      const configured = process.env.DSH_BROWSER_BRIDGE_INSTALLER_PATH?.trim() ?? ''
+      const installerPath = configured !== ''
+        ? configured
+        : join(
+            process.env.DSH_HOME?.trim() || '/workspace/.dataops/dsh',
+            'runtime-connectors',
+            'browser-bridge',
+            'DSH-Browser-Bridge-Setup-Windows-x64-v0.1.0.exe',
+          )
+      try {
+        const info = await stat(installerPath)
+        if (!info.isFile()) throw new Error('installer is not a file')
+        const bytes = await readFile(installerPath)
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-disposition': 'attachment; filename="' + basename(installerPath).replace(/["\\]/gu, '') + '"',
+          'content-length': String(bytes.byteLength),
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        })
+        response.end(bytes)
+      } catch {
+        writeJson(response, 404, { error: 'bridge installer is not available in this workspace' })
+      }
+    },
+  }), 'dataops-managed: browser bridge installer')
 
   await connectExisting()
 }

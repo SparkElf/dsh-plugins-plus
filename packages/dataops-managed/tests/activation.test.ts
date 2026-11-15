@@ -76,8 +76,10 @@ describe('apply', () => {
 
     await expect(apply(context as never, CONFIG)).resolves.toBeUndefined()
     expect(routes.map((route) => route.path).sort()).toEqual([
+      '/api/dsh-skill-center/browser-bridge/installer',
       '/api/dsh-skill-center/connectors',
       '/integrations/dataops/auth-state',
+      '/integrations/dataops/browser-bridge/auto-pair',
       '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',
       '/integrations/dataops/model-sync',
@@ -104,8 +106,10 @@ describe('apply', () => {
     // Five surfaces plus the auth-state read the sign-in prompt polls. Asserted by name rather
     // than only by count, so adding a route cannot silently displace one that a panel needs.
     expect(routes.map((route) => route.path).sort()).toEqual([
+      '/api/dsh-skill-center/browser-bridge/installer',
       '/api/dsh-skill-center/connectors',
       '/integrations/dataops/auth-state',
+      '/integrations/dataops/browser-bridge/auto-pair',
       '/integrations/dataops/departments',
       '/integrations/dataops/managed-auth',
       '/integrations/dataops/model-sync',
@@ -136,7 +140,7 @@ describe('apply', () => {
     await apply(context as never, CONFIG)
 
     expect((registered as Array<{ name: string }>).map((item) => item.name).sort())
-      .toEqual(['api-connector-authoring', 'dataops-collect', 'dataops-query', 'prefect-script-authoring', 'skill-provisioning'])
+      .toEqual(['api-connector-authoring', 'browser-bridge-companion', 'dataops-collect', 'dataops-query', 'prefect-script-authoring', 'skill-provisioning'])
     const provider = (registered as Array<{ name: string }>).find((item) => item.name === 'dataops-query') as unknown as {
       name: string
       list: () => Promise<{ name: string; locator: URL }[]>

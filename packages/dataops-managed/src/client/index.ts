@@ -76,9 +76,49 @@ const bindReloginCopy = (ctx: ClientContext): ReloginPromptProps['t'] => {
  *
  * @param ctx - DSH client context with locale, slots and the sidebar foot.
  */
+/**
+ * 自动配对：DSH 页面本身就是用户已经打开的网页，不需要再让用户去另一个「桥接页面」。
+ *
+ * 页面加载后探测本机 Companion（127.0.0.1:8932）。如果它已启动但未配对，向 Host 要一个
+ * 一次性配对码，直接 POST 给 Companion；Companion 自己建立出站隧道，插件随后自动建会话。
+ * 整个过程用户无感；失败（未安装/未启动）就静默重试，不弹窗、不打断对话。
+ */
+const autoPairLocalBridge = async (): Promise<void> => {
+  try {
+    const probe = new AbortController()
+    const timer = window.setTimeout(() => probe.abort(), 1_500)
+    const status = await fetch('http://127.0.0.1:8932/status', { signal: probe.signal, cache: 'no-store' })
+    window.clearTimeout(timer)
+    if (!status.ok) return
+    const snapshot = await status.json() as { paired?: unknown }
+    if (snapshot.paired === true) return
+    const created = await fetch('/integrations/dataops/browser-bridge/auto-pair', { method: 'POST' })
+    if (!created.ok) return
+    const payload = await created.json() as { code?: unknown; serverUrl?: unknown }
+    if (typeof payload.code !== 'string' || typeof payload.serverUrl !== 'string') return
+    await fetch('http://127.0.0.1:8932/pair', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: payload.code, serverUrl: payload.serverUrl }),
+    })
+  } catch {
+    // Companion 未安装/未启动/跨域被拦截：静默，不影响对话。
+  }
+}
+
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dataops-managed: settings copy')
   installWanxiangBranding(ctx)
+  ctx.effect(() => {
+    let disposed = false
+    const run = (): void => { if (!disposed) void autoPairLocalBridge() }
+    run()
+    const timer = window.setInterval(run, 30_000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, 'dataops-managed: browser bridge auto pair')
 
   /**
    * The DSH logo returns to the portal page the reader entered from.

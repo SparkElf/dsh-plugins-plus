@@ -13,6 +13,7 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import type { BrowserBridgeStatus } from './browser-bridge-session.ts'
 import {
   isAdmin,
   type DataOpsScope,
@@ -23,6 +24,24 @@ export const CONNECTORS_PATH = '/api/dsh-skill-center/connectors'
 
 /** Connector id shown in the skill center. */
 export const DATAOPS_CONNECTOR_ID = 'dataops-managed'
+
+/** Connector id for the local browser bridge companion. */
+export const BROWSER_BRIDGE_CONNECTOR_ID = 'browser-bridge'
+
+/** Same-origin route that serves the bridge installer file. */
+export const BROWSER_BRIDGE_INSTALLER_PATH = '/api/dsh-skill-center/browser-bridge/installer'
+
+/** Persisted enable state for the browser bridge connector. */
+export interface BrowserBridgeConnectorState {
+  enabled: boolean
+}
+
+/** State file for the browser bridge connector, beside the DataOps connector state. */
+export const BROWSER_BRIDGE_STATE_PATH = join(
+  process.env.DSH_HOME?.trim() || '/workspace/.dataops/dsh',
+  'dataops-managed',
+  'browser-bridge-state.json',
+)
 
 /** Persisted enable state; a missing file means the connector is off. */
 export interface DataOpsConnectorState {
@@ -41,6 +60,15 @@ export interface ConnectorCapabilityView {
 }
 
 /** One connector row the skill center renders. */
+export interface ConnectorInstallerView {
+  /** File name the browser saves the installer as. */
+  fileName: string
+  /** Same-origin URL that streams the installer. */
+  downloadUrl: string
+  /** Product-language explanation shown in the confirmation dialog. */
+  description: string
+}
+
 export interface ConnectorView {
   id: string
   name: string
@@ -49,6 +77,8 @@ export interface ConnectorView {
   enabled: boolean
   connected: boolean
   capabilities: ConnectorCapabilityView[]
+  /** Present when this connector has a downloadable local companion. */
+  installer?: ConnectorInstallerView
 }
 
 /** Resolve the persisted state file without depending on a global DSH path. */
@@ -162,6 +192,91 @@ export async function writeConnectorState(
   }
   await writeFile(temporary, JSON.stringify(payload, null, 2), 'utf8')
   await rename(temporary, path)
+}
+
+/** Read browser-bridge state; a missing or corrupt file means disabled. */
+export async function readBrowserBridgeState(
+  path = BROWSER_BRIDGE_STATE_PATH,
+): Promise<BrowserBridgeConnectorState> {
+  try {
+    const payload = JSON.parse(await readFile(path, 'utf8')) as unknown
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+      return { enabled: false }
+    }
+    return { enabled: (payload as Record<string, unknown>).enabled === true }
+  } catch {
+    return { enabled: false }
+  }
+}
+
+/** Persist browser-bridge state atomically. */
+export async function writeBrowserBridgeState(
+  state: BrowserBridgeConnectorState,
+  path = BROWSER_BRIDGE_STATE_PATH,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const temporary = path + '.tmp-' + process.pid.toString()
+  await writeFile(temporary, JSON.stringify({ enabled: state.enabled }, null, 2), 'utf8')
+  await rename(temporary, path)
+}
+
+/** Product-language description shared by every bridge row; the hint below appends to it. */
+const BROWSER_BRIDGE_DESCRIPTION =
+  '把用户本地 Chrome/Edge 接入 AI 工作区，让 AI 通过 Playwright 操作本地浏览器；需要安装桥接程序。'
+
+/**
+ * Explain the live bridge state without exposing an endpoint or a credential.
+ *
+ * The connector row is where a person discovers *why* `browser_*` is missing, so an offline
+ * companion, an expired login, and a failed connection each get a different next step.
+ */
+function browserBridgeDescription(runtime: BrowserBridgeStatus | undefined): string {
+  switch (runtime?.phase) {
+    case 'connected':
+    case 'idle':
+    case 'disabled':
+    case undefined:
+      return BROWSER_BRIDGE_DESCRIPTION
+    case 'connecting':
+      return BROWSER_BRIDGE_DESCRIPTION + ' 正在建立桥接连接…'
+    case 'offline':
+      return BROWSER_BRIDGE_DESCRIPTION + ' 当前没有在线的 Companion：请在本机输入 8 位配对码完成配对并启动 Companion，插件会每 60 秒自动重试。'
+    case 'expired':
+      return BROWSER_BRIDGE_DESCRIPTION + ' DataOps 登录已过期，重新登录后会自动恢复，无需重启工作区。'
+    case 'closed':
+      return BROWSER_BRIDGE_DESCRIPTION + ' 桥接会话已关闭；重新登录或重新启用连接器后会重新建立。'
+    case 'error':
+      return BROWSER_BRIDGE_DESCRIPTION + ' 桥接连接暂时失败，插件正在自动重试。'
+  }
+}
+
+/**
+ * Build the browser-bridge connector row.
+ *
+ * `connected` is evidence, not intent: it is true only while the MCP client is loaded *and*
+ * the gateway reports the session active. `enabled` remains the persisted switch.
+ * @param state - Persisted connector switch.
+ * @param runtime - Live session status; omit when no session manager is active.
+ * @returns The connector row the skill center renders.
+ */
+export function buildBrowserBridgeConnectorView(
+  state: BrowserBridgeConnectorState,
+  runtime?: BrowserBridgeStatus,
+): ConnectorView {
+  return {
+    id: BROWSER_BRIDGE_CONNECTOR_ID,
+    name: '浏览器桥接',
+    vendor: 'DataOps',
+    description: browserBridgeDescription(runtime),
+    enabled: state.enabled,
+    connected: runtime?.connected === true,
+    capabilities: [],
+    installer: {
+      fileName: 'DSH-Browser-Bridge-Setup-Windows-x64-v0.1.0.exe',
+      downloadUrl: BROWSER_BRIDGE_INSTALLER_PATH,
+      description: '这是完整的离线 Windows 安装包，内含 Chromium、Node 和 Playwright，不会在安装时访问外网。安装后在本机启动受控浏览器窗口，AI 通过它执行网页操作；程序不会读取或上传用户日常浏览器的 Cookie。',
+    },
+  }
 }
 
 /** Build the connector row for one current scope. */
