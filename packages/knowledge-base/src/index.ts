@@ -4101,6 +4101,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                   graphToolHost,
                   knowledgeGraphsOf(graphTree),
                   overviewScopesFromRoots(roots),
+                  graphCaller,
                 )).filter(isOverviewGraph)
             for (const row of overviewRows) {
               const targetScope = graphTree.scopes.find(scope => scope.key === row.scope)
@@ -7826,6 +7827,22 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
    */
   const graphToolHost: KnowledgeGraphToolHost = {
     resolveCaller: knowledgeToolHost.resolveCaller,
+    resolveGraphCaller: async () => {
+      const caller = await fetchCaller(host, config)
+      // Older backends report only the leaf code/name; treat them as a one-level
+      // chain so the inheritance filter still works instead of silently hiding
+      // every department contribution.
+      const departmentPathCodes = caller.departmentPathCodes
+        ?? (caller.departmentCode === undefined ? undefined : [caller.departmentCode])
+      const departmentPathNames = caller.departmentPathNames
+        ?? (caller.departmentName === undefined ? undefined : [caller.departmentName])
+      return {
+        userId: caller.userId,
+        ...(caller.label === undefined ? {} : { label: caller.label }),
+        ...(departmentPathCodes === undefined ? {} : { departmentPathCodes }),
+        ...(departmentPathNames === undefined ? {} : { departmentPathNames }),
+      }
+    },
     canWrite: knowledgeToolHost.canWrite,
     // Every write seam drops the overview aggregate: a new/removed node, edge or
     // attribute must be visible on the next `kg_get` / graph-tab read, not after a
@@ -7901,6 +7918,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         graphToolHost,
         knowledgeGraphsOf(tree),
         overviewScopesFromRoots(roots),
+        caller,
       )
     },
   }

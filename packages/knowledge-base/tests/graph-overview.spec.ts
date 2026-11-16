@@ -10,6 +10,8 @@ import {
   OVERVIEW_GRAPH_NAME,
   OVERVIEW_GRAPH_PATH,
   buildOverviewAggregate,
+  graphDepartmentCodes,
+  graphsForLevel,
   JsonOverviewStore,
   OVERVIEW_STORE_FALLBACK_DIR,
   OverviewStoreManager,
@@ -77,6 +79,9 @@ interface HostOptions {
   /** View ids (`personal/.graphs/<id>`) the caller may read; undefined means all. */
   readable?: string[]
   canWrite?: (relPath: string) => boolean
+  /** The caller's department chain, root first. */
+  departmentPathCodes?: string[]
+  departmentPathNames?: string[]
 }
 
 /**
@@ -97,6 +102,12 @@ function makeHost(root: string, options: HostOptions = {}) {
   }
   const host = {
     resolveCaller: async () => ({ userId: 'u1', label: '测试用户' }),
+    resolveGraphCaller: async () => ({
+      userId: 'u1',
+      label: '测试用户',
+      ...(options.departmentPathCodes === undefined ? {} : { departmentPathCodes: options.departmentPathCodes }),
+      ...(options.departmentPathNames === undefined ? {} : { departmentPathNames: options.departmentPathNames }),
+    }),
     canWrite: async (relPath: string) => options.canWrite?.(relPath) ?? true,
     readText: async (viewPath: string) => readFile(toActual(viewPath), 'utf8'),
     readActual: async (relPath: string) => readFile(toActual(relPath), 'utf8'),
@@ -523,11 +534,16 @@ interface ScopeSpec {
  * A Host that scans `.graphs` under all three scope bases, the way the real
  * `knowledgeGraphScopeRoots` resolves one root per scope for a caller.
  */
-function makeScopedHost(root: string, specs: ScopeSpec[], options: HostOptions = {}) {
+function makeScopedHost(
+  root: string,
+  catalogueSpecs: ScopeSpec[],
+  options: HostOptions = {},
+  overviewSpecs: ScopeSpec[] = catalogueSpecs,
+) {
   const made = makeHost(root, options)
   made.host.listGraphs = async () => {
     const graphs: KnowledgeGraphNode[] = []
-    for (const spec of specs) {
+    for (const spec of catalogueSpecs) {
       const directory = join(root, spec.actualBase, '.graphs')
       const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
       for (const entry of entries) {
@@ -548,7 +564,7 @@ function makeScopedHost(root: string, specs: ScopeSpec[], options: HostOptions =
         }
       }
     }
-    return appendOverviewGraphs(made.host, graphs, specs)
+    return appendOverviewGraphs(made.host, graphs, overviewSpecs)
   }
   return made
 }
@@ -576,6 +592,14 @@ async function threeLevelFixture(options: HostOptions = {}) {
     id: 'd-role', type: 'fact', title: '部门岗位', authority: 'advisory',
     internalizable: 'true', origin: 'human', reviewStatus: 'draft', tags: '[]', sourceRefs: '[]',
   }))
+  // Subdepartment graph: a D1 caller must see it in the department/personal totals.
+  await write(join(root, 'department', 'D1', 'D2', '.graphs', 'sub', 'graph.json'), JSON.stringify(manifest('sub', '子部门制度图谱', [
+    { id: 's-rule', path: '制度/子部门规则.md' },
+  ], []), null, 2))
+  await write(join(root, 'department', 'D1', 'D2', '制度', '子部门规则.md'), nodeDocument({
+    id: 's-rule', type: 'policy', title: '子部门规则', authority: 'canonical',
+    internalizable: 'true', origin: 'human', reviewStatus: 'approved', tags: '[]', sourceRefs: '[]',
+  }))
   // Personal graph.
   await write(join(root, 'personal', 'u1', '.graphs', 'proc', 'graph.json'), JSON.stringify(manifest('proc', '采购制度图谱', [
     { id: 'node-policy', path: '制度/采购制度.md' },
@@ -589,7 +613,14 @@ async function threeLevelFixture(options: HostOptions = {}) {
     { level: 'department', viewBase: 'department/D1', actualBase: 'department/D1', groupLabel: '数据部' },
     { level: 'personal', viewBase: 'personal', actualBase: 'personal/u1' },
   ]
-  return { ...makeScopedHost(root, specs, options), specs }
+  const catalogueSpecs: ScopeSpec[] = [
+    ...specs,
+    { level: 'department', viewBase: 'department/D1/D2', actualBase: 'department/D1/D2', groupLabel: '子部门' },
+  ]
+  return {
+    ...makeScopedHost(root, catalogueSpecs, { departmentPathCodes: ['D1'], departmentPathNames: ['数据部'], ...options }, specs),
+    specs,
+  }
 }
 
 describe('three scope-level overviews', () => {
@@ -612,12 +643,69 @@ describe('three scope-level overviews', () => {
 
     const department = await execute(host, 'kg_get', { graph: 'department/__overview__' })
     expect(department.graph.scope).toBe('department')
-    expect(department.graphs.map((graph: { name: string }) => graph.name)).toEqual(['部门流程图谱'])
+    expect(department.graphs).toHaveLength(3)
+    expect(department.graphs.map((graph: { name: string }) => graph.name)).toEqual(expect.arrayContaining([
+      '全局制度图谱',
+      '部门流程图谱',
+      '子部门制度图谱',
+    ]))
 
-    // The shared display name defaults to the caller's personal overview.
+    // The shared display name defaults to the caller's personal overview, which
+    // also inherits the department subtree and the global scope.
     const personal = await execute(host, 'kg_get', { graph: '总图' })
     expect(personal.graph.scope).toBe('personal')
-    expect(personal.graphs.map((graph: { name: string }) => graph.name)).toEqual(['采购制度图谱'])
+    expect(personal.graphs).toHaveLength(4)
+    expect(personal.graphs.map((graph: { name: string }) => graph.name)).toEqual(expect.arrayContaining([
+      '全局制度图谱',
+      '部门流程图谱',
+      '子部门制度图谱',
+      '采购制度图谱',
+    ]))
+  })
+
+  it('marks inherited graphs/nodes as contributed and read-only', async () => {
+    const { host } = await threeLevelFixture()
+    const personal = await execute(host, 'kg_get', { graph: '总图' })
+    const globalSummary = personal.graphs.find((graph: { name: string }) => graph.name === '全局制度图谱')
+    const departmentSummary = personal.graphs.find((graph: { name: string }) => graph.name === '部门流程图谱')
+    const subSummary = personal.graphs.find((graph: { name: string }) => graph.name === '子部门制度图谱')
+    const ownSummary = personal.graphs.find((graph: { name: string }) => graph.name === '采购制度图谱')
+    expect(globalSummary).toMatchObject({ contributed: true, readOnly: true })
+    expect(departmentSummary).toMatchObject({ contributed: true, readOnly: true })
+    expect(subSummary).toMatchObject({ contributed: true, readOnly: true })
+    expect(ownSummary?.contributed).toBeUndefined()
+
+    const globalNode = personal.nodes.find((node: { id: string }) => node.id === 'global/.graphs/shared:g-policy')
+    const departmentNode = personal.nodes.find((node: { id: string }) => node.id === 'department/D1/.graphs/dept:d-flow')
+    const ownNode = personal.nodes.find((node: { id: string }) => node.id === 'personal/.graphs/proc:node-policy')
+    expect(globalNode).toMatchObject({ contributed: true, readOnly: true })
+    expect(departmentNode).toMatchObject({ contributed: true, readOnly: true })
+    expect(ownNode?.contributed).toBeUndefined()
+
+    // Global 总图 must not pull in a department graph.
+    const global = await execute(host, 'kg_get', { graph: 'global/__overview__' })
+    expect(global.graphs.map((graph: { name: string }) => graph.name)).toEqual(['全局制度图谱'])
+    expect(global.nodes.some((node: { id: string }) => node.id.includes('department/'))).toBe(false)
+  })
+
+  it('allows a personal cross-graph edge to a contributed global node', async () => {
+    const { host } = await threeLevelFixture()
+    const written = await execute(host, 'kg_add', {
+      graph: '总图', kind: 'edge', id: 'personal-to-global',
+      fromGraph: 'personal/.graphs/proc', from: 'node-policy',
+      toGraph: 'global/.graphs/shared', to: 'g-policy', type: 'follows',
+      confirm: true,
+    })
+    expect(written.ok).toBe(true)
+    const personal = await execute(host, 'kg_get', { graph: '总图' })
+    const edge = personal.edges.find((item: { id: string }) => item.id === 'personal-to-global')
+    expect(edge).toMatchObject({
+      from: 'personal/.graphs/proc:node-policy',
+      to: 'global/.graphs/shared:g-policy',
+      crossGraph: true,
+      contributed: true,
+      readOnly: true,
+    })
   })
 
   it('refuses a cross-graph edge whose endpoint is outside the overview scope', async () => {
@@ -820,5 +908,40 @@ describe('overview store directory probe', () => {
     expect(snapshot.schemaVersion).toBe(1)
     expect(snapshot.scope.level).toBe('personal')
     expect(snapshot.aggregate.graph.name).toBe('总图')
+  })
+})
+
+describe('graphsForLevel inheritance', () => {
+  function node(scope: 'global' | 'department' | 'personal', id: string, actualPath: string): KnowledgeGraphNode {
+    return {
+      id,
+      name: id,
+      scope,
+      path: id,
+      group: '',
+      topics: [],
+      links: [],
+      counts: { topics: 0, links: 0, documents: 0 },
+      actualPath,
+    }
+  }
+
+  it('selects global / department-subtree / personal contributions and excludes self', () => {
+    const global = node('global', 'global/.graphs/g', 'global/.graphs/g')
+    const dept = node('department', 'department/D1/.graphs/d', 'department/D1/.graphs/d')
+    const sub = node('department', 'department/D1/D2/.graphs/s', 'department/D1/D2/.graphs/s')
+    const other = node('department', 'department/D9/.graphs/x', 'department/D9/.graphs/x')
+    const mine = node('personal', 'personal/.graphs/p', 'personal/u1/.graphs/p')
+    const otherUser = node('personal', 'personal/.graphs/q', 'personal/u2/.graphs/q')
+    const overview = { ...node('personal', 'personal/.graphs/__overview__', 'personal/u1/.graphs/__overview__'), computed: true }
+    const catalogue = [global, dept, sub, other, mine, otherUser, overview]
+    const caller = { userId: 'u1', departmentPathCodes: ['D1'] }
+
+    expect(graphsForLevel(caller, 'global', catalogue)).toEqual([global])
+    expect(graphsForLevel(caller, 'department', catalogue)).toEqual([global, dept, sub])
+    expect(graphsForLevel(caller, 'personal', catalogue)).toEqual([global, dept, sub, mine])
+    expect(graphDepartmentCodes(dept)).toEqual(['D1'])
+    expect(graphDepartmentCodes(sub)).toEqual(['D1', 'D2'])
+    expect(graphDepartmentCodes(other)).toEqual(['D9'])
   })
 })

@@ -120,6 +120,8 @@ describe('graph canvas overview', () => {
               sourceGraphId: 'personal/.graphs/a',
               sourceNodeId: 'n1',
               scope: 'personal',
+              contributed: true,
+              readOnly: true,
             },
             {
               id: 'personal/.graphs/a:n2',
@@ -182,6 +184,7 @@ describe('graph canvas overview', () => {
     // The cross-graph edge is dashed even though the ordinary cross toggle is off.
     expect(window.document.querySelectorAll('path.edge.cross').length).toBeGreaterThan(0)
     expect(window.document.getElementById('cross')?.classList.contains('on')).toBe(true)
+    expect(window.document.querySelectorAll('.p-badge.contributed').length).toBeGreaterThan(0)
 
     // Clicking an aggregated card hands the source graph/node back to the host.
     const view = (window as unknown as { __KG_VIEW__?: { selectTopic: (id: string) => void } }).__KG_VIEW__

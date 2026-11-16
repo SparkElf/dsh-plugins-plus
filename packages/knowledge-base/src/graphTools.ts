@@ -74,6 +74,18 @@ export interface KnowledgeGraphToolHost extends Pick<
 > {
   /** Every graph the caller may read, with Host-only `actualPath`. */
   listGraphs(): Promise<KnowledgeGraphNode[]>
+  /**
+   * Resolve the caller with the department chain, for the inheritance model.
+   *
+   * Optional so unit-test hosts and one-shot callers keep working; without it the
+   * department contribution set is empty (only personal and global graphs appear).
+   */
+  resolveGraphCaller?(): Promise<{
+    userId: string
+    label?: string
+    departmentPathCodes?: string[]
+    departmentPathNames?: string[]
+  }>
   /** Read one view-relative document through the permission-checked route. */
   readText(viewPath: string): Promise<string>
   /**
@@ -1460,6 +1472,15 @@ export interface OverviewScopeInput {
   groupLabel?: string
 }
 
+/** The caller facts the inheritance model needs (no credentials). */
+export interface OverviewGraphCaller {
+  userId: string
+  label?: string
+  /** Department chain, root first, exactly as the Host resolved it. */
+  departmentPathCodes?: string[]
+  departmentPathNames?: string[]
+}
+
 /** One fully derived overview scope: paths and display grouping. */
 export interface OverviewStoreScope {
   level: OverviewLevel
@@ -1511,6 +1532,10 @@ export interface OverviewGraphSummary {
   path: string
   format: string
   counts: { topics: number; links: number; documents: number }
+  /** True when this graph came from a higher scope and is a read-only contribution. */
+  contributed?: boolean
+  /** True for a contributed graph; the personal overview never edits an upper source. */
+  readOnly?: boolean
 }
 
 /** One aggregated node, namespaced as `<graphId>:<nodeId>`. */
@@ -1528,6 +1553,10 @@ export interface OverviewNode {
   tags: string[]
   /** View-relative document path, for opening the source node. */
   docPath: string
+  /** True when this node came from a higher scope and is a read-only contribution. */
+  contributed?: boolean
+  /** True for a contributed node; its source graph stays the only editable copy. */
+  readOnly?: boolean
 }
 
 /** One aggregated edge, with both endpoints remapped to namespaced node ids. */
@@ -1547,6 +1576,10 @@ export interface OverviewEdge {
   sourceRefs: string[]
   /** True for a link stored in `<scope>/.graphs/__overview__/links.json`. */
   crossGraph: boolean
+  /** True when either endpoint graph is a higher-scope contribution. */
+  contributed?: boolean
+  /** True when this edge belongs to a contributed graph. */
+  readOnly?: boolean
 }
 
 /** The aggregate `kg_get` answers for one overview and the canvas consumes. */
@@ -2297,12 +2330,91 @@ function findGraphReference(
   return found.length === 1 ? found[0] : undefined
 }
 
-/** The readable graphs belonging to one overview level, self excluded. */
-function graphsOfLevel(
-  graphs: readonly KnowledgeGraphNode[],
+/** Resolve the caller with the department chain, falling back to the basic seam. */
+async function resolveOverviewCaller(host: KnowledgeGraphToolHost): Promise<OverviewGraphCaller> {
+  if (host.resolveGraphCaller !== undefined) return await host.resolveGraphCaller()
+  const caller = await host.resolveCaller()
+  return {
+    userId: caller.userId,
+    ...(caller.label === undefined ? {} : { label: caller.label }),
+  }
+}
+
+/**
+ * The department code chain of a department graph, derived from its authoritative
+ * path (`department/<D1>/<D2>/.../(.graphs|知识图谱)/...`).
+ *
+ * The view path is deliberately not used first: a flat legacy view links the graph
+ * at `department/知识图谱/...` while its bytes (and therefore its department) live
+ * under the actual code chain. An unprovable chain returns undefined and the graph
+ * is excluded from a department/personal contribution set rather than guessed in.
+ */
+export function graphDepartmentCodes(
+  graph: Pick<KnowledgeGraphNode, 'scope' | 'path' | 'actualPath'>,
+): string[] | undefined {
+  if (graph.scope !== 'department') return undefined
+  const candidate = graph.actualPath !== undefined && graph.actualPath !== '' ? graph.actualPath : graph.path
+  const parts = candidate.split('/').filter(segment => segment !== '')
+  if (parts[0] !== 'department') return undefined
+  let marker = -1
+  for (let index = 1; index < parts.length; index += 1) {
+    if (parts[index] === KNOWLEDGE_GRAPH_FOLDER || parts[index] === '.graphs') {
+      marker = index
+      break
+    }
+  }
+  if (marker < 0) return undefined
+  const codes = parts.slice(1, marker)
+  return codes.length > 0 ? codes : undefined
+}
+
+/** Whether a department chain is the caller's own department or one of its descendants. */
+export function departmentInSubtree(
+  codes: readonly string[],
+  callerCodes: readonly string[],
+): boolean {
+  if (callerCodes.length === 0 || codes.length < callerCodes.length) return false
+  return callerCodes.every((code, index) => codes[index] === code)
+}
+
+/**
+ * The readable graphs contributing to one overview level.
+ *
+ * - global: global graphs only.
+ * - department: the caller's own department, its subdepartments, plus global.
+ * - personal: personal graphs plus the department subtree and global; personal
+ *   never pulls another user's personal graph.
+ *
+ * `graphs` is already permission-filtered by the Host, so an unreadable graph is
+ * absent before this function runs. A department graph whose chain cannot be
+ * proven is omitted (no name/count disclosure).
+ */
+export function graphsForLevel(
+  caller: OverviewGraphCaller,
   level: OverviewLevel,
+  graphs: readonly KnowledgeGraphNode[],
 ): KnowledgeGraphNode[] {
-  return graphs.filter(graph => !isOverviewGraph(graph) && graph.scope === level)
+  const callerCodes = caller.departmentPathCodes ?? []
+  return graphs.filter(graph => {
+    if (isOverviewGraph(graph)) return false
+    if (level === 'global') return graph.scope === 'global'
+    if (graph.scope === 'global') return true
+    if (graph.scope === 'personal') {
+      if (level !== 'personal') return false
+      const actual = graph.actualPath
+      if (actual === undefined || actual === '') return true
+      // Team layout carries the owner; a local tree is flat and the Host has
+      // already scoped the catalogue to this single user.
+      return actual.startsWith('personal/' + caller.userId + '/')
+        || actual.startsWith('personal/.graphs/')
+    }
+    if (graph.scope === 'department') {
+      const codes = graphDepartmentCodes(graph)
+      if (codes === undefined || !departmentInSubtree(codes, callerCodes)) return false
+      return level === 'department' || level === 'personal'
+    }
+    return false
+  })
 }
 
 /** Stable key for the aggregate cache: scope, catalogue content and link snapshot. */
@@ -2370,7 +2482,7 @@ export function buildOverviewAggregate(
   crossLinks: readonly OverviewCrossLink[] = [],
   storeIssues: readonly string[] = [],
 ): OverviewAggregate {
-  const readable = graphsOfLevel(graphs, scope.level)
+  const readable = graphs.filter(graph => !isOverviewGraph(graph))
   const issues: string[] = [...storeIssues]
   const summaries: OverviewGraphSummary[] = []
   const nodeIndex = new Map<string, KnowledgeGraphTopic>()
@@ -2381,6 +2493,7 @@ export function buildOverviewAggregate(
 
   for (const graph of readable) {
     const format = (graph as GraphNodeWithFormat).format ?? 'legacy'
+    const contributed = graph.scope !== scope.level
     summaries.push({
       id: graph.id,
       name: graph.name,
@@ -2389,12 +2502,14 @@ export function buildOverviewAggregate(
       path: graph.path,
       format,
       counts: { ...graph.counts },
+      ...(contributed ? { contributed: true, readOnly: true } : {}),
     })
     for (const topic of graph.topics) {
       const namespaced = graph.id + ':' + topic.id
       if (nodeIndex.has(namespaced)) continue
       const type = format === 'graph-json' ? (topic.domain ?? 'topic') : 'topic'
       const docPath = topic.documents[0]?.path ?? topic.path
+      const contributed = graph.scope !== scope.level
       nodeIndex.set(namespaced, topic)
       nodes.push({
         id: namespaced,
@@ -2408,6 +2523,7 @@ export function buildOverviewAggregate(
         ...(topic.reviewStatus === undefined ? {} : { reviewStatus: topic.reviewStatus }),
         tags: [...topic.tags],
         docPath,
+        ...(contributed ? { contributed: true, readOnly: true } : {}),
       })
       topics.push({
         ...topic,
@@ -2420,11 +2536,13 @@ export function buildOverviewAggregate(
         sourceGraphId: graph.id,
         sourceNodeId: topic.id,
         scope: scope.level,
+        ...(contributed ? { contributed: true, readOnly: true } : {}),
       })
     }
   }
 
   for (const graph of readable) {
+    const contributed = graph.scope !== scope.level
     for (const link of graph.links) {
       const from = graph.id + ':' + link.a
       const to = graph.id + ':' + link.b
@@ -2441,6 +2559,7 @@ export function buildOverviewAggregate(
         tags: [],
         sourceRefs: [],
         crossGraph: false,
+        ...(contributed ? { contributed: true, readOnly: true } : {}),
       })
       links.push({
         a: from,
@@ -2448,6 +2567,7 @@ export function buildOverviewAggregate(
         ...(link.label === undefined ? {} : { label: link.label }),
         body: link.body,
         ...(link.file === undefined ? {} : { file: link.file }),
+        ...(contributed ? { contributed: true } : {}),
       })
     }
   }
@@ -2468,6 +2588,8 @@ export function buildOverviewAggregate(
     }
     crossEdges += 1
     const label = record.title ?? record.type
+    const contributed = (fromGraph?.scope ?? scope.level) !== scope.level
+      || (toGraph?.scope ?? scope.level) !== scope.level
     edges.push({
       id: record.id,
       graphId: scope.viewPath,
@@ -2482,6 +2604,7 @@ export function buildOverviewAggregate(
       tags: [...record.tags],
       sourceRefs: [...record.sourceRefs],
       crossGraph: true,
+      ...(contributed ? { contributed: true, readOnly: true } : {}),
     })
     links.push({
       a: from,
@@ -2489,6 +2612,7 @@ export function buildOverviewAggregate(
       label,
       body: record.body ?? '',
       crossGraph: true,
+      ...(contributed ? { contributed: true } : {}),
     })
   }
 
@@ -2532,14 +2656,16 @@ export async function loadOverviewAggregate(
   host: KnowledgeGraphToolHost,
   graphs: readonly KnowledgeGraphNode[],
   scopeInput?: OverviewScopeInput | OverviewStoreScope,
+  callerInput?: OverviewGraphCaller,
 ): Promise<OverviewAggregate> {
   const scope = scopeInput === undefined
     ? await personalOverviewScope(host)
     : ('viewPath' in scopeInput ? scopeInput : overviewStoreScope(scopeInput))
+  const caller = callerInput ?? await resolveOverviewCaller(host)
   const acquired = await acquireOverviewStore(host, scope)
   try {
     const links = await acquired.store.query()
-    const levelGraphs = graphsOfLevel(graphs, scope.level)
+    const levelGraphs = graphsForLevel(caller, scope.level, graphs)
     const key = overviewSignature(scope, levelGraphs, links)
     let cache = overviewCache.get(host)
     if (cache === undefined) {
@@ -2578,15 +2704,17 @@ export async function appendOverviewGraphs(
   host: KnowledgeGraphToolHost,
   graphs: readonly KnowledgeGraphNode[],
   scopes: readonly OverviewScopeInput[],
+  callerInput?: OverviewGraphCaller,
 ): Promise<KnowledgeGraphNode[]> {
   const real = graphs.filter(graph => !isOverviewGraph(graph))
+  const caller = callerInput ?? await resolveOverviewCaller(host)
   const entries: KnowledgeGraphNode[] = []
   const seen = new Set<string>()
   for (const input of scopes) {
     const scope = overviewStoreScope(input)
     if (seen.has(scope.viewPath)) continue
     seen.add(scope.viewPath)
-    const aggregate = await loadOverviewAggregate(host, real, scope)
+    const aggregate = await loadOverviewAggregate(host, real, scope, caller)
     entries.push(overviewGraphNode(scope, aggregate))
   }
   return [...real, ...entries]
@@ -2643,7 +2771,8 @@ async function addOverviewEdge(
     || isOverviewGraph({ id: toGraphValue, path: toGraphValue })) {
     throw new KnowledgeToolError('invalid', 'an overview cannot link to itself; name two source graphs', id)
   }
-  const levelGraphs = graphsOfLevel(graphs, scope.level)
+  const caller = await resolveOverviewCaller(host)
+  const levelGraphs = graphsForLevel(caller, scope.level, graphs)
   const fromGraph = findGraphReference(levelGraphs, fromGraphValue)
   if (fromGraph === undefined) {
     throw new KnowledgeToolError(
@@ -2674,7 +2803,6 @@ async function addOverviewEdge(
   }
   const type = (args.type ?? '').trim()
   if (type === '') throw new KnowledgeToolError('invalid', 'type (the relation label) is required for an edge', id)
-  const caller = await host.resolveCaller()
   const acquired = await acquireOverviewStore(host, scope)
   try {
     const store = acquired.store

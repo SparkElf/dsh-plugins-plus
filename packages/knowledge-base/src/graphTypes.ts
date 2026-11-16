@@ -96,6 +96,10 @@ export interface KnowledgeGraphTopic {
   sourceNodeId?: string
   /** Overview projection only: the source graph's scope, for the scope filter. */
   scope?: KnowledgeGraphScopeKey
+  /** True when this node came from a higher scope and is read-only here. */
+  contributed?: boolean
+  /** True when the overview must treat this node as read-only (a contributed copy). */
+  readOnly?: boolean
 }
 
 /** One relation document under `<graph>/.kg/links/`. */
@@ -119,6 +123,8 @@ export interface KnowledgeGraphLink {
    * ordinary cross-link toggle, because crossing graphs is the overview's point.
    */
   crossGraph?: boolean
+  /** Overview projection only: at least one endpoint came from a higher scope. */
+  contributed?: boolean
 }
 
 /** One graph node under a scope. */

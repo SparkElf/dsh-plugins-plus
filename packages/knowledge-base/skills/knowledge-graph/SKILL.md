@@ -48,9 +48,14 @@ personal/<uid>/.graphs/__overview__/links.json      # 个人总图；按用户
 - `kg_get {"graph":"总图"}` 默认解析到**个人总图**；要读其它级，用 `global/__overview__`、`department/__overview__`、`personal/__overview__`（也接受 `<级>/总图`）。
 - 每次返回该级的 `graphs[]` 图谱摘要、`nodes[]`（id 形如 `<graphId>:<nodeId>`，带 graphId/type/title/authority/reviewStatus/docPath）、
   `edges[]`（端点已重映射；跨图边 `crossGraph:true`）。
-- 每一级只聚合该级、调用者可读的图谱，且永远排除该级 `总图` 自身；边只有在两端图谱都可读时才出现，不会泄露另一侧的名称或计数。
+- **继承模型**（`graphsForLevel`）：
+  - `global` 总图 = global scope；
+  - `department` 总图 = 本部门 + 子部门 + global 可读贡献；
+  - `personal` 总图 = 个人 + 本部门链（含子部门）+ global 可读贡献。
+  - 每级都排除该级 `总图` 自身；跨图边两端都必须在该级的贡献集合内且可读，不会泄露另一侧的名称或计数。
+- 上级贡献的图/节点/边带 `contributed:true`、`readOnly:true`；个人总图不能改上级源图，编辑必须回到源图谱。
 - `总图` 只读：`kg_set` 被拒绝；`kg_add kind=node` 被拒绝（请把节点加到源图谱，`总图` 会自动出现它）。
-- 跨图关系用 `kg_add` 写入**同级**的 `links.json`：
+- 跨图关系用 `kg_add` 写入该级 `__overview__` 的 `links.json`：
 
 ```json
 {"kind":"edge","graph":"personal/__overview__","id":"policy-to-role",
@@ -59,7 +64,7 @@ personal/<uid>/.graphs/__overview__/links.json      # 个人总图；按用户
 ```
 
   先不带 `confirm` 拿草稿，用户确认后加 `"confirm":true`。`id` 是跨图边 id，必须唯一；`from`/`to` 仍然是**节点 id**，不是图谱 id。
-  两个端点图谱都必须可读、与本总图同级、节点必须存在，否则返回 `not-found`；重复 id 返回 `exists`；
+  两个端点图谱都必须可读、在该级贡献集合内、节点必须存在，否则返回 `not-found`；重复 id 返回 `exists`；
   `authority`/`origin`/`reviewStatus`/`tags`/`sourceRefs` 与普通边同规则校验。
 - `kg_del {"graph":"总图","id":"<跨图边 id>"}` 把这条关系移到该级 `.graphs/__overview__/_trash/links/`，不真删。
 - 图谱页里三级 `总图` 都显示 `[计算] [只读]`；画布按来源图谱分簇，跨图边走虚线，点击节点跳到源图谱的对应节点。
@@ -176,7 +181,7 @@ updated: 2026-10-31
 4. **寻址**：`kg_get` 不带 id 看总览 → 按名称找 graph → `kg_get {graph,id}` 读一条线；不要用 `find`/`map` 另造工具。
 5. **沉淀**：把一次会话的结论写成文档（`kb_file_write` 到主题文件夹），再用 `kg_set` 更新卡摘要；图谱不复制文档内容。
 6. **复盘**：`kg_get` 总览 → 对每条线读 `kg_get {graph,id}` → 把 `status`/`depth` 调整回真实状态；`kg_del` 只移 `_trash`，不删。
-7. **跨图关联**：`kg_get {graph:"总图"}`（或 `global/__overview__` / `department/__overview__`）确认两个图谱同级且可读 → `kg_add {graph:"总图",kind:"edge",id,fromGraph,toGraph,from,to,type}` 草稿 → 用户确认 → `confirm:true`；不要为了跨图关系改任一图谱的 `graph.json`。
+7. **跨图关联**：`kg_get {graph:"总图"}`（或 `global/__overview__` / `department/__overview__`）确认两个图谱都在该级贡献集合内且可读 → `kg_add {graph:"总图",kind:"edge",id,fromGraph,toGraph,from,to,type}` 草稿 → 用户确认 → `confirm:true`；不要为了跨图关系改任一图谱的 `graph.json`。
 
 ## 4. 扫历史会话（shell，不配工具）
 
