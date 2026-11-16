@@ -361,8 +361,12 @@ export function scopeForPath(relPath: string): {
   departmentCode: string | null
 } {
   const parts = relPath.split('/').filter(part => part !== '')
-  if (parts[0] === 'personal' && parts.length >= 3) {
-    return { scope: 'personal', ownerId: parts[1] ?? null, departmentCode: null }
+  if (parts[0] === 'personal' && parts.length >= 2) {
+    // `personal/<file>` is the virtual-bucket spelling a UI upload uses before the
+    // write route prepends the owner. Its scope is still personal; the owner is
+    // unknown for that spelling, so the row is only addressable through the
+    // caller-scoped path the route now writes.
+    return { scope: 'personal', ownerId: parts.length >= 3 ? parts[1] ?? null : null, departmentCode: null }
   }
   if (parts[0] === 'department' && parts.length >= 3) {
     return { scope: 'department', ownerId: null, departmentCode: parts[1] ?? null }

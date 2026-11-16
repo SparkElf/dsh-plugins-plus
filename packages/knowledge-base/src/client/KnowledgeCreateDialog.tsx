@@ -28,6 +28,7 @@ import { Button, FileTypeIcon, Input, Modal } from '@deepseek-ai/dsh-client-ui-p
 import { KB_API, kbApiPath, readKnowledgeJson } from '../api.ts'
 import styles from './KnowledgeCreateDialog.module.css'
 import { KnowledgeFileTree } from './KnowledgeFileTree.tsx'
+import { resolveUploadDir } from './dropTargetPath.ts'
 import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
 import type { FileTreeSort } from 'dsh-better-sidebar/src/client/file-tree-sort.ts'
 
@@ -384,7 +385,12 @@ function UploadDestinationTree(props: {
       ? current.filter(item => item !== absolute)
       : [...current, absolute])
     const relPath = relativeOf(absolute)
-    if (relPath !== undefined) { onChange(relPath); setNotice(undefined) }
+    if (relPath !== undefined) {
+      // A folder row names the virtual bucket `personal`; the write route needs the
+      // caller segment, and the dialog should show the real destination it will send.
+      onChange(resolveUploadDir(relPath, callerId) ?? relPath)
+      setNotice(undefined)
+    }
   }, [onChange, relativeOf])
 
   const pasteLocal = useCallback(async (directory: string): Promise<void> => {

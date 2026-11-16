@@ -770,6 +770,40 @@ function personalPathRefusal(config: Config, relPath: string): LocalPathRefusal 
 }
 
 /**
+ * Normalize a PERSONAL write path to the caller's own subtree.
+ *
+ * The page's upload destination is the virtual bucket `personal`, so a file dropped
+ * there arrives as `personal/<file>`. That spelling has no owner segment; writing it
+ * literally would put the document beside the owners and force the permission layer
+ * to grant the whole `personal` bucket, which resolves as shared across users.
+ * Rewriting it to `personal/<callerId>/<file>` keeps the owner in the path, makes the
+ * existing `personal/<userId>` grants sufficient, and keeps every user's personal
+ * bucket disjoint. An explicit `personal/<uuid>/…` is left untouched so a cross-user
+ * write still reaches the permission layer and is refused rather than silently
+ * redirected.
+ *
+ * @param relPath - the path as the caller sent it.
+ * @param callerId - the authenticated caller's user id.
+ * @returns the caller-scoped personal path, or the input when it is not personal.
+ */
+export function normalizePersonalWritePath(relPath: string, callerId: string): string {
+  const normalized = resolveScopeAlias(relPath)
+  if (!normalized.startsWith('personal/')) return normalized
+  if (normalized === `personal/${callerId}` || normalized.startsWith(`personal/${callerId}/`)) {
+    return normalized
+  }
+  const rest = normalized.slice('personal/'.length)
+  const head = rest.split('/')[0] ?? ''
+  // A UUID-shaped first segment is an explicit owner; leave it for the permission
+  // layer to allow (own) or refuse (someone else). Anything else is a file/folder
+  // named directly under the virtual bucket and belongs to the caller.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(head)) {
+    return normalized
+  }
+  return `personal/${callerId}/${rest}`
+}
+
+/**
  * The resolved layout, derived on the Host.
  *
  * There is no backend counterpart to ask: DataOps serves no knowledge config
@@ -2102,16 +2136,27 @@ export async function canReadPath(ctx: Context, config: Config, relPath: string)
   // that climbs out -- so "allowed" here means "inside the tree", never "anything goes".
   if (!isTeamDeployment(config)) return checkLocalPath(relPath) === undefined
   try {
+    // The page reads in VIEW coordinates (`personal/<file>`), while grants are written
+    // against the owner-scoped path (`personal/<userId>/<file>`). Ask DataOps about the
+    // owner-scoped spelling so a directory grant covers the caller's own documents and
+    // a foreign path still reaches the resolver unchanged and is refused there.
+    let permissionPath = relPath
+    if (relPath.startsWith('personal/')) {
+      const who = await fetchCaller(ctx, config).catch(() => undefined)
+      if (who !== undefined && isSafeUserId(who.userId)) {
+        permissionPath = normalizePersonalWritePath(relPath, who.userId)
+      }
+    }
     const body = await request<{ canRead?: boolean }>(ctx, config, ENDPOINTS.resolve, {
       method: 'POST',
       body: {
         resourceType: KB_RESOURCE_TYPE,
-        resourceId: relPath,
+        resourceId: permissionPath,
         // The ancestors chain is what makes ONE grant cover a whole knowledge base.
         // Without it DataOps matches only an exact resourceId, so every document needs
         // its own grant -- which is not a permission model anybody wants and was the
         // reason a new document appeared unreadable to an administrator.
-        ancestors: knowledgeAncestorsFor(relPath),
+        ancestors: knowledgeAncestorsFor(permissionPath),
       },
     })
     return body.canRead === true
@@ -2143,12 +2188,19 @@ export async function canWritePath(ctx: Context, config: Config, relPath: string
   // consult, but a path outside the knowledge root is still refused rather than written.
   if (!isTeamDeployment(config)) return checkLocalPath(relPath) === undefined
   try {
+    let permissionPath = relPath
+    if (relPath.startsWith('personal/')) {
+      const who = await fetchCaller(ctx, config).catch(() => undefined)
+      if (who !== undefined && isSafeUserId(who.userId)) {
+        permissionPath = normalizePersonalWritePath(relPath, who.userId)
+      }
+    }
     const body = await request<{ canWrite?: boolean }>(ctx, config, ENDPOINTS.resolve, {
       method: 'POST',
       body: {
         resourceType: KB_RESOURCE_TYPE,
-        resourceId: relPath,
-        ancestors: knowledgeAncestorsFor(relPath),
+        resourceId: permissionPath,
+        ancestors: knowledgeAncestorsFor(permissionPath),
       },
     })
     return body.canWrite === true
@@ -4884,7 +4936,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // cannot see. The decision is the backend's; this route only relays it,
             // the same way every other route does.
             const body = await readJsonBody(req)
-            const relPath = String(body.relPath ?? '')
+            let relPath = String(body.relPath ?? '')
             const directory = body.kind === 'directory'
             const refusal = personalPathRefusal(config, relPath)
             if (refusal !== undefined) {
@@ -4899,6 +4951,10 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const caller = await fetchCaller(host, config).catch(() => undefined)
             if (caller === undefined || !isSafeUserId(caller.userId)) {
               return writeJson(res, 400, { error: 'unsafe or unreadable caller id' })
+            }
+            relPath = normalizePersonalWritePath(relPath, caller.userId)
+            if (!isContainedRelPath(relPath)) {
+              return writeJson(res, 400, { error: 'path escapes the knowledge root', refused: [relPath] })
             }
             if (!await canWritePath(host, config, relPath)) {
               // Fail closed: an unreadable answer is a refusal, and the refusal
@@ -5096,7 +5152,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // buffered in memory, so an uncaught large post would be paid for in heap
             // rather than answered with a refusal.
             const body = await readJsonBody(req)
-            const relPath = String(body.relPath ?? '')
+            let relPath = String(body.relPath ?? '')
             // A dropped binary file arrives base64-encoded: the browser reads it as
             // bytes and this route must not decode it as UTF-8, which would replace
             // every non-text byte and write a document nobody can open.
@@ -5125,6 +5181,10 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const caller = await fetchCaller(host, config).catch(() => undefined)
             if (caller === undefined || !isSafeUserId(caller.userId)) {
               return writeJson(res, 400, { error: 'unsafe or unreadable caller id' })
+            }
+            relPath = normalizePersonalWritePath(relPath, caller.userId)
+            if (!isContainedRelPath(relPath)) {
+              return writeJson(res, 400, { error: 'path escapes the knowledge root', refused: [relPath] })
             }
             if (!await canWritePath(host, config, relPath)) {
               return writeJson(res, 403, { error: 'write access is required to upload here', refused: [relPath] })
