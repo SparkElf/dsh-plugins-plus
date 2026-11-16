@@ -664,6 +664,44 @@ describe('host plugin', () => {
     expect(result.body).toMatchObject({ code: 'forbidden' })
   })
 
+  it('denies a management route when the context explicitly carries no permissions', async () => {
+    // 零权限自定义角色：context 有 userId/roleCodes，但 permissions 是空数组。
+    // 这不能被当成“老后端不认识”，否则路由门整体跳过（R-01）。
+    const context = JSON.stringify({
+      userId: 'u-zero',
+      roleCodes: ['e2e-perm-role-zero'],
+      permissions: [],
+      dataScope: { all: false, self: true, departmentCodes: [] },
+      review: { canReview: false, canReviewGlobal: false, canManagePermissions: false, departments: [] },
+    })
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/ai/review/context')) {
+        return new Response(context, { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch
+    const { ctx, routes } = fakeHost({ token: 't', fetchImpl })
+    apply(ctx as never, CONFIG)
+    const result = await callRouteWithStatus(routes, 'deploy.steps', {})
+    expect(result.status).toBe(403)
+    expect(result.body).toMatchObject({ code: 'forbidden', required: 'kb:config:manage' })
+  })
+
+  it('fails closed with 503 when the review context never resolves', async () => {
+    // 后端 stall 超过 750ms：权限无法确认时管理路由必须拒绝执行，而不是跳过门。
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/ai/review/context')) return new Promise<Response>(() => undefined)
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch
+    const { ctx, routes } = fakeHost({ token: 't', fetchImpl })
+    apply(ctx as never, CONFIG)
+    const result = await callRouteWithStatus(routes, 'deploy.steps', {})
+    expect(result.status).toBe(503)
+    expect(result.body).toMatchObject({ code: 'permission-context-unavailable' })
+  })
+
   it('disposes every registration through the effect scope', async () => {
     const { ctx, tools, disposers } = fakeHost({
       token: 't',

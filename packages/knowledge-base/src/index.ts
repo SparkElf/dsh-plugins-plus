@@ -3987,36 +3987,42 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         const config = withStoredStorage(deploymentConfig, await readStorageSettings(deploymentConfig.mountPoint))
         const requiredPermission = permissionForKbRoute(method)
         if (requiredPermission !== undefined && isTeamDeployment(config)) {
+          let permissionContext: Awaited<ReturnType<typeof managementHost.context>> | undefined
           try {
-            // A slow/unreachable review context must not hold an upload or a file
-            // read open: the route's own grant checks still run, and the permission
-            // gate is skipped for that request rather than turning a backend stall
-            // into a hung page.
-            const permissionContext = await Promise.race([
+            // A slow/unreachable review context must not turn into an authorization
+            // bypass. Bound the wait so a stalled backend cannot hang the page, then
+            // refuse the permission-declaring route (503) instead of running it.
+            permissionContext = await Promise.race([
               managementHost.context().catch(() => undefined),
               new Promise<undefined>(resolve => setTimeout(() => { resolve(undefined) }, 750)),
             ])
-            // A route that carries a real context also refreshes the disclosed tool
-            // surface. A timed-out read leaves the previous surface in place instead
-            // of treating a transient stall as a role change.
-            if (permissionContext !== undefined) {
-              await toolDisclosure?.syncToolDisclosure(permissionContext)
-            }
-            // An empty list is an older/unknown backend, not a caller with zero
-            // permissions: the route's own grant checks still apply in that case.
-            if (permissionContext !== undefined && permissionContext.permissions.length > 0 && !hasPermission(permissionContext, requiredPermission)) {
-              return writeJson(res, 403, {
-                error: `缺少权限 ${requiredPermission}`,
-                code: 'forbidden',
-                required: requiredPermission,
-              })
-            }
           } catch {
-            // No review context means no permission list to enforce here. The
-            // route's own grant checks remain the authority (and an unreachable
-            // backend fails those writes anyway); treating an unavailable context
-            // as a denial made every offline/local test and every transient
-            // backend outage look like a permission error.
+            permissionContext = undefined
+          }
+          if (permissionContext === undefined) {
+            return writeJson(res, 503, {
+              error: '权限上下文暂时不可用，请稍后重试',
+              code: 'permission-context-unavailable',
+              required: requiredPermission,
+            })
+          }
+          // A route that carries a real context also refreshes the disclosed tool
+          // surface. A disclosure failure must not change this request's answer.
+          try {
+            await toolDisclosure?.syncToolDisclosure(permissionContext)
+          } catch {
+            // The permission decision below still uses the context just read.
+          }
+          // An explicit empty list is a caller with zero permissions, not an older
+          // backend: `managementHost.context()` always returns an array. Only a
+          // non-array/missing list falls back to the route's own grant checks.
+          const permissionKeys = (permissionContext as { permissions?: unknown }).permissions
+          if (Array.isArray(permissionKeys) && !hasPermission(permissionContext, requiredPermission)) {
+            return writeJson(res, 403, {
+              error: `缺少权限 ${requiredPermission}`,
+              code: 'forbidden',
+              required: requiredPermission,
+            })
           }
         }
         switch (method) {
@@ -5936,6 +5942,15 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             const submission = queue.find((candidate) => candidate.name === body.name)
             if (submission === undefined) {
               return writeJson(res, 404, { error: 'no such pending submission' })
+            }
+            // Review is a two-person control: the submitter cannot approve their own
+            // parked write. The queue carries the submitter id, so enforce it here rather
+            // than relying on the review UI to hide the button.
+            if (submission.userId === caller.userId) {
+              return writeJson(res, 403, {
+                error: 'a submission cannot be approved by its submitter',
+                code: 'SELF_APPROVAL_FORBIDDEN',
+              })
             }
             const content = await readPendingContent(plan.actualRoot, body.name)
             if (content === null) {
