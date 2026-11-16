@@ -68,7 +68,7 @@ import {
 /** Cordis plugin name for the DataOps-managed integration. */
 export const name = 'dataops-managed'
 /** Host services required by managed JWT and MCP ownership. */
-export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval']
+export const inject = ['credentials', 'webServer', 'tools', 'settings', 'skills', 'approval', 'agents']
 
 export const MANAGED_AUTH_PATH = '/integrations/dataops/managed-auth'
 /** Where the connector mints one room Session's scoped credential. */
