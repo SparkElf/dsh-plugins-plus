@@ -24,8 +24,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync } from 'node:fs'
+import { appendFile, copyFile, link, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { constants as fsConstants, existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -180,10 +180,12 @@ import { addTombstone, readTrash, removeTombstone, writeTrash } from './trash.ts
 import {
   assertIndexOutsideTrees,
   attachProvenance,
+  documentIndexStatus,
   ensureDocumentOutline,
   findChunkForPath,
   findChunkId,
   indexPathFor,
+  isIndexableTextPath,
   readChunkProvenance,
   readDocumentOutline,
   rewriteDocumentOutline,
@@ -926,6 +928,14 @@ export async function syncCallerView(
   host: Context,
   config: Config,
   paths?: string[],
+  options: {
+    /**
+     * Called after a file that existed only in the view was imported into the
+     * authoritative tree. The caller owns extraction/indexing because only it knows
+     * the deployment's parser settings and queue.
+     */
+    onAdopted?: (adopted: { viewPath: string; actualRelPath: string }) => void | Promise<void>
+  } = {},
 ): Promise<(ViewDelta & SyncReportFields & { status: number; error?: never }) | { status: number; error: string }> {
   const plan = localConfig(config)
   let caller
@@ -1010,7 +1020,26 @@ export async function syncCallerView(
   // back as `pruneSkipped`, which `status` reports.
   const trustResolvedSet = !(paths === undefined && candidates.length > 0 && allowed.length === 0)
   const delta = await syncView(
-    { ...viewOptions, hidden, fullScan: paths === undefined, trustResolvedSet },
+    {
+      ...viewOptions,
+      hidden,
+      fullScan: paths === undefined,
+      trustResolvedSet,
+      // A file that is only in the view did not come through a write route. Import
+      // it instead of deleting it, but only when the caller may write that path and
+      // it is a document this deployment could ever index or extract.
+      adoptOrphan: (viewPath, fullPath) => adoptViewFile(host, config, viewPath, {
+        caller,
+        fullPath,
+      }).then(result => {
+        if (!result.adopted) return false
+        void Promise.resolve(options.onAdopted?.({
+          viewPath,
+          actualRelPath: result.actualRelPath ?? viewPath,
+        })).catch(() => undefined)
+        return true
+      }),
+    },
     allowed,
   )
   // Retarget the browsable mount at this user's view. Without it the page would
@@ -2349,6 +2378,91 @@ export async function actualRelPathForView(
   return relPath
 }
 
+/** Outcome of importing a file that exists only in a caller's view. */
+export interface ViewAdoptionResult {
+  /** Whether the bytes now live at an authoritative path. */
+  adopted: boolean
+  /** The authoritative path, relative to `actualRoot`, when adopted. */
+  actualRelPath?: string
+  /** Why the file was not adopted. */
+  reason?: string
+}
+
+/**
+ * Import one view-only file into the authoritative tree.
+ *
+ * A view is a hardlink mirror of `actualRoot`; a new file placed in it by a shell
+ * `cp` (or an editor's save-as) has no authoritative counterpart. The view sync
+ * treats such a file as an orphan and unlinks it, which deletes the only copy the
+ * reader has. This function is the alternative: copy the bytes to the authoritative
+ * path the view path maps to, then replace the view entry with a hardlink to that
+ * copy. The next sync then sees one file, DataOps keeps resolving it, and extraction
+ * and indexing have a real document to work on.
+ *
+ * Refuses without a write grant, without a non-empty path, or when a DIFFERENT
+ * authoritative file already owns the destination name — importing must never
+ * overwrite a document.
+ *
+ * @param host - Host context, for the caller and the write grant.
+ * @param config - resolved plugin config.
+ * @param relPath - the view-relative path (as the reader sees it).
+ * @param options - caller and the already-resolved view file, when known.
+ * @returns whether the import happened, and where.
+ */
+export async function adoptViewFile(
+  host: Context,
+  config: Config,
+  relPath: string,
+  options: { caller?: { userId: string }; fullPath?: string } = {},
+): Promise<ViewAdoptionResult> {
+  if (!isTeamDeployment(config)) return { adopted: false, reason: 'a personal deployment has no view tree' }
+  const clean = relPath.replace(/^\/+/u, '')
+  if (!isContainedRelPath(clean)) return { adopted: false, reason: 'the path escapes the knowledge root' }
+  if (clean.split('/').some(segment => segment.startsWith('.'))) {
+    return { adopted: false, reason: 'a hidden path is not a document' }
+  }
+  const plan = localConfig(config)
+  const who = options.caller ?? await fetchCaller(host, config)
+  if (!isSafeUserId(who.userId)) return { adopted: false, reason: 'unsafe caller id; cannot import into a view keyed by it' }
+  const viewFile = options.fullPath ?? join(plan.viewRoot, who.userId, clean)
+  const info = await stat(viewFile).catch(() => undefined)
+  if (info === undefined || !info.isFile()) return { adopted: false, reason: 'no such file in the view' }
+  if (!await canWritePath(host, config, clean)) {
+    return { adopted: false, reason: 'write access is required to import this file' }
+  }
+  const actualRelPath = toolScopedActualPath(clean, who.userId, true)
+  if (!isContainedRelPath(actualRelPath)) return { adopted: false, reason: 'the path escapes the knowledge root' }
+  const destination = join(plan.actualRoot, actualRelPath)
+  const existing = await stat(destination).catch(() => undefined)
+  if (existing !== undefined) {
+    if (existing.ino === info.ino) return { adopted: true, actualRelPath }
+    // A different authoritative file owns this name. Importing would overwrite a
+    // document the caller may not even have read, so the view entry stays an orphan.
+    return { adopted: false, reason: 'an authoritative file already exists at this path' }
+  }
+  try {
+    await mkdir(dirname(destination), { recursive: true })
+    await copyFile(viewFile, destination, fsConstants.COPYFILE_EXCL)
+  } catch (error) {
+    return { adopted: false, reason: describeError(error).message }
+  }
+  // The plugin wrote this path, so the external-change watcher must not report it as
+  // somebody else's edit: the import is already covered by the caller's write.
+  markInternalMutation(actualRelPath)
+  // Replace the view entry with a hardlink to the authoritative copy. Without this
+  // the view keeps a second inode under a name the lock step already linked, and the
+  // next sync would leave the shadow copy in place of the real document.
+  const scratch = `${viewFile}.adopt-${randomUUID().slice(0, 8)}`
+  try {
+    await link(destination, scratch)
+    await rename(scratch, viewFile)
+  } catch {
+    // The authoritative copy is the durable part; the next sync links the view path.
+    await unlink(scratch).catch(() => undefined)
+  }
+  return { adopted: true, actualRelPath }
+}
+
 /**
  * The canonical VIEW path a model-facing file-tool path names.
  *
@@ -2893,6 +3007,16 @@ const GRANT_PROBE_RESOURCE_ID = '/__knowledge-grant-probe__'
  * stale answer to a question about the present.
  */
 const AUTO_SYNC_INTERVAL_MS = 30_000
+
+/**
+ * How long one write waits for its own index pass before answering "indexing".
+ *
+ * Indexing is what makes a just-written document searchable, but it walks the tree
+ * (stat every text file, read the changed ones) and the authoritative share can be a
+ * network mount. A write must not hang on that: past this budget the pass keeps
+ * running and the tool reports `indexing` instead of a row it does not have yet.
+ */
+const INDEX_AFTER_WRITE_WAIT_MS = 5_000
 
 /**
  * Most callers whose last refresh instant is remembered.
@@ -3568,6 +3692,70 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     },
   })
   /**
+   * Finish the retrieval pipeline for a document that just landed in the tree.
+   *
+   * Every write path uses this so a document is never durable-but-invisible: an
+   * extractable format is queued (its worker chunks and indexes the derived `.md`),
+   * and a plain-text format is indexed immediately. The two are exclusive on purpose —
+   * indexing a binary as text is not possible and indexing it after extraction would
+   * duplicate the work.
+   *
+   * @param relPath - the path the write used (authoritative or view spelling).
+   * @param caller - the acting caller, for their parser settings.
+   * @param options.replaceSibling - set when an existing source was overwritten.
+   * @param options.mineruBaseUrl - an address already resolved by the caller.
+   * @returns the `extraction` and/or `index` fields to merge into the reply.
+   */
+  const afterDocumentWrite = async (
+    relPath: string,
+    caller: KnowledgeCaller,
+    options: { replaceSibling?: boolean; mineruBaseUrl?: string } = {},
+  ): Promise<Record<string, unknown>> => {
+    if (isExtractable(relPath)) {
+      let mineruBaseUrl = options.mineruBaseUrl
+      if (mineruBaseUrl === undefined && isTeamDeployment(config)) {
+        const plan = localConfig(config)
+        mineruBaseUrl = (await readSettings(viewPathFor({
+          actualRoot: plan.actualRoot,
+          viewRoot: plan.viewRoot,
+          userId: caller.userId,
+        })).catch(() => ({ mineruBaseUrl: undefined }))).mineruBaseUrl
+      }
+      const viewRelPath = toolViewPath(relPath)
+      if (options.replaceSibling === true) {
+        // The source changed under its sibling; see `enqueueExtraction`'s host twin.
+        const actualRelPath = await actualRelPathForView(host, config, viewRelPath, caller).catch(() => relPath)
+        await unlink(join(localConfig(config).actualRoot, markdownSiblingOf(actualRelPath))).catch(() => undefined)
+      }
+      const task = extractionQueue.enqueue(viewRelPath, mineruBaseUrl)
+      return {
+        extraction: task,
+        index: { status: task.state === 'pending' ? 'pending-extraction' : 'skipped' },
+      }
+    }
+    if (!isIndexableTextPath(relPath)) return {}
+    const actualRelPath = isTeamDeployment(config)
+      ? await actualRelPathForView(host, config, relPath, caller).catch(() => relPath)
+      : relPath
+    const pass = syncKnowledgeIndex(true).catch(() => undefined)
+    const finished = await Promise.race([
+      pass.then(() => true),
+      new Promise<boolean>(resolve => { setTimeout(() => { resolve(false) }, INDEX_AFTER_WRITE_WAIT_MS) }),
+    ])
+    const status = documentIndexStatus(knowledgeIndexPath(), actualRelPath)
+    if (status.found) {
+      return {
+        index: {
+          status: 'indexed',
+          docId: status.docId,
+          chunks: status.chunks,
+          ...(status.indexedAt === undefined ? {} : { indexedAt: status.indexedAt }),
+        },
+      }
+    }
+    return { index: { status: finished ? 'failed' : 'indexing' } }
+  }
+  /**
    * Callers whose missing pointer has already been repaired once this process.
    *
    * A caller with nothing granted never gains a pointer from a sync, so without
@@ -3672,7 +3860,12 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             return { synced: false }
           }
         }
-        const result = await syncCallerView(host, config)
+        const result = await syncCallerView(host, config, undefined, {
+          // A file that was only in the view was just imported into the authoritative
+          // tree. Complete its pipeline so the next search and the status column see
+          // it, without making the sync itself wait on a parser or an index pass.
+          onAdopted: async adopted => { await afterDocumentWrite(adopted.viewPath, caller) },
+        })
         if ('error' in result) {
           // The status the sync answered with is the reason: 409 is an unconfigured
           // backend, 502 an unreachable one, 400 an unsafe identity. Carrying it out
@@ -4696,7 +4889,11 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // the routine interval, and this is the moment the view is known to be
               // stale because this process just changed what it must contain.
               const afterWrite = await refreshViewIfStale(true, created.relPath)
-              const reply = writeReplyAfterSync({ created }, afterWrite)
+              // A folder has nothing to extract or index. A file completes the pipeline
+              // here, so the document the creator just made is searchable without a
+              // second action.
+              const pipeline = directory ? {} : await afterDocumentWrite(created.relPath, caller)
+              const reply = writeReplyAfterSync({ created, ...pipeline }, afterWrite)
               return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {
@@ -4771,9 +4968,17 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
                   auditWritten = false
                 }
               }
+              // The save is durable; indexing it is the next step, not a condition of success.
+              const editCaller: KnowledgeCaller = caller ?? {
+                userId: LOCAL_USER_ID,
+                label: 'local',
+                roleCodes: [],
+              }
+              const pipeline = await afterDocumentWrite(relPath, editCaller, { replaceSibling: true })
               return writeJson(res, 200, {
                 relPath,
                 auditWritten,
+                ...pipeline,
                 ...(after === undefined ? {} : { mtimeMs: after.mtimeMs, size: after.size }),
               })
             } catch (error: unknown) {
@@ -4914,7 +5119,13 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // "extracting…" instead of guessing, and a reader can read the outcome
               // through `extract.status` once it finishes.
               const extraction = extractionQueue.enqueue(relPath, uploadSettings.mineruBaseUrl)
-              const reply = writeReplyAfterSync({ created, extraction }, afterWrite)
+              // A Markdown/text upload has nothing to extract, so the queue resolves it
+              // at `already-markdown` and no index pass would ever run for it. Index it
+              // here instead; the two are exclusive so a binary is never indexed twice.
+              const pipeline = isIndexableTextPath(relPath)
+                ? await afterDocumentWrite(created.relPath, caller, { mineruBaseUrl: uploadSettings.mineruBaseUrl })
+                : { extraction }
+              const reply = writeReplyAfterSync({ created, ...pipeline }, afterWrite)
               return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {
@@ -5056,37 +5267,49 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
           case 'index.status': {
             // Read-only view of the plugin's own SQLite index. The DataOps backend has
             // no per-document index view, and the file list only needs counts.
+            //
+            // Routed through `documentIndexStatus` so this answer and the one a write
+            // reports cannot disagree. It matches the SOURCE path too: the index stores
+            // the text file it chunked (`报告.docx.md`), while the reader clicks the
+            // document (`报告.docx`).
             const body = await readJsonBody(req)
             const relPath = typeof body.path === 'string' ? body.path.trim() : ''
             const docId = Number(body.docId)
-            const db = new DatabaseSync(indexPathFor(config.indexDir))
-            try {
-              let row: { id: number; path: string; scope: string; mtime: number } | undefined
-              if (Number.isInteger(docId) && docId > 0) {
-                row = db.prepare('select id, path, scope, mtime from kb_docs where id = ?').get(docId) as typeof row
-              } else if (relPath !== '') {
-                const name = relPath.slice(relPath.lastIndexOf('/') + 1)
-                row = (db.prepare('select id, path, scope, mtime from kb_docs where path = ?').get(relPath)
-                  // The index stores paths relative to its own root, while the view may
-                  // carry a bucket prefix (`global/…`), so the bare name is the fallback.
-                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path = ? order by mtime desc limit 1').get(name)
-                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path like ? order by mtime desc limit 1').get('%/' + relPath)
-                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path like ? order by mtime desc limit 1').get('%' + relPath)
-                  ?? db.prepare('select id, path, scope, mtime from kb_docs where path like ? order by mtime desc limit 1').get('%/' + name)) as typeof row
+            if (Number.isInteger(docId) && docId > 0) {
+              const db = new DatabaseSync(indexPathFor(config.indexDir))
+              try {
+                const row = db.prepare('select id, path, scope, mtime from kb_docs where id = ?').get(docId) as
+                  { id: number; path: string; scope: string; mtime: number } | undefined
+                if (row === undefined) return writeJson(res, 200, { found: false })
+                const count = db.prepare('select count(*) as n from kb_chunks where doc_id = ?').get(row.id) as { n?: number } | undefined
+                return writeJson(res, 200, {
+                  found: true,
+                  docId: row.id,
+                  path: row.path,
+                  scope: row.scope,
+                  chunks: Number(count?.n ?? 0),
+                  indexedAt: row.mtime,
+                })
+              } finally {
+                db.close()
               }
-              if (row === undefined) return writeJson(res, 200, { found: false })
-              const count = db.prepare('select count(*) as n from kb_chunks where doc_id = ?').get(row.id) as { n?: number } | undefined
-              return writeJson(res, 200, {
-                found: true,
-                docId: row.id,
-                path: row.path,
-                scope: row.scope,
-                chunks: Number(count?.n ?? 0),
-                indexedAt: row.mtime,
-              })
-            } finally {
-              db.close()
             }
+            if (relPath === '') return writeJson(res, 200, { found: false })
+            // The page asks with its VIEW spelling; the index stores authoritative
+            // paths, so resolve the hardlink first (and fall back to the spelling the
+            // caller sent when the file is already authoritative).
+            const actualRelPath = await actualRelPathForView(host, config, relPath).catch(() => relPath)
+            const status = documentIndexStatus(indexPathFor(config.indexDir), actualRelPath)
+            return writeJson(res, 200, status.found
+              ? {
+                found: true,
+                docId: status.docId,
+                path: status.path,
+                scope: status.scope,
+                chunks: status.chunks,
+                indexedAt: status.indexedAt,
+              }
+              : { found: false })
           }
           case 'extract.retry': {
             // Re-run extraction for one document, for the case the upload path could not
@@ -5367,7 +5590,15 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             // The decision stays with DataOps (the resolve route is self-scoped);
             // this route only links what that decision allows.
             const body = await readJsonBody(req)
-            const result = await syncCallerView(host, config, Array.isArray(body.paths) ? body.paths.map(String) : undefined)
+            const syncCaller = await fetchCaller(host, config).catch(() => undefined)
+            const result = await syncCallerView(host, config, Array.isArray(body.paths) ? body.paths.map(String) : undefined, {
+              // Imported view-only files become documents here too; the page's sync
+              // button is the same operation as the model's `kb_sync` tool.
+              onAdopted: async adopted => {
+                if (syncCaller === undefined || !isSafeUserId(syncCaller.userId)) return
+                await afterDocumentWrite(adopted.viewPath, syncCaller)
+              },
+            })
             if ('error' in result) return writeJson(res, result.status, { error: result.error })
             return writeJson(res, 200, result)
           }
@@ -5685,7 +5916,12 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               // address is the fallback either way.
               const approveSettings = await readSettings(viewDir)
               const extraction = extractionQueue.enqueue(created.relPath, approveSettings.mineruBaseUrl)
-              const reply = writeReplyAfterSync({ approved: created, extraction }, afterWrite)
+              // Same split as the upload path: an approved Markdown document is indexed
+              // here because the queue has no extraction work to do for it.
+              const pipeline = isIndexableTextPath(created.relPath)
+                ? await afterDocumentWrite(created.relPath, caller, { mineruBaseUrl: approveSettings.mineruBaseUrl })
+                : { extraction }
+              const reply = writeReplyAfterSync({ approved: created, ...pipeline }, afterWrite)
               return writeJson(res, reply.status, reply.body)
             } catch (error) {
               if (error instanceof KnowledgeWriteError) {
@@ -6756,6 +6992,28 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     return toolScopedActualPath(viewPath, who.userId, true)
   }
 
+  /**
+   * Replace one file's bytes in place.
+   *
+   * A write-temp-then-rename would replace the inode and leave the caller's view
+   * hardlink pointing at the old bytes (the edit route explains this at length), so
+   * this truncates the existing file. Text and bytes share the path: the only
+   * difference is what is handed to `writeFile`.
+   */
+  const overwriteInPlace = async (relPath: string, content: string | Uint8Array): Promise<void> => {
+    const scoped = await toolActualPath(relPath)
+    if (!isContainedRelPath(scoped)) {
+      throw new KnowledgeToolError('escapes-knowledge-root', 'the path leaves the knowledge root', relPath)
+    }
+    const full = join(localConfig(config).actualRoot, scoped)
+    const info = await stat(full)
+    if (!info.isFile()) {
+      throw new KnowledgeToolError('not-a-file', 'not a regular file', relPath)
+    }
+    await writeFile(full, content)
+    markInternalMutation(scoped)
+  }
+
   const knowledgeToolHost: KnowledgeFileToolHost = {
     vectorize: async input => {
       try {
@@ -7024,19 +7282,10 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     },
     createEntry: async (relPath, options) => createKnowledgeEntry(config, await toolActualPath(relPath), options),
     overwriteFile: async (relPath, content) => {
-      const scoped = await toolActualPath(relPath)
-      if (!isContainedRelPath(scoped)) {
-        throw new KnowledgeToolError('escapes-knowledge-root', 'the path leaves the knowledge root', relPath)
-      }
-      const full = join(localConfig(config).actualRoot, scoped)
-      const info = await stat(full)
-      if (!info.isFile()) {
-        throw new KnowledgeToolError('not-a-file', 'not a regular file', relPath)
-      }
-      // In-place write: a write-temp-then-rename would replace the inode and leave the
-      // caller's view hardlink pointing at the old bytes (the edit route explains this).
-      await writeFile(full, content, 'utf8')
-      markInternalMutation(scoped)
+      await overwriteInPlace(relPath, content)
+    },
+    overwriteFileBytes: async (relPath, bytes) => {
+      await overwriteInPlace(relPath, bytes)
     },
     moveEntry: async (from, to, caller) => {
       const plan = localConfig(config)
@@ -7085,7 +7334,36 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         at: new Date().toISOString(),
       })
     },
-    enqueueExtraction: async (relPath, caller) => {
+    indexAfterWrite: async (relPath) => {
+      const scopedRelPath = toolViewPath(relPath)
+      if (!isIndexableTextPath(scopedRelPath)) {
+        return { status: 'skipped' as const, reason: 'the index reads only plain-text formats' }
+      }
+      const actualRelPath = await toolActualPath(scopedRelPath).catch(() => scopedRelPath)
+      // A forced pass, because the file was written moments ago and the routine 3s
+      // freshness window would otherwise answer from a snapshot that predates it. The
+      // pass is incremental (mtime+hash), so an unchanged tree costs stats, not reads
+      // of every document.
+      const pass = syncKnowledgeIndex(true).catch(() => undefined)
+      const finished = await Promise.race([
+        pass.then(() => true),
+        new Promise<boolean>(resolve => { setTimeout(() => { resolve(false) }, INDEX_AFTER_WRITE_WAIT_MS) }),
+      ])
+      const status = documentIndexStatus(knowledgeIndexPath(), actualRelPath)
+      if (status.found) {
+        return {
+          status: 'indexed' as const,
+          docId: status.docId,
+          chunks: status.chunks,
+          ...(status.indexedAt === undefined ? {} : { indexedAt: status.indexedAt }),
+        }
+      }
+      // A big or slow share can outlast the wait. The pass still runs to completion in
+      // the background, so the honest answer is "indexing", not "failed".
+      if (!finished) return { status: 'indexing' as const }
+      return { status: 'failed' as const, reason: 'the index pass completed without a row for this document' }
+    },
+    enqueueExtraction: async (relPath, caller, options = {}) => {
       const plan = localConfig(config)
       const scopedRelPath = toolViewPath(relPath)
       if (isAlreadyMarkdown(scopedRelPath)) return { outcome: 'already-markdown' }
@@ -7093,15 +7371,37 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       // The tool receives a view-relative path; the source lives under actualRoot
       // with a different personal/department shape. Resolve by the view hardlink,
       // never by joining actualRoot to the view path.
-      const actualRelPath = await actualRelPathForView(host, config, scopedRelPath)
-      const source = await stat(join(plan.actualRoot, actualRelPath)).catch(() => undefined)
+      let actualRelPath = await actualRelPathForView(host, config, scopedRelPath)
+      let source = await stat(join(plan.actualRoot, actualRelPath)).catch(() => undefined)
       if (source === undefined || !source.isFile()) {
-        throw new KnowledgeToolError('not-found', 'no such document', scopedRelPath)
+        // A shell `cp` lands in the caller's view, which is a hardlink mirror: the
+        // file has no authoritative counterpart and the next view sync deletes it.
+        // Import it here so "extract this document" succeeds instead of answering
+        // "no such document" about a file the reader can see.
+        const adoption = await adoptViewFile(host, config, scopedRelPath, { caller }).catch(() => undefined)
+        if (adoption?.adopted === true) {
+          actualRelPath = adoption.actualRelPath ?? actualRelPath
+          source = await stat(join(plan.actualRoot, actualRelPath)).catch(() => undefined)
+        }
+      }
+      if (source === undefined || !source.isFile()) {
+        throw new KnowledgeToolError(
+          'not-found',
+          'no such document in the authoritative tree; a shell copy into the mounted view is not a knowledge document — write it with kb_file_write (encoding:"base64" for binary files)',
+          scopedRelPath,
+        )
       }
       const sibling = markdownSiblingOf(actualRelPath)
       const existing = await stat(join(plan.actualRoot, sibling)).catch(() => undefined)
       if (existing !== undefined && existing.isFile()) {
-        return { outcome: 'exists', markdown: markdownSiblingOf(scopedRelPath) }
+        if (options.replaceSibling !== true) {
+          return { outcome: 'exists', markdown: markdownSiblingOf(scopedRelPath) }
+        }
+        // The source was overwritten and this sibling describes the OLD bytes. The
+        // extraction write is create-only, so the stale text has to go first or the
+        // document would stay searchable by its previous content. A failed extraction
+        // afterwards leaves no sibling rather than a wrong one.
+        await unlink(join(plan.actualRoot, sibling)).catch(() => undefined)
       }
       const settings = await readSettings(viewPathFor({
         actualRoot: plan.actualRoot,
@@ -7346,7 +7646,16 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     },
     kbSync: async () => {
       if (!isTeamDeployment(config)) return refreshViewIfStale(true)
-      return syncCallerView(host, config)
+      // The sync imports files that exist only in the caller's view instead of
+      // pruning them. Completing their pipeline is why a shell copy becomes a real,
+      // searchable document rather than a file that disappears on the next sync.
+      return syncCallerView(host, config, undefined, {
+        onAdopted: async adopted => {
+          const who = await fetchCaller(host, config).catch(() => undefined)
+          if (who === undefined || !isSafeUserId(who.userId)) return
+          await afterDocumentWrite(adopted.viewPath, who)
+        },
+      })
     },
     kbIndexRebuild: async () => {
       await refreshViewIfStale(true)

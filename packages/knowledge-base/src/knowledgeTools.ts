@@ -19,6 +19,7 @@
  * @module @sparkelf/dsh-knowledge-base/knowledgeTools
  */
 import type { FtsIndexStats, FtsSearchHit, FtsSearchResult } from './ftsIndex.ts'
+import { isIndexableTextPath } from './ftsIndex.ts'
 import type { OutlineKeyFact, OutlineTocEntry } from './outlineText.ts'
 import type { OutlineSectionSubmission, OutlineSummaryKind } from './outlineGuard.ts'
 import type { OutlineSaveResult } from './ftsIndex.ts'
@@ -213,20 +214,52 @@ export interface KnowledgeFileToolHost {
   statEntry(relPath: string): Promise<{ kind: 'file' | 'directory'; size?: number } | undefined>
   createEntry(
     relPath: string,
-    options: { directory: boolean; content?: string },
+    options: { directory: boolean; content?: string; bytes?: Uint8Array },
   ): Promise<{ relPath: string; kind: 'file' | 'directory' }>
   /** Overwrite an existing file in place, preserving its inode/view hardlink. */
   overwriteFile(relPath: string, content: string): Promise<void>
+  /**
+   * Overwrite an existing BINARY file in place, preserving its inode/view hardlink.
+   *
+   * Separate from {@link overwriteFile} because a text body and a byte body are not
+   * interchangeable: decoding bytes as UTF-8 replaces every non-text byte. Omitting it
+   * makes a base64 overwrite fail with a clear error instead of writing a broken file.
+   */
+  overwriteFileBytes?(relPath: string, bytes: Uint8Array): Promise<void>
   moveEntry(from: string, to: string, caller: KnowledgeToolCaller): Promise<{ from: string; to: string }>
   /** Record a tombstone in the caller's trash; never unlinks bytes. */
   deleteToTrash(caller: KnowledgeToolCaller, relPath: string, kind: 'file' | 'directory'): Promise<void>
   refreshView(expectVisible?: string): Promise<KnowledgeViewSync>
   readSettings(caller: KnowledgeToolCaller): Promise<{ reviewRequired?: boolean; mineruBaseUrl?: string }>
   parkWrite(caller: KnowledgeToolCaller, relPath: string, content: string): Promise<void>
+  /**
+   * Index one document that was just written and report whether it is searchable.
+   *
+   * Called only for text formats, where indexing is the whole pipeline: a document
+   * with a reader (PDF/DOCX/XLSX) goes through {@link enqueueExtraction} instead,
+   * whose worker indexes the derived Markdown once it exists. Omitting the method
+   * makes a tool report `skipped` rather than claiming a write was indexed.
+   */
+  indexAfterWrite?(relPath: string): Promise<{
+    status: 'indexed' | 'indexing' | 'skipped' | 'failed'
+    docId?: number
+    chunks?: number
+    indexedAt?: number
+    reason?: string
+  }>
   /** Enqueue one document; mirrors the manual extraction route's outcomes. */
   enqueueExtraction(
     relPath: string,
     caller: KnowledgeToolCaller,
+    options?: {
+      /**
+       * Replace an existing derived `.md` sibling.
+       *
+       * Set when the source was overwritten: the sibling beside it describes the old
+       * bytes, and the create-only extraction path would refuse to touch it.
+       */
+      replaceSibling?: boolean
+    },
   ): Promise<{ outcome: 'already-markdown' | 'unsupported' | 'exists' | 'queued'; markdown?: string; task?: unknown }>
   /** Extractable files under the authoritative root that have no `.md` sibling yet. */
   listExtractCandidates(limit: number): Promise<string[]>
@@ -383,6 +416,81 @@ const run = async (
 }
 
 /**
+ * Decode a base64 payload written through {@link kb_file_write}.
+ *
+ * The tool writes binary documents (PDF/DOCX/XLSX) by decoding here rather than
+ * accepting a string of bytes: the model produces base64, and an invalid payload must
+ * fail the call instead of writing a file no reader can open. Whitespace is tolerated
+ * because a model (or a shell here-doc) may wrap a long payload across lines.
+ * @param content - the base64 text.
+ * @returns the decoded bytes.
+ */
+const decodeBase64Payload = (content: string): Uint8Array => {
+  const compact = content.replace(/\s+/gu, '')
+  if (compact === '') return new Uint8Array()
+  if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(compact) || compact.length % 4 !== 0) {
+    throw new KnowledgeToolError('invalid', 'content is not valid base64; pass encoding:"base64" with a padded base64 payload')
+  }
+  return Buffer.from(compact, 'base64')
+}
+
+/**
+ * Finish the pipeline for a document that was just written.
+ *
+ * A write is not finished when the bytes land: search reads the sidecar index, and a
+ * document that is not in it is invisible to `kb_search` and to the knowledge page's
+ * status column. The pipeline differs by format, and running both halves would index a
+ * document twice:
+ *
+ * - A format with a reader (PDF/DOCX/XLSX/…): enqueue extraction. That queue already
+ *   chunks and indexes the derived `.md` sibling when it finishes, so this reports the
+ *   extraction handle and explicitly does NOT index the binary.
+ * - A text format (Markdown/TXT/CSV/…): index it directly. There is nothing to extract.
+ * - Anything else: report `skipped` with the reason.
+ *
+ * A failing index is a status on an already-successful write, never a write failure:
+ * the bytes are durable and the next index pass retries.
+ *
+ * @param host - the file-tool host seam.
+ * @param relPath - the view-relative path that was written.
+ * @param caller - the caller the write acted as.
+ * @param options.replaceSibling - set when the source was overwritten.
+ * @returns the `extraction` and/or `index` fields the tool result carries.
+ */
+async function completeWritePipeline(
+  host: KnowledgeFileToolHost,
+  relPath: string,
+  caller: KnowledgeToolCaller,
+  options: { replaceSibling?: boolean } = {},
+): Promise<Record<string, unknown>> {
+  if (host.isExtractable(relPath)) {
+    const extraction = await host.enqueueExtraction(relPath, caller, options)
+    return {
+      extraction,
+      index: {
+        status: extraction.outcome === 'queued' ? 'pending-extraction' : 'skipped',
+        message: extraction.outcome === 'queued'
+          ? 'the .md sibling is produced asynchronously; chunking and indexing run when it is written'
+          : 'this document was not queued for extraction',
+      },
+    }
+  }
+  if (!isIndexableTextPath(relPath)) {
+    return {
+      index: { status: 'skipped', reason: 'this file type is neither extractable nor plain text the index can read' },
+    }
+  }
+  if (host.indexAfterWrite === undefined) {
+    return { index: { status: 'skipped', reason: 'this deployment has no index' } }
+  }
+  try {
+    return { index: await host.indexAfterWrite(relPath) }
+  } catch (error) {
+    return { index: { status: 'failed', reason: messageOf(error) } }
+  }
+}
+
+/**
  * Build the knowledge-base model-facing tools.
  *
  * Returned definitions are registered by `apply` through the permission-based
@@ -393,19 +501,36 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
   defineTool({
     name: 'kb_file_write',
     description: 'Create or overwrite one knowledge file, with DataOps permission checks and audit. '
-      + KB_FILE_TOOL_GUIDANCE
-      + ' Creating a document does not build its Markdown index; call kb_file_extract afterwards when a derived .md is needed.',
+      + 'The write also completes the retrieval pipeline: a PDF/DOCX/XLSX/PPTX is queued for extraction and its '
+      + 'derived Markdown is chunked and indexed when extraction finishes (read the returned extraction task with '
+      + 'extract.status); Markdown/TXT/CSV is indexed immediately and the returned index row is the proof. '
+      + 'For a binary document pass encoding:"base64" with the document bytes encoded as base64 rather than a text body. '
+      + 'A shell copy into the mounted tree does NOT do any of this and can be deleted by the next view sync.'
+      + KB_FILE_TOOL_GUIDANCE,
     parameters: {
       path: { type: 'string', required: true, description: 'View-relative destination path.' },
-      content: { type: 'string', required: true, description: 'UTF-8 text content.' },
+      content: {
+        type: 'string',
+        required: true,
+        description: 'UTF-8 text content, or the base64 document bytes when encoding is "base64".',
+      },
+      encoding: {
+        type: 'string',
+        enum: ['utf8', 'base64'],
+        description: 'How to decode content. "utf8" (default) writes text; "base64" writes binary documents such as PDF/DOCX/XLSX.',
+      },
       overwrite: { type: 'boolean', description: 'Replace an existing file in place; default false (existing path is an error).' },
     },
     output: jsonOutput,
-    execute: async (args: { path: string; content: string; overwrite?: boolean }) => run(args.path, async () => {
+    execute: async (args: { path: string; content: string; encoding?: string; overwrite?: boolean }) => run(args.path, async () => {
       const relPath = scopedToolPath(host, args.path)
-      const content = typeof args.content === 'string' ? args.content : ''
-      await requireWrite(host, relPath)
       const caller = await host.resolveCaller()
+      const encoding = args.encoding === 'base64' ? 'base64' : 'utf8'
+      const content = typeof args.content === 'string' ? args.content : ''
+      const bytes = encoding === 'base64' ? decodeBase64Payload(content) : undefined
+      const body = bytes === undefined ? content : undefined
+      const byteLength = bytes === undefined ? Buffer.byteLength(content, 'utf8') : bytes.byteLength
+      await requireWrite(host, relPath)
       const existing = await host.statEntry(relPath)
       if (existing !== undefined && existing.kind !== 'file') {
         throw new KnowledgeToolError('not-a-file', 'a directory exists at this path', relPath)
@@ -417,34 +542,63 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
       if (existing === undefined) {
         const settings = await host.readSettings(caller)
         if (settings.reviewRequired === true) {
+          // A parked write has no bytes on disk yet, so there is nothing to extract or
+          // index. The pipeline runs when an approver applies the submission. The
+          // parking format stores UTF-8 text; a binary body would be corrupted by that
+          // round trip, so it is refused instead of silently mangled.
+          if (bytes !== undefined) {
+            throw new KnowledgeToolError(
+              'invalid',
+              'this path currently holds binary content that cannot be parked for review; use the knowledge page upload, or turn review off for this knowledge base',
+              relPath,
+            )
+          }
           await host.parkWrite(caller, relPath, content)
           const audit = await auditWrite(host, caller, 'create', relPath)
           return { ok: true, path: relPath, pending: true, reviewRequired: true, audit }
         }
-        await host.createEntry(relPath, { directory: false, content })
+        await host.createEntry(relPath, {
+          directory: false,
+          ...(body === undefined ? { bytes } : { content: body }),
+        })
         const refresh = await host.refreshView(relPath).catch((error: unknown) => ({ failure: messageOf(error) }))
         const audit = await auditWrite(host, caller, 'create', relPath)
+        const pipeline = await completeWritePipeline(host, relPath, caller)
         return {
           ok: true,
           path: relPath,
           created: true,
-          bytes: Buffer.byteLength(content, 'utf8'),
+          encoding,
+          bytes: byteLength,
           audit,
           ...refreshResult(refresh),
+          ...pipeline,
         }
       }
 
-      await host.overwriteFile(relPath, content)
+      if (bytes === undefined) {
+        await host.overwriteFile(relPath, content)
+      } else if (host.overwriteFileBytes !== undefined) {
+        await host.overwriteFileBytes(relPath, bytes)
+      } else {
+        throw new KnowledgeToolError('invalid', 'this deployment cannot overwrite a binary document in place', relPath)
+      }
       const refresh = await host.refreshView(relPath).catch((error: unknown) => ({ failure: messageOf(error) }))
       const audit = await auditWrite(host, caller, 'edit', relPath)
+      // The source changed, so its derived `.md` describes the old bytes. Extraction is
+      // allowed to replace that sibling; without this an overwritten DOCX would stay
+      // searchable by its previous text.
+      const pipeline = await completeWritePipeline(host, relPath, caller, { replaceSibling: true })
       return {
         ok: true,
         path: relPath,
         created: false,
         overwritten: true,
-        bytes: Buffer.byteLength(content, 'utf8'),
+        encoding,
+        bytes: byteLength,
         audit,
         ...refreshResult(refresh),
+        ...pipeline,
       }
     }),
   }),

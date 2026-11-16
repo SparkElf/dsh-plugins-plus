@@ -74,6 +74,25 @@ index tooling over a mounted directory. Runs standalone or against a DataOps bac
 路径校验、上传、提取、搜索、预览这些核心链路两种形态共用同一份实现——区别只是权限判据
 从「问后端」变成「查本地边界」。
 
+## 写入即入库（0.4.3）
+
+写入不是「字节落盘」就结束。`kb_file_write` 和 create/edit/upload/approve 路由在写成功后都走
+`afterDocumentWrite`：
+
+- PDF/DOCX/XLSX/PPTX 等可提取格式：进入 extractionQueue，worker 写出 `<source>.md` 后再 chunk +
+  index；工具结果返回 `extraction` 任务句柄，用 `extract.status` 查终态。overwrite 会先删掉旧
+  的派生 `.md`，避免文档继续按旧正文被检索。
+- Markdown/TXT/CSV 等文本格式：直接增量 index，结果返回 `index: {status, docId, chunks, indexedAt}`。
+- `kb_file_write` 支持 `encoding:"base64"`，因此 AI 可以写真正的 PDF/DOCX/XLSX 字节，而不是把
+  二进制当文本写坏。
+- 只有两种结果：`indexed`（可检索，带行号）或 `pending-extraction`/`indexing`（异步进行中）。
+  写成功但索引失败只作为状态返回，不回滚文件。
+
+`kb_sync`/`views.sync` 不再把 view 里的「未注册文件」直接删掉：带写权限的文件先
+`adoptViewFile` 导入 `actualRoot`（copy + hardlink 回 view），再补 extract/index；无写权限或与
+authoritative 同名冲突才按原逻辑 unlink。这修的是「AI 用 shell cp 把 PDF 放进 view，extract 报
+no such document，下一次 sync 把文件清掉」的原因。
+
 ## 工具按权限披露
 
 模型看到的工具清单由 `src/toolDisclosure.ts` 的协调器决定，不在每个 `execute()` 里重复查

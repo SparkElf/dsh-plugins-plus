@@ -42,6 +42,17 @@ export interface ViewDelta {
   /** Paths left alone because the view already matched. */
   unchanged: number
   /**
+   * View paths that existed only in the view and were imported into the
+   * authoritative tree instead of being deleted.
+   *
+   * A file can land in a view without going through this plugin (a shell `cp`, an
+   * editor's save-as). The view is the reader's only writable surface, so treating
+   * such a file as an orphan would silently destroy the user's document on the next
+   * sync. `adoptOrphan` decides, per path, whether it is imported; these are the
+   * paths where that succeeded.
+   */
+  adopted?: string[]
+  /**
    * Directories removed because a revoke emptied them.
    *
    * Kept apart from `unlinked` because a leftover empty directory is not a stale
@@ -117,6 +128,20 @@ export interface ViewSyncOptions extends ViewOptions {
    * a permission decision, and must not delete the reader's links.
    */
   trustResolvedSet?: boolean
+  /**
+   * Import one view-only file into the authoritative tree before it is unlinked.
+   *
+   * Called only for a regular file the resolved set does not name, and only when the
+   * prune pass is otherwise about to delete it. Returning true means the file now
+   * lives at the authoritative path (and, ideally, that the view entry was relinked
+   * to it), so the view keeps it. Returning false falls through to the ordinary
+   * unlink, which stays the answer for a file the caller may not write or may not
+   * import.
+   *
+   * The callback owns permission and destination decisions: `syncView` only knows
+   * about files and links, not about DataOps grants or bucket layouts.
+   */
+  adoptOrphan?: (relPath: string, fullPath: string) => Promise<boolean>
 }
 
 /**
@@ -737,6 +762,7 @@ export async function syncView(options: ViewSyncOptions, resolved: readonly Reso
   const present = new Map(walked.files.map(entry => [entry.relPath, entry.full]))
   const directories = walked.directories
   const delta: ViewDelta = { linked: [], unlinked: [], unchanged: 0, pruned: [] }
+  const adopted: string[] = []
 
   // Links first: a view is more useful showing too much for one instant than
   // showing nothing, so it is never emptied before it is refilled.
@@ -803,6 +829,23 @@ export async function syncView(options: ViewSyncOptions, resolved: readonly Reso
     // back on the next sync. It is named rather than pattern-matched: a hidden-dot
     // exception would also spare a user's own `.something` file from a revoke.
     if (relPath === TRASH_RECORD_NAME) continue
+    // A file that exists only in the view never went through a knowledge-base write
+    // path (a shell `cp` into the mounted view is the common case). Deleting it
+    // destroys the reader's document; the callback gets the chance to import it
+    // into the authoritative tree instead. A refusal (no write grant, an
+    // authoritative name already taken) falls through to the ordinary unlink.
+    if (options.adoptOrphan !== undefined) {
+      let imported = false
+      try {
+        imported = await options.adoptOrphan(relPath, full)
+      } catch {
+        imported = false
+      }
+      if (imported) {
+        adopted.push(relPath)
+        continue
+      }
+    }
     try {
       await rm(full)
       delta.unlinked.push(relPath)
@@ -811,6 +854,7 @@ export async function syncView(options: ViewSyncOptions, resolved: readonly Reso
       // aborting the rest of the revoke.
     }
   }
+  if (adopted.length > 0) delta.adopted = adopted
 
   // Drop the directories a revoke emptied. Leaving them would still disclose the
   // names of folders the user no longer has access to, and an empty tree reads as a

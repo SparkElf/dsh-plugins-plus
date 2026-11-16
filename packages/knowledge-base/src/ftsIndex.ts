@@ -49,6 +49,19 @@ const TEXT_EXTENSIONS = new Set([
 /** Directory names that are state, not documents. */
 const SKIP_DIRS = new Set(['.kb-pending', '.kb-trash', '.kb-audit', '.kb-settings', '.git', 'node_modules'])
 
+/**
+ * Whether a path's bytes are plain text the index can read directly.
+ *
+ * Shared with the write paths so "index this after the write" and "the index walk
+ * will find this file" cannot disagree: both answer from the same extension set.
+ * @param relPath - the document's path.
+ * @returns true when {@link syncIndex} would read this file as text.
+ */
+export function isIndexableTextPath(relPath: string): boolean {
+  const dot = relPath.lastIndexOf('.')
+  return dot >= 0 && TEXT_EXTENSIONS.has(relPath.slice(dot).toLowerCase())
+}
+
 /** One search hit returned to the model. */
 /** Result of one kb_search call, including whether it had to relax. */
 export interface FtsSearchResult {
@@ -267,6 +280,60 @@ export interface FtsCallerScope {
 /** The index path for one deployment. */
 export function indexPathFor(indexDir: string | undefined): string {
   return join(indexDir === undefined || indexDir.trim() === '' ? DEFAULT_INDEX_DIR : indexDir, 'kb-index.sqlite')
+}
+
+/** What the sidecar index knows about one document. */
+export interface DocumentIndexStatus {
+  found: boolean
+  docId?: number
+  path?: string
+  scope?: string
+  chunks?: number
+  indexedAt?: number
+}
+
+/**
+ * Read one document's row from the sidecar index.
+ *
+ * Used by the write paths to report whether the document they just wrote is really
+ * searchable, and by the `index.status` route. The lookup accepts the view spelling
+ * too (`global/…` may be stored as the actual path, or a personal view path drops the
+ * owner segment), so an exact miss falls back to a suffix match before reporting
+ * `found: false`.
+ *
+ * @param indexPath - the deployment's SQLite index file.
+ * @param relPath - the document's authoritative or view-relative path.
+ * @returns the row, or `found: false` when nothing matches or the index is absent.
+ */
+export function documentIndexStatus(indexPath: string, relPath: string): DocumentIndexStatus {
+  let db: DatabaseSync | undefined
+  try {
+    db = new DatabaseSync(indexPath, { readOnly: true })
+    // The index stores the TEXT file it chunked: for an extracted document that is
+    // the derived `<source>.md`, not the source the reader clicks. Both spellings
+    // must answer, or the PDF row would report "not indexed" while its chunks are
+    // the ones being retrieved.
+    const row = db.prepare('SELECT id, path, scope, mtime FROM kb_docs WHERE path = ? OR source_path = ?').get(relPath, relPath) as
+      { id: number; path: string; scope: string; mtime: number } | undefined
+      ?? db.prepare('SELECT id, path, scope, mtime FROM kb_docs WHERE path LIKE ? OR source_path LIKE ? ORDER BY mtime DESC LIMIT 1')
+        .get('%/' + relPath, '%/' + relPath) as { id: number; path: string; scope: string; mtime: number } | undefined
+    if (row === undefined) return { found: false }
+    const count = db.prepare('SELECT COUNT(*) AS n FROM kb_chunks WHERE doc_id = ?').get(row.id) as { n?: number } | undefined
+    return {
+      found: true,
+      docId: row.id,
+      path: row.path,
+      scope: row.scope,
+      chunks: Number(count?.n ?? 0),
+      indexedAt: row.mtime,
+    }
+  } catch {
+    // A missing index file or a table that has never been created is not an error:
+    // the write still succeeded, it simply has no row yet.
+    return { found: false }
+  } finally {
+    db?.close()
+  }
 }
 
 /**
