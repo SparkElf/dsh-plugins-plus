@@ -94,7 +94,18 @@ import {
   type KnowledgeGraphCaller,
   type KnowledgeGraphScopeKey,
 } from './graphTypes.ts'
-import { createKnowledgeGraphTools, type KnowledgeGraphToolHost } from './graphTools.ts'
+import {
+  appendOverviewGraphs,
+  createKnowledgeGraphTools,
+  invalidateOverviewCache,
+  isOverviewGraph,
+  JsonOverviewStoreProvider,
+  OVERVIEW_STORE_FALLBACK_DIR,
+  OverviewStoreManager,
+  probeOverviewStoreDir,
+  overviewScopesFromRoots,
+  type KnowledgeGraphToolHost,
+} from './graphTools.ts'
 import { applySummaryWriteback, summarySnapshotPathFor } from './summaryWriteback.ts'
 import { createMemoryTools, type MemoryToolHost } from './memoryTools.ts'
 import { ensurePersonalMemoryGraph } from './memoryGraphBootstrap.ts'
@@ -350,6 +361,24 @@ export interface Config {
   publishDir: string
   /** Sidecar directory for the SQLite FTS5 index (outside the agent-visible tree). */
   indexDir?: string
+  /**
+   * Root for the materialized overview store (Relate/SQLite/JSON backend).
+   *
+   * Empty means `<actualRoot>/.overview`; the startup probe falls back to
+   * `/var/lib/dataops/kb-overview` when the KB root is not writable (a NAS may be
+   * read-only, unmounted, or not support the required lock/fsync semantics).
+   */
+  overviewStoreDir?: string
+  /** Master switch for the computed 总图 rows and tool resolution. Default true. */
+  overviewEnabled?: boolean
+  /** Local fallback when `overviewStoreDir` cannot pass the startup probe. */
+  overviewStoreFallbackDir?: string
+  /** Idle TTL per level in minutes; clamped to the approved ranges by the manager. */
+  overviewTtlMinutes?: { personal: number; department: number; global: number }
+  /** LRU cap on cached overview stores. */
+  overviewMaxStores?: number
+  /** Soft memory budget in MiB for cached overview snapshots. */
+  overviewMemoryBudgetMB?: number
   /** Optional hybrid retrieval. Disabled by default; no provider is called unless enabled. */
   retrieval: { vector: import('./embeddings.ts').VectorRetrievalConfig }
   /**
@@ -459,6 +488,16 @@ export const Config: z<Config> = z.object({
   mineruMemoryMaxMiB: z.number().default(4096),
   publishDir: z.string().default(''),
   indexDir: z.string().default('/nas/kb/index'),
+  overviewStoreDir: z.string().default(''),
+  overviewEnabled: z.boolean().default(true),
+  overviewStoreFallbackDir: z.string().default(''),
+  overviewTtlMinutes: z.object({
+    personal: z.number().default(10),
+    department: z.number().default(20),
+    global: z.number().default(45),
+  }).default({ personal: 10, department: 20, global: 45 }),
+  overviewMaxStores: z.number().default(64),
+  overviewMemoryBudgetMB: z.number().default(32),
   retrieval: z.object({
     vector: z.object({
       enabled: z.boolean().default(false),
@@ -4052,6 +4091,27 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
               }
             }
             mergeProjectedGraphs(graphTree, projectedByScope)
+            // The computed overviews are views over the permission-filtered graphs,
+            // not stored manifests: one per scope the caller resolved. Append them
+            // after the merge so they are siblings of the real graphs and never part
+            // of their own aggregate.
+            const overviewRows = config.overviewEnabled === false
+              ? []
+              : (await appendOverviewGraphs(
+                  graphToolHost,
+                  knowledgeGraphsOf(graphTree),
+                  overviewScopesFromRoots(roots),
+                )).filter(isOverviewGraph)
+            for (const row of overviewRows) {
+              const targetScope = graphTree.scopes.find(scope => scope.key === row.scope)
+              if (targetScope === undefined) continue
+              const firstGroup = targetScope.groups[0]
+              if (firstGroup === undefined) {
+                targetScope.groups.push({ key: '', label: '', graphs: [row] })
+              } else {
+                firstGroup.graphs.push(row)
+              }
+            }
             // The scanner keeps each graph's authoritative path for the Host-side
             // tools. It must not cross into the browser: on a personal scope that
             // path contains the caller's uid.
@@ -7767,11 +7827,26 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
   const graphToolHost: KnowledgeGraphToolHost = {
     resolveCaller: knowledgeToolHost.resolveCaller,
     canWrite: knowledgeToolHost.canWrite,
-    createEntry: knowledgeToolHost.createEntry,
-    overwriteFile: knowledgeToolHost.overwriteFile,
-    moveEntry: knowledgeToolHost.moveEntry,
+    // Every write seam drops the overview aggregate: a new/removed node, edge or
+    // attribute must be visible on the next `kg_get` / graph-tab read, not after a
+    // TTL. `refreshView` is the catch-all for writes performed through other tools.
+    createEntry: async (relPath, options) => {
+      invalidateOverviewCache(graphToolHost)
+      return knowledgeToolHost.createEntry(relPath, options)
+    },
+    overwriteFile: async (relPath, content) => {
+      invalidateOverviewCache(graphToolHost)
+      return knowledgeToolHost.overwriteFile(relPath, content)
+    },
+    moveEntry: async (from, to, caller) => {
+      invalidateOverviewCache(graphToolHost)
+      return knowledgeToolHost.moveEntry(from, to, caller)
+    },
     statEntry: knowledgeToolHost.statEntry,
-    refreshView: knowledgeToolHost.refreshView,
+    refreshView: async (expectVisible) => {
+      invalidateOverviewCache(graphToolHost)
+      return knowledgeToolHost.refreshView(expectVisible)
+    },
     appendAudit: knowledgeToolHost.appendAudit,
     viewDir: knowledgeToolHost.viewDir,
     readText: async (viewPath) => {
@@ -7817,11 +7892,73 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       })
       // The tools see the same two sources the graph tab does: legacy folders and
       // `.graphs/<id>/graph.json`. A graph-json node carries `format` and an
-      // actualPath under `.graphs/`, which is what the tools branch on.
+      // actualPath under `.graphs/`, which is what the tools branch on. One computed
+      // overview per resolved scope is appended last and is never part of its own
+      // aggregate.
       mergeProjectedGraphs(tree, await projectGraphJsonScopes(host, config, roots, caller.userId))
-      return knowledgeGraphsOf(tree)
+      if (config.overviewEnabled === false) return knowledgeGraphsOf(tree)
+      return appendOverviewGraphs(
+        graphToolHost,
+        knowledgeGraphsOf(tree),
+        overviewScopesFromRoots(roots),
+      )
     },
   }
+
+  // One lifecycle owner per plugin instance. Global and department stores are
+  // shared by their readers; a personal store is keyed by the caller's uid and
+  // closed on logout/revocation. Disposal (and process exit) closes every store,
+  // so a future Relate backend inherits the same contract.
+  //
+  // The store root is probed at startup because a KB root can be a read-only or
+  // unmounted NAS. The provider reads `overviewStoreRoot` lazily, so a failed
+  // probe simply redirects materialization to the local fallback without
+  // restarting the plugin; reads never depend on the store root.
+  const overviewStoreSetting = (config.overviewStoreDir ?? '').trim()
+  const requestedOverviewStoreDir = overviewStoreSetting === ''
+    ? join(localConfig(config).actualRoot, '.overview')
+    : resolveStorageRoot(overviewStoreSetting)
+  let overviewStoreRoot = requestedOverviewStoreDir
+  const overviewFallbackSetting = (config.overviewStoreFallbackDir ?? '').trim()
+  const overviewFallbackDir = overviewFallbackSetting === ''
+    ? OVERVIEW_STORE_FALLBACK_DIR
+    : resolveStorageRoot(overviewFallbackSetting)
+  const overviewTtl = config.overviewTtlMinutes
+  const overviewStoreManager = new OverviewStoreManager(
+    new JsonOverviewStoreProvider(graphToolHost, () => overviewStoreRoot),
+    {
+      ttlMs: {
+        personal: (overviewTtl?.personal ?? 10) * 60_000,
+        department: (overviewTtl?.department ?? 20) * 60_000,
+        global: (overviewTtl?.global ?? 45) * 60_000,
+      },
+      maxStores: config.overviewMaxStores ?? 64,
+      memoryBudgetBytes: (config.overviewMemoryBudgetMB ?? 32) * 1024 * 1024,
+    },
+  )
+  graphToolHost.overviewStores = overviewStoreManager
+  void probeOverviewStoreDir(requestedOverviewStoreDir, overviewFallbackDir).then((probe) => {
+    overviewStoreRoot = probe.dir
+    const message = 'knowledge-base: overview store probe ' + JSON.stringify({
+      requested: probe.requested,
+      dir: probe.dir,
+      fallback: probe.fallback,
+      ok: probe.ok,
+      checks: probe.checks,
+      ...(probe.error === undefined ? {} : { error: probe.error }),
+    })
+    if (probe.ok && !probe.fallback) host.logger?.info?.(message)
+    else host.logger?.warn?.(message)
+  }).catch((error: unknown) => {
+    host.logger?.warn?.('knowledge-base: overview store probe failed: '
+      + (error instanceof Error ? error.message : String(error)))
+  })
+  const closeOverviewStores = (): void => { overviewStoreManager.closeAll() }
+  process.once('exit', closeOverviewStores)
+  ctx.effect(() => () => {
+    process.off('exit', closeOverviewStores)
+    overviewStoreManager.closeAll()
+  }, 'dsh-knowledge-base: overview store lifecycle')
 
   // Personal bindings are local state. The default keeps them under the
   // knowledge root's hidden `.memory/` directory, never inside a document folder

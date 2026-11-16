@@ -19,6 +19,50 @@
   background: var(--dsw-alias-bg-base);
 }
 
+/* The overview's own toolbar: one identity line plus the three permission-safe
+   filters. It is absent for every stored graph, so their canvas keeps its height. */
+.overviewBar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 0 12px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+  overflow-x: auto;
+}
+
+.overviewLabel {
+  flex: 0 0 auto;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-strong-12);
+  white-space: nowrap;
+}
+
+.filterField {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  white-space: nowrap;
+}
+
+.filterSelect {
+  height: 22px;
+  max-width: 132px;
+  padding: 0 4px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxxs-11);
+  cursor: pointer;
+}
+
 /* Only rendered when the active graph/topic carries provenance or authority. It
    keeps the canvas layout untouched for legacy graphs. */
 .badgeBar {

@@ -84,6 +84,18 @@ export interface KnowledgeGraphTopic {
   reviewStatus?: KnowledgeGraphReviewStatus
   /** Optional authority for the topic card; `redline` is subscribe-only. */
   authority?: KnowledgeGraphAuthority
+  /**
+   * Overview projection only: the graph this node was aggregated from.
+   *
+   * A topic inside the synthesized `总图` carries the namespaced id
+   * `<graphId>:<nodeId>`; these two fields let a click navigate back to the real
+   * graph and node instead of treating the copy as an editable topic.
+   */
+  sourceGraphId?: string
+  /** Overview projection only: the node id inside {@link sourceGraphId}. */
+  sourceNodeId?: string
+  /** Overview projection only: the source graph's scope, for the scope filter. */
+  scope?: KnowledgeGraphScopeKey
 }
 
 /** One relation document under `<graph>/.kg/links/`. */
@@ -100,6 +112,13 @@ export interface KnowledgeGraphLink {
   body: string
   /** File name under `<graph>/.kg/links/`, used by the Host-side del tool. */
   file?: string
+  /**
+   * Overview projection only: endpoints belong to different source graphs.
+   *
+   * The canvas draws these dashed and keeps them visible without enabling the
+   * ordinary cross-link toggle, because crossing graphs is the overview's point.
+   */
+  crossGraph?: boolean
 }
 
 /** One graph node under a scope. */
@@ -131,6 +150,22 @@ export interface KnowledgeGraphNode {
    * tools. Stripped before the tree is sent to the browser.
    */
   actualPath?: string
+  /**
+   * True for the synthesized overview (`总图`).
+   *
+   * A computed graph has no `.graphs/<id>/graph.json`: the Host builds it at read
+   * time from the graphs the caller may read. It is excluded from every recursive
+   * aggregation so the overview never contains itself.
+   */
+  computed?: boolean
+  /**
+   * True when the graph is a derived, read-only view.
+   *
+   * Legacy folder graphs are also read-only for their graph-level metadata, and
+   * the Host marks those rows `readOnly` too; `computed` is what distinguishes the
+   * synthesized overview from a stored graph.
+   */
+  readOnly?: boolean
 }
 
 /** One group inside a scope: the department chain for 部门, empty elsewhere. */

@@ -303,7 +303,11 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   useEffect(() => {
     if (scope !== 'graph' || graph.kind !== 'ready' || graphNodes.length === 0) return
     setActiveGraphId(current => (
-      current !== undefined && graphNodes.some(node => node.id === current) ? current : graphNodes[0]?.id
+      current !== undefined && graphNodes.some(node => node.id === current)
+        ? current
+        // Prefer a stored graph on first entry: an empty 总图 is a valid view but
+        // a blank canvas is a poor first impression. 总图 stays one click away.
+        : (graphNodes.find(node => node.computed !== true) ?? graphNodes[0])?.id
     ))
   }, [scope, graph.kind, graphNodes])
 
@@ -1867,6 +1871,7 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                 {...(activeTopicId === undefined ? {} : { activeTopicId })}
                 onRetry={() => { void graph.reload() }}
                 onOpenDocument={(path) => { void openDocument(path) }}
+                onOpenSourceGraph={selectTopic}
               />
             )}
             {scope !== 'graph' && rendered.kind === 'home' && (

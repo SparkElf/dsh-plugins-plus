@@ -34,6 +34,71 @@ description: 读写团队知识库里的知识图谱：主题卡、关系文档�
 - 图谱页把每个节点投影成一张卡片；空图谱也会出现在图谱树里，加上第一个节点后画布就有内容。
 - `.graphs/` 是隐藏目录，不要用文件树或 shell 直接编辑；新建用 `kg_add kind=graph`，改拓扑用 `kg_add` / `kg_set` / `kg_del`。
 
+### 总图（三级 computed / read-only）
+
+`总图` 是**物化读模型**，不是磁盘上的 `graph.json`。它分三级，每个调用者按自己的范围看到：
+
+```text
+global/.graphs/__overview__/links.json              # 全局总图；共享
+department/<chain>/.graphs/__overview__/links.json  # 部门总图；同部门共享
+personal/<uid>/.graphs/__overview__/links.json      # 个人总图；按用户
+```
+
+- 三级的源数据仍是各自的 `graph.json`；`__overview__` 目录下**没有** `graph.json`，只有跨图关系。
+- `kg_get {"graph":"总图"}` 默认解析到**个人总图**；要读其它级，用 `global/__overview__`、`department/__overview__`、`personal/__overview__`（也接受 `<级>/总图`）。
+- 每次返回该级的 `graphs[]` 图谱摘要、`nodes[]`（id 形如 `<graphId>:<nodeId>`，带 graphId/type/title/authority/reviewStatus/docPath）、
+  `edges[]`（端点已重映射；跨图边 `crossGraph:true`）。
+- 每一级只聚合该级、调用者可读的图谱，且永远排除该级 `总图` 自身；边只有在两端图谱都可读时才出现，不会泄露另一侧的名称或计数。
+- `总图` 只读：`kg_set` 被拒绝；`kg_add kind=node` 被拒绝（请把节点加到源图谱，`总图` 会自动出现它）。
+- 跨图关系用 `kg_add` 写入**同级**的 `links.json`：
+
+```json
+{"kind":"edge","graph":"personal/__overview__","id":"policy-to-role",
+ "fromGraph":"personal/.graphs/procurement","from":"policy-1",
+ "toGraph":"personal/.graphs/hr","to":"role-1","type":"governs"}
+```
+
+  先不带 `confirm` 拿草稿，用户确认后加 `"confirm":true`。`id` 是跨图边 id，必须唯一；`from`/`to` 仍然是**节点 id**，不是图谱 id。
+  两个端点图谱都必须可读、与本总图同级、节点必须存在，否则返回 `not-found`；重复 id 返回 `exists`；
+  `authority`/`origin`/`reviewStatus`/`tags`/`sourceRefs` 与普通边同规则校验。
+- `kg_del {"graph":"总图","id":"<跨图边 id>"}` 把这条关系移到该级 `.graphs/__overview__/_trash/links/`，不真删。
+- 图谱页里三级 `总图` 都显示 `[计算] [只读]`；画布按来源图谱分簇，跨图边走虚线，点击节点跳到源图谱的对应节点。
+
+#### 存储与生命周期（为 Relate 预留）
+
+MVP 用 JSON 后端（`JsonOverviewStore`），**不安装原生 Relate 依赖**。存储层统一为 `OverviewStore` 接口：
+
+```text
+open()            按需加载一次
+query()           读取当前跨图关系快照（不重复读盘）
+close()           释放内存，不删盘
+lastUsed()        最近使用时间
+revision()        内容版本，聚合缓存据此失效
+replace(links)    写回（MVP 的写方法）
+estimatedBytes()  内存预算估算
+```
+
+`OverviewStoreManager` 负责生命周期，未来把 provider 换成内存优先的 Relate 后端即可：
+
+- **按需加载 + 引用计数**：`acquire` 打开/复用并加引用，`release` 减引用；没有操作时不加载。
+- **空闲 TTL**（可配置，构造时按范围钳制）：个人 5–10 分钟（默认 10）、部门 15–30（默认 20）、全局 30–60（默认 45）。
+- **LRU 上限与内存预算淘汰**：只淘汰空闲（引用为 0）的 store；预算超了先淘汰最久未用的。
+- **重建原子切换**：`rebuild()` 先把新 store 完整构建/加载，再换入 map，最后关闭旧 store；读者不会看到半成品。
+- **共享与隔离**：全局/部门按 scope 共享一个 store；个人按 `userId` 独立，绝不把所有用户塞进一个 store。
+- **登出/撤权**：调用 `closePersonal(userId)` 立即关闭该用户个人 store；插件 dispose / 进程退出调用 `closeAll()`。
+- 以上默认值都是 `OverviewStoreManager` 构造参数，部署可按内存与访问频率调整；上限不允许突破约定区间。
+
+#### 存储目录与兼容性 probe
+
+- 物化 store 默认放 `<kbRoot>/.overview/`（`overviewStoreDir` 可改）；`overviewEnabled:false` 可整体关闭三级总图；
+  `overviewStoreFallbackDir`、`overviewTtlMinutes.*`、`overviewMaxStores`、`overviewMemoryBudgetMB` 可调；**不假设 NAS 可用**。
+- 启动时对目标目录做 open / write / fsync / read / lock 五项 probe；任一项失败自动 fallback 到本地
+  `/var/lib/dataops/kb-overview`，并把 `{requested, dir, fallback, ok, checks}` 写日志（warn/info）。
+- `links.json` 仍是跨图关系的持久真相；store 目录只放派生的物化快照，probe 失败不影响读取，也不阻塞 `kg_get`。
+- 两个盒子是两家公司的独立实例：总图只在**本实例**的可读图谱内聚合，不做跨盒聚合，也不共享个人 store。
+- MVP 不安装原生 Relate 依赖；第五阶段把 `OverviewStoreProvider` 换成 Relate 适配器，管理器的 TTL/LRU/预算/
+  原子重建/close 契约不变。
+
 ## 2. 主题卡与关系文档
 
 主题卡好例子：
@@ -82,8 +147,8 @@ updated: 2026-10-31
 
 | 动作 | 做什么 |
 |---|---|
-| `kg_add` | `kind: graph` 新建 graph-json 图谱；`kind: topic` 新增一条线（文件夹 + 卡）；`kind: link` 新增一条关系；`kind: node` / `kind: edge` 给 graph-json 图谱加节点/关系 |
-| `kg_get` | 不带 `graph`/`id` 返回全部图谱总览；带 `graph` 返回该图谱；带 `graph`+`id` 返回卡、文档、关系 |
+| `kg_add` | `kind: graph` 新建 graph-json 图谱；`kind: topic` 新增一条线（文件夹 + 卡）；`kind: link` 新增一条关系；`kind: node` / `kind: edge` 给 graph-json 图谱加节点/关系；`graph:"总图"` + `kind:"edge"` 新增跨图关系 |
+| `kg_get` | 不带 `graph`/`id` 返回全部图谱总览；带 `graph` 返回该图谱；带 `graph`+`id` 返回卡、文档、关系；`graph:"总图"` 返回聚合总图 |
 | `kg_set` | 改一个主题的 `status` / `depth` / `title` / `domain` / 摘要 / 正文；graph-json 图谱改节点/关系字段 |
 | `kg_del` | 把主题移到 `<graph>/_trash/`；有关联关系时需 `force: true` 一并移走，**不真删** |
 
@@ -111,6 +176,7 @@ updated: 2026-10-31
 4. **寻址**：`kg_get` 不带 id 看总览 → 按名称找 graph → `kg_get {graph,id}` 读一条线；不要用 `find`/`map` 另造工具。
 5. **沉淀**：把一次会话的结论写成文档（`kb_file_write` 到主题文件夹），再用 `kg_set` 更新卡摘要；图谱不复制文档内容。
 6. **复盘**：`kg_get` 总览 → 对每条线读 `kg_get {graph,id}` → 把 `status`/`depth` 调整回真实状态；`kg_del` 只移 `_trash`，不删。
+7. **跨图关联**：`kg_get {graph:"总图"}`（或 `global/__overview__` / `department/__overview__`）确认两个图谱同级且可读 → `kg_add {graph:"总图",kind:"edge",id,fromGraph,toGraph,from,to,type}` 草稿 → 用户确认 → `confirm:true`；不要为了跨图关系改任一图谱的 `graph.json`。
 
 ## 4. 扫历史会话（shell，不配工具）
 

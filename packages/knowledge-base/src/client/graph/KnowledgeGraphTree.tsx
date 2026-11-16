@@ -257,6 +257,11 @@ export function KnowledgeGraphTree(props: KnowledgeGraphTreeProps) {
   const graphRow = (graph: KnowledgeGraphNode, depth: number, keyPrefix = ''): ReactNode => {
     const open = isOpen('graph:' + graph.id)
     const active = graph.id === props.activeGraphId
+    // The computed overview is a read-only synthesis of the other graphs: its rows
+    // are already namespaced copies, so the rail keeps it one clickable row instead
+    // of expanding a second tree of nodes that belong to real graphs.
+    const computed = graph.computed === true
+    const expandable = !computed && graph.topics.length > 0
     return (
       <div key={keyPrefix + graph.id}>
         <TreeRow
@@ -264,22 +269,32 @@ export function KnowledgeGraphTree(props: KnowledgeGraphTreeProps) {
           label={graph.name}
           testId="kg-graph"
           attrs={{ 'data-graph-id': graph.id }}
-          expandable={graph.topics.length > 0}
+          expandable={expandable}
           open={open}
           active={active}
           trailing={graph.counts.topics + ' · ' + graph.counts.links}
-          badges={<OriginBadges compact origin={graph.origin} reviewStatus={graph.reviewStatus} authority={graph.authority} />}
+          badges={(
+            <>
+              {computed && (
+                <span className={styles.computedBadges} data-testid="kg-computed-badges">
+                  <span className={styles.computedBadge} title="由调用者可读的图谱实时聚合，没有 graph.json">[计算]</span>
+                  <span className={styles.readOnlyBadge} title="只读：新增或修改请到源图谱">[只读]</span>
+                </span>
+              )}
+              <OriginBadges compact origin={graph.origin} reviewStatus={graph.reviewStatus} authority={graph.authority} />
+            </>
+          )}
           glyph={<GraphFileGlyph />}
           onClick={() => {
-            if (active && graph.topics.length > 0 && open) {
+            if (active && expandable && open) {
               toggle('graph:' + graph.id)
               return
             }
             if (!active) props.onSelectGraph(graph.id)
-            if (!open) toggle('graph:' + graph.id)
+            if (expandable && !open) toggle('graph:' + graph.id)
           }}
         />
-        {open && graph.topics.length > 0 && (
+        {open && expandable && (
           <div>
             {graph.topics.map(topic => (
               <TreeRow

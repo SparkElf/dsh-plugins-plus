@@ -90,3 +90,144 @@ describe('graph canvas document cards', () => {
     dom.window.close()
   })
 })
+describe('graph canvas overview', () => {
+  it('draws the cross-graph edge dashed and navigates to the source graph on click', async () => {
+    const overviewPayload = {
+      type: 'kg:set-graphs',
+      graphs: [
+        {
+          id: 'personal/.graphs/__overview__',
+          name: '总图',
+          scope: 'personal',
+          path: 'personal/.graphs/__overview__',
+          group: '',
+          format: 'overview',
+          computed: true,
+          readOnly: true,
+          topics: [
+            {
+              id: 'personal/.graphs/a:n1',
+              title: '采购制度',
+              status: 'approved',
+              depth: 1,
+              domain: 'policy',
+              tags: ['采购制度图谱'],
+              summary: '',
+              body: '',
+              folder: '采购制度图谱',
+              path: 'personal/制度/采购制度.md',
+              documents: [],
+              sourceGraphId: 'personal/.graphs/a',
+              sourceNodeId: 'n1',
+              scope: 'personal',
+            },
+            {
+              id: 'personal/.graphs/a:n2',
+              title: '审批流程',
+              status: 'draft',
+              depth: 1,
+              domain: 'procedure',
+              tags: ['采购制度图谱'],
+              summary: '',
+              body: '',
+              folder: '采购制度图谱',
+              path: 'personal/流程/审批流程.md',
+              documents: [],
+              sourceGraphId: 'personal/.graphs/a',
+              sourceNodeId: 'n2',
+              scope: 'personal',
+            },
+            {
+              id: 'personal/.graphs/b:n3',
+              title: '岗位',
+              status: 'draft',
+              depth: 1,
+              domain: 'fact',
+              tags: ['人力资源图谱'],
+              summary: '',
+              body: '',
+              folder: '人力资源图谱',
+              path: 'personal/人力/岗位.md',
+              documents: [],
+              sourceGraphId: 'personal/.graphs/b',
+              sourceNodeId: 'n3',
+              scope: 'personal',
+            },
+          ],
+          links: [
+            { a: 'personal/.graphs/a:n1', b: 'personal/.graphs/a:n2', label: 'depends_on', body: '' },
+            { a: 'personal/.graphs/a:n2', b: 'personal/.graphs/b:n3', label: 'governs', body: '', crossGraph: true },
+          ],
+          counts: { topics: 3, links: 2, documents: 0 },
+        },
+      ],
+      activeGraphId: 'personal/.graphs/__overview__',
+      selectedTopicId: null,
+    }
+    const dom = new JSDOM(GRAPH_CANVAS_HTML, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/knowledge-base/api/graph.canvas',
+    })
+    const { window } = dom
+    const messages: Array<{ type?: string; graphId?: string; topicId?: string }> = []
+    window.addEventListener('message', (event) => {
+      const data = event.data as { type?: string; graphId?: string; topicId?: string } | null
+      if (data !== null && typeof data === 'object') messages.push(data)
+    })
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    window.postMessage(overviewPayload, '*')
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+
+    // The cross-graph edge is dashed even though the ordinary cross toggle is off.
+    expect(window.document.querySelectorAll('path.edge.cross').length).toBeGreaterThan(0)
+    expect(window.document.getElementById('cross')?.classList.contains('on')).toBe(true)
+
+    // Clicking an aggregated card hands the source graph/node back to the host.
+    const view = (window as unknown as { __KG_VIEW__?: { selectTopic: (id: string) => void } }).__KG_VIEW__
+    view?.selectTopic('personal/.graphs/b:n3')
+    await new Promise((resolve) => window.setTimeout(resolve, 20))
+    const opened = messages.find((message) => message.type === 'kg:open-source')
+    expect(opened?.graphId).toBe('personal/.graphs/b')
+    expect(opened?.topicId).toBe('n3')
+    // The overview must not open a detail panel for the computed copy.
+    expect(window.document.getElementById('panel')?.classList.contains('open')).toBe(false)
+    dom.window.close()
+  })
+})
+
+describe('graph canvas empty overview', () => {
+  it('shows the empty state instead of dereferencing an absent first topic', async () => {
+    const dom = new JSDOM(GRAPH_CANVAS_HTML, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/knowledge-base/api/graph.canvas',
+    })
+    const { window } = dom
+    const errors: string[] = []
+    window.addEventListener('error', (event) => { errors.push(String(event.message)) })
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    window.postMessage({
+      type: 'kg:set-graphs',
+      graphs: [{
+        id: 'global/.graphs/__overview__',
+        name: '总图',
+        scope: 'global',
+        path: 'global/.graphs/__overview__',
+        group: '',
+        format: 'overview',
+        computed: true,
+        readOnly: true,
+        topics: [],
+        links: [],
+        counts: { topics: 0, links: 0, documents: 0 },
+      }],
+      activeGraphId: 'global/.graphs/__overview__',
+      selectedTopicId: null,
+    }, '*')
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+    expect(errors).toEqual([])
+    expect(window.document.getElementById('kg-empty')?.hidden).toBe(false)
+    dom.window.close()
+  })
+})

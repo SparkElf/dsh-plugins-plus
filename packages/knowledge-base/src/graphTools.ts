@@ -28,6 +28,8 @@
  * @module @sparkelf/dsh-knowledge-base/graph-tools
  */
 
+import { mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   asKnowledgeToolError,
@@ -57,7 +59,12 @@ import {
   type MemoryOrigin,
   type MemoryReviewStatus,
 } from './graphModel.ts'
-import { KNOWLEDGE_GRAPH_FOLDER, type KnowledgeGraphLink, type KnowledgeGraphNode, type KnowledgeGraphTopic } from './graphTypes.ts'
+import {
+  KNOWLEDGE_GRAPH_FOLDER,
+  type KnowledgeGraphLink,
+  type KnowledgeGraphNode,
+  type KnowledgeGraphTopic,
+} from './graphTypes.ts'
 import { scopeFromAlias } from './scopeAliases.ts'
 
 /** The Host operations graph tools compose. Actual paths are authoritative. */
@@ -78,6 +85,14 @@ export interface KnowledgeGraphToolHost extends Pick<
   readActual?(relPath: string): Promise<string>
   /** Stat one knowledge-root-relative path, for the hidden `.graphs` store. */
   statActual?(relPath: string): Promise<{ kind: 'file' | 'directory'; size?: number } | undefined>
+  /**
+   * Lifecycle owner for the computed overview stores.
+   *
+   * Absent in unit tests and one-shot hosts, where each read opens a transient
+   * JSON store; the real Host wires one manager per plugin instance so global and
+   * department stores are shared and a personal store is per user.
+   */
+  overviewStores?: OverviewStoreManager
 }
 
 const jsonOutput = {
@@ -102,9 +117,45 @@ function graphCreateHint(id = '<graph-id>', name = '<图谱名称>'): string {
     + ',"name":' + JSON.stringify(name) + '}'
 }
 
+/**
+ * Resolve a short overview spelling.
+ *
+ * `null` means the bare `总图` / `__overview__`, which prefers the caller's
+ * personal overview. A level means `global/__overview__` or
+ * `department/总图`-style spelling. `undefined` means "not an overview alias".
+ */
+function overviewAliasLevel(value: string): OverviewLevel | null | undefined {
+  const needle = value.trim()
+  if (needle === OVERVIEW_GRAPH_ID || needle === OVERVIEW_GRAPH_NAME) return null
+  for (const level of OVERVIEW_LEVELS) {
+    if (needle === level + '/' + OVERVIEW_GRAPH_ID || needle === level + '/' + OVERVIEW_GRAPH_NAME) {
+      return level
+    }
+  }
+  return undefined
+}
+
 /** Resolve one graph by id, path or unique name. */
 function requireGraph(graphs: readonly KnowledgeGraphNode[], value: string): KnowledgeGraphNode {
   const needle = value.trim()
+  // The three computed overviews are addressed by their reserved id, a
+  // `<level>/__overview__` spelling, or their shared display name. Their canonical
+  // path also matches the generic lookup below.
+  const alias = overviewAliasLevel(needle)
+  if (alias !== undefined) {
+    const overviews = graphs.filter(isOverviewGraph)
+    const match = alias === null
+      ? (overviews.find(graph => graph.scope === 'personal')
+        ?? (overviews.length === 1 ? overviews[0] : undefined))
+      : overviews.find(graph => graph.scope === alias)
+    if (match !== undefined) return match
+    if (alias === null && overviews.length > 1) {
+      throw new KnowledgeToolError(
+        'invalid',
+        'there are several overview graphs; pass global/__overview__, department/__overview__ or personal/__overview__',
+      )
+    }
+  }
   const found = graphs.filter(graph => graph.id === needle || graph.path === needle || graph.name === needle)
   if (found.length === 1) return found[0]!
   if (found.length === 0) {
@@ -1368,6 +1419,1404 @@ function edgeSummary(store: GraphJsonStore, edge: LoadedGraphEdge): Record<strin
   }
 }
 
+// ---------------------------------------------------------------------------
+// Synthesized overview graphs (`总图`, one per scope)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reserved `.graphs/<id>` directory of every computed overview.
+ *
+ * The overview is a **materialized read model**, never a stored graph: there is no
+ * `graph.json` under this directory, only the cross-graph link store. A stored
+ * manifest would turn the overview into an ordinary graph and let a recursive
+ * aggregation include itself.
+ */
+export const OVERVIEW_GRAPH_ID = '__overview__'
+
+/** Personal overview path, kept as the default spelling every caller knows. */
+export const OVERVIEW_GRAPH_PATH = 'personal/.graphs/' + OVERVIEW_GRAPH_ID
+
+/** Display name shared by the three scope-level overviews. */
+export const OVERVIEW_GRAPH_NAME = '总图'
+
+/** Cross-graph link store inside the reserved directory. */
+export const OVERVIEW_LINKS_FILE = 'links.json'
+
+/** Schema version of `links.json`. */
+export const OVERVIEW_LINKS_SCHEMA_VERSION = 1
+
+/** The three knowledge scopes, each with its own overview. */
+export const OVERVIEW_LEVELS = ['global', 'department', 'personal'] as const
+export type OverviewLevel = (typeof OVERVIEW_LEVELS)[number]
+
+/** One scope the Host resolved for the caller, without credentials. */
+export interface OverviewScopeInput {
+  level: OverviewLevel
+  /** View-relative scope base, e.g. `global`, `department/D1`, `personal`. */
+  viewBase: string
+  /** Authoritative scope base, e.g. `department/D1`, `personal/<uid>`. */
+  actualBase: string
+  /** Department display label; empty for global and personal. */
+  groupLabel?: string
+}
+
+/** One fully derived overview scope: paths and display grouping. */
+export interface OverviewStoreScope {
+  level: OverviewLevel
+  viewBase: string
+  actualBase: string
+  groupLabel: string
+  /** `<viewBase>/.graphs/__overview__` — the virtual graph's view path. */
+  viewPath: string
+  /** `<actualBase>/.graphs/__overview__` — holds only `links.json`. */
+  actualPath: string
+}
+
+/** One persisted cross-graph link. */
+export interface OverviewCrossLink {
+  id: string
+  /** Readable graph the `from` node belongs to (a graph id or path). */
+  fromGraph: string
+  /** Node id inside {@link fromGraph}. */
+  from: string
+  /** Readable graph the `to` node belongs to (a graph id or path). */
+  toGraph: string
+  /** Node id inside {@link toGraph}. */
+  to: string
+  type: string
+  title?: string
+  authority: MemoryAuthority
+  internalizable: boolean
+  origin: MemoryOrigin
+  reviewStatus: MemoryReviewStatus
+  tags: string[]
+  sourceRefs: string[]
+  body?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** The parsed `links.json`. */
+interface OverviewLinkStore {
+  schemaVersion: typeof OVERVIEW_LINKS_SCHEMA_VERSION
+  links: OverviewCrossLink[]
+}
+
+/** One source graph in the overview answer. */
+export interface OverviewGraphSummary {
+  id: string
+  name: string
+  scope: OverviewLevel
+  group: string
+  path: string
+  format: string
+  counts: { topics: number; links: number; documents: number }
+}
+
+/** One aggregated node, namespaced as `<graphId>:<nodeId>`. */
+export interface OverviewNode {
+  /** Namespaced id `<graphId>:<nodeId>`; unique across the overview. */
+  id: string
+  graphId: string
+  graphName: string
+  scope: OverviewLevel
+  nodeId: string
+  type: string
+  title: string
+  authority?: MemoryAuthority
+  reviewStatus?: MemoryReviewStatus
+  tags: string[]
+  /** View-relative document path, for opening the source node. */
+  docPath: string
+}
+
+/** One aggregated edge, with both endpoints remapped to namespaced node ids. */
+export interface OverviewEdge {
+  /** Edge id: namespaced for a stored graph, the record id for a cross-graph link. */
+  id: string
+  graphId: string
+  edgeId: string
+  from: string
+  to: string
+  type: string
+  title?: string
+  authority?: MemoryAuthority
+  origin?: MemoryOrigin
+  reviewStatus?: MemoryReviewStatus
+  tags: string[]
+  sourceRefs: string[]
+  /** True for a link stored in `<scope>/.graphs/__overview__/links.json`. */
+  crossGraph: boolean
+}
+
+/** The aggregate `kg_get` answers for one overview and the canvas consumes. */
+export interface OverviewAggregate {
+  graph: {
+    id: string
+    name: string
+    scope: OverviewLevel
+    group: string
+    path: string
+    format: 'overview'
+    computed: true
+    readOnly: true
+    counts: { topics: number; links: number; documents: number }
+  }
+  graphs: OverviewGraphSummary[]
+  nodes: OverviewNode[]
+  edges: OverviewEdge[]
+  /** Canvas projection of {@link nodes}; ids are already namespaced. */
+  topics: KnowledgeGraphTopic[]
+  /** Canvas projection of {@link edges}; endpoints are already namespaced. */
+  links: KnowledgeGraphLink[]
+  totals: { graphs: number; nodes: number; edges: number; crossEdges: number }
+  /** Non-fatal problems (dangling or no-longer-readable cross links). */
+  issues: string[]
+}
+
+// ---------------------------------------------------------------------------
+// OverviewStore: the persistence seam a future Relate backend replaces
+// ---------------------------------------------------------------------------
+
+/**
+ * The storage contract of one overview scope.
+ *
+ * MVP is backed by `links.json` (`JsonOverviewStore`). The interface deliberately
+ * carries nothing JSON-specific: a memory-first Relate backend implements the
+ * same five lifecycle methods (`open` / `query` / `close` / `lastUsed` /
+ * `revision`) plus the two write helpers and `estimatedBytes` used by eviction.
+ *
+ * `query()` never reloads the backing bytes; `open()` is the only load point, so
+ * the manager can cache a store across calls. `revision()` changes whenever this
+ * store observed a new snapshot, which is what invalidates the aggregate cache.
+ */
+export interface OverviewStore {
+  readonly scope: OverviewStoreScope
+  /** Load the backing state once; idempotent. */
+  open(): Promise<void>
+  /** The current cross-link snapshot. Does not re-read persistent bytes. */
+  query(): Promise<OverviewCrossLink[]>
+  /** Replace the persisted cross-link snapshot. */
+  replace(links: readonly OverviewCrossLink[]): Promise<void>
+  /** Drop in-memory state; persistent bytes stay. */
+  close(): void
+  /** Epoch milliseconds of the last open/query/replace. */
+  lastUsed(): number
+  /** Opaque token that changes when the store observed new content. */
+  revision(): string
+  /** Rough in-memory footprint, for the manager's memory budget. */
+  estimatedBytes(): number
+  /** Non-fatal parse issues from the last open. */
+  issues(): readonly string[]
+}
+
+/** How the manager opens a store for one scope. */
+export interface OverviewStoreProvider {
+  open(scope: OverviewStoreScope): Promise<OverviewStore>
+}
+
+/** Build a `links.json` store for one Host and scope. */
+export class JsonOverviewStore implements OverviewStore {
+  readonly scope: OverviewStoreScope
+  private links: OverviewCrossLink[] | undefined
+  private storeIssues: string[] = []
+  private used: number
+  private rev = 0
+  /** The file this store last read, so a standalone flat layout writes back to it. */
+  private pathUsed: string
+
+  constructor(
+    private readonly host: KnowledgeGraphToolHost,
+    scope: OverviewStoreScope,
+    private readonly now: () => number = Date.now,
+    /** Materialized read-model root; a getter lets the startup probe swap it. */
+    private readonly storeDir?: string | (() => string | undefined),
+  ) {
+    this.scope = scope
+    this.used = now()
+    this.pathUsed = scope.actualPath + '/' + OVERVIEW_LINKS_FILE
+  }
+
+  async open(): Promise<void> {
+    if (this.links !== undefined) return
+    const state = await loadOverviewLinks(this.host, this.scope)
+    this.links = state.links
+    this.storeIssues = state.issues
+    this.pathUsed = state.actualPath
+    this.used = this.now()
+    this.rev += 1
+  }
+
+  async query(): Promise<OverviewCrossLink[]> {
+    await this.open()
+    this.used = this.now()
+    return [...(this.links ?? [])]
+  }
+
+  async replace(links: readonly OverviewCrossLink[]): Promise<void> {
+    await writeOverviewLinks(this.host, this.pathUsed, renderOverviewLinks(links))
+    this.links = [...links]
+    this.storeIssues = []
+    this.used = this.now()
+    this.rev += 1
+  }
+
+  close(): void {
+    this.links = undefined
+  }
+
+  lastUsed(): number {
+    return this.used
+  }
+
+  revision(): string {
+    return String(this.rev) + ':' + (this.links === undefined ? 'closed' : JSON.stringify(this.links))
+  }
+
+  estimatedBytes(): number {
+    return this.links === undefined ? 0 : JSON.stringify(this.links).length * 2
+  }
+
+  issues(): readonly string[] {
+    return this.storeIssues
+  }
+
+  /**
+   * Persist the derived read model under the probed store root.
+   *
+   * This snapshot is not the source of truth — `links.json` is — so a failed
+   * write never blocks a read and a missing store root simply skips it. It gives
+   * the future Relate adapter a concrete, probe-tested location to replace.
+   */
+  async materialize(aggregate: OverviewAggregate): Promise<void> {
+    const root = typeof this.storeDir === 'function' ? this.storeDir() : this.storeDir
+    if (root === undefined || root === '') return
+    const directory = join(root, this.scope.level)
+    await mkdir(directory, { recursive: true })
+    const name = this.scope.actualPath.replace(/[^A-Za-z0-9._-]+/gu, '_') + '.json'
+    const handle = await open(join(directory, name), 'w')
+    try {
+      await handle.writeFile(JSON.stringify({
+        schemaVersion: 1,
+        revision: this.revision(),
+        scope: this.scope,
+        aggregate,
+      }, null, 2))
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+  }
+}
+
+/** The default MVP provider: one `links.json` per scope plus a JSON read-model snapshot. */
+export class JsonOverviewStoreProvider implements OverviewStoreProvider {
+  constructor(
+    private readonly host: KnowledgeGraphToolHost,
+    /** Resolved store root; read lazily so the startup probe can swap it. */
+    private readonly storeDir?: () => string | undefined,
+  ) {}
+
+  async open(scope: OverviewStoreScope): Promise<OverviewStore> {
+    const store = new JsonOverviewStore(this.host, scope, Date.now, this.storeDir?.())
+    await store.open()
+    return store
+  }
+}
+
+/** Where the store goes when the KB root cannot satisfy the probe. */
+export const OVERVIEW_STORE_FALLBACK_DIR = '/var/lib/dataops/kb-overview'
+
+/** One probe check per capability the backend must provide. */
+export interface OverviewStoreProbeChecks {
+  open: boolean
+  write: boolean
+  fsync: boolean
+  read: boolean
+  lock: boolean
+}
+
+/** Outcome of the startup compatibility probe. */
+export interface OverviewStoreProbeResult {
+  /** Directory the store should actually use. */
+  dir: string
+  /** Directory the configuration asked for. */
+  requested: string
+  /** True when {@link dir} is the local fallback rather than the requested root. */
+  fallback: boolean
+  /** True only when every capability passed in the directory actually used. */
+  ok: boolean
+  checks: OverviewStoreProbeChecks
+  error?: string
+}
+
+/** Probe one directory: open/write/fsync/read/lock, cleaning up after itself. */
+async function probeOverviewStoreOnce(dir: string): Promise<{
+  ok: boolean
+  checks: OverviewStoreProbeChecks
+  error?: string
+}> {
+  const checks: OverviewStoreProbeChecks = {
+    open: false,
+    write: false,
+    fsync: false,
+    read: false,
+    lock: false,
+  }
+  const probeFile = join(dir, '.probe-' + String(process.pid) + '-' + String(Date.now()))
+  const lockFile = join(dir, '.probe-lock-' + String(process.pid) + '-' + String(Date.now()))
+  try {
+    await mkdir(dir, { recursive: true })
+    checks.open = true
+    const handle = await open(probeFile, 'w')
+    try {
+      await handle.writeFile('kb-overview-probe\n')
+      checks.write = true
+      await handle.sync()
+      checks.fsync = true
+    } finally {
+      await handle.close()
+    }
+    checks.read = await readFile(probeFile, 'utf8') === 'kb-overview-probe\n'
+    const lock = await open(lockFile, 'wx')
+    checks.lock = true
+    await lock.close()
+    return { ok: Object.values(checks).every(Boolean), checks }
+  } catch (error) {
+    return { ok: false, checks, error: messageOf(error) }
+  } finally {
+    await unlink(probeFile).catch(() => undefined)
+    await unlink(lockFile).catch(() => undefined)
+  }
+}
+
+/**
+ * Probe the configured overview store root and fall back when it is unusable.
+ *
+ * A KB root may be a read-only NAS, an unmounted share, or a filesystem without
+ * the lock/fsync semantics a store needs. The probe never assumes availability:
+ * it creates a file, fsyncs it, reads it back and takes an exclusive lock, then
+ * removes both artifacts. A failed requested root moves the store to
+ * {@link OVERVIEW_STORE_FALLBACK_DIR}; reads keep working either way.
+ */
+export async function probeOverviewStoreDir(
+  requested: string,
+  fallbackDir: string = OVERVIEW_STORE_FALLBACK_DIR,
+): Promise<OverviewStoreProbeResult> {
+  const primary = await probeOverviewStoreOnce(requested)
+  const result: OverviewStoreProbeResult = primary.ok
+    ? { dir: requested, requested, fallback: false, ok: true, checks: primary.checks }
+    : await (async (): Promise<OverviewStoreProbeResult> => {
+        const fallback = await probeOverviewStoreOnce(fallbackDir)
+        return {
+          dir: fallbackDir,
+          requested,
+          fallback: true,
+          ok: fallback.ok,
+          checks: fallback.checks,
+          ...(primary.error === undefined && fallback.error === undefined
+            ? {}
+            : { error: [primary.error, fallback.error].filter((item): item is string => item !== undefined).join('; ') }),
+        }
+      })()
+  // Durable metric and store manifest beside the snapshots. The Host log carries
+  // the same values; this file survives a log rotation and lets an operator see
+  // which root won, which backend is active and which probe checks passed.
+  await writeFile(join(result.dir, 'manifest.json'), JSON.stringify({
+    backend: 'json',
+    schemaVersion: 1,
+    metric: 'kb.overview.store.probe',
+    at: new Date().toISOString(),
+    ...result,
+  }, null, 2) + '\n').catch(() => undefined)
+  return result
+}
+
+/** TTL floors/ceilings in minutes, per the approved memory lifecycle. */
+const OVERVIEW_TTL_MINUTES: Record<OverviewLevel, { min: number; max: number; fallback: number }> = {
+  personal: { min: 5, max: 10, fallback: 10 },
+  department: { min: 15, max: 30, fallback: 20 },
+  global: { min: 30, max: 60, fallback: 45 },
+}
+
+/** Manager knobs; every value is overridable and the defaults stay inside the policy. */
+export interface OverviewStoreManagerOptions {
+  /** Idle TTL per level, clamped to 5–10 / 15–30 / 30–60 minutes. */
+  ttlMs?: Partial<Record<OverviewLevel, number>>
+  /** Hard cap on cached stores; idle LRU entries are evicted first. */
+  maxStores?: number
+  /** Soft memory budget for cached link snapshots; idle LRU entries are evicted first. */
+  memoryBudgetBytes?: number
+  /** Injectable clock, so lifecycle tests do not sleep. */
+  now?: () => number
+}
+
+/** One cached store plus its reference count and recency. */
+interface OverviewStoreEntry {
+  store: OverviewStore
+  refs: number
+  lastUsed: number
+}
+
+/**
+ * Lifecycle owner for every overview store.
+ *
+ * The approved model is per scope: global and department stores are shared by
+ * everyone allowed to read that scope, while a personal store belongs to exactly
+ * one user. Stores load on first use, stay open while an operation holds a
+ * reference, and are evicted by idle TTL, LRU count and the memory budget.
+ *
+ * `rebuild()` opens the replacement completely before swapping it into the map
+ * and closing the old one, so a reader never observes a half-built store. A future
+ * auth/logout hook calls {@link closePersonal}; plugin disposal calls
+ * {@link closeAll}.
+ */
+export class OverviewStoreManager {
+  private readonly entries = new Map<string, OverviewStoreEntry>()
+  private readonly ttlMs: Record<OverviewLevel, number>
+  private readonly maxStores: number
+  private readonly memoryBudgetBytes: number
+  private readonly now: () => number
+
+  constructor(private readonly provider: OverviewStoreProvider, options: OverviewStoreManagerOptions = {}) {
+    this.now = options.now ?? Date.now
+    this.ttlMs = {
+      personal: clampTtl('personal', options.ttlMs?.personal),
+      department: clampTtl('department', options.ttlMs?.department),
+      global: clampTtl('global', options.ttlMs?.global),
+    }
+    this.maxStores = Math.max(1, options.maxStores ?? 64)
+    this.memoryBudgetBytes = Math.max(0, options.memoryBudgetBytes ?? 32 * 1024 * 1024)
+  }
+
+  /** Key a store by level + authoritative base; personal therefore includes the uid. */
+  private keyOf(scope: OverviewStoreScope): string {
+    return scope.level + ':' + scope.actualPath
+  }
+
+  /** Open (or reuse) one store and take a reference. */
+  async acquire(scope: OverviewStoreScope): Promise<OverviewStore> {
+    const key = this.keyOf(scope)
+    let entry = this.entries.get(key)
+    if (entry === undefined) {
+      const store = await this.provider.open(scope)
+      entry = { store, refs: 0, lastUsed: store.lastUsed() }
+      this.entries.set(key, entry)
+    }
+    entry.refs += 1
+    entry.lastUsed = this.now()
+    this.sweep()
+    return entry.store
+  }
+
+  /** Drop one reference; eviction happens on the next sweep. */
+  release(store: OverviewStore): void {
+    const entry = this.entries.get(this.keyOf(store.scope))
+    if (entry === undefined || entry.store !== store) return
+    entry.refs = Math.max(0, entry.refs - 1)
+    entry.lastUsed = this.now()
+  }
+
+  /**
+   * Close every personal store that belongs to one user.
+   *
+   * The future managed-auth logout/revocation hook calls this; the JSON MVP also
+   * relies on it when a caller disappears, so a shared process never keeps another
+   * user's personal snapshot alive.
+   */
+  closePersonal(userId: string): void {
+    const marker = 'personal/' + userId + '/.graphs/' + OVERVIEW_GRAPH_ID
+    for (const [key, entry] of this.entries) {
+      if (entry.store.scope.level !== 'personal') continue
+      if (entry.store.scope.actualPath !== marker
+        && !entry.store.scope.actualPath.endsWith('/' + marker)) continue
+      entry.store.close()
+      this.entries.delete(key)
+    }
+  }
+
+  /** Plugin disposal / process exit: close every store once. */
+  closeAll(): void {
+    for (const entry of this.entries.values()) entry.store.close()
+    this.entries.clear()
+  }
+
+  /**
+   * Replace one scope's store atomically.
+   *
+   * The new store is opened in full first; only then does the map switch to it and
+   * the old store close. A failed open leaves readers on the old snapshot.
+   */
+  async rebuild(scope: OverviewStoreScope): Promise<OverviewStore> {
+    const key = this.keyOf(scope)
+    const fresh = await this.provider.open(scope)
+    await fresh.open()
+    const previous = this.entries.get(key)
+    this.entries.set(key, {
+      store: fresh,
+      refs: previous?.refs ?? 0,
+      lastUsed: this.now(),
+    })
+    previous?.store.close()
+    return fresh
+  }
+
+  /** Evict idle stores by TTL, then by LRU count, then by memory budget. */
+  sweep(at: number = this.now()): void {
+    for (const [key, entry] of [...this.entries]) {
+      if (entry.refs > 0) continue
+      if (at - entry.lastUsed <= this.ttlMs[entry.store.scope.level]) continue
+      entry.store.close()
+      this.entries.delete(key)
+    }
+    this.evictToCount(this.maxStores)
+    while (this.cachedBytes() > this.memoryBudgetBytes) {
+      if (!this.evictOneIdleLru()) break
+    }
+  }
+
+  /** Cached store count, for diagnostics and tests. */
+  size(): number {
+    return this.entries.size
+  }
+
+  /** Cached footprint, for diagnostics and tests. */
+  cachedBytes(): number {
+    let total = 0
+    for (const entry of this.entries.values()) total += entry.store.estimatedBytes()
+    return total
+  }
+
+  private evictToCount(limit: number): void {
+    while (this.entries.size > limit && this.evictOneIdleLru()) {
+      // `evictOneIdleLru` is the loop body; a non-idle-only map stops here.
+    }
+  }
+
+  private evictOneIdleLru(): boolean {
+    let victimKey: string | undefined
+    let victimAt = Number.POSITIVE_INFINITY
+    for (const [key, entry] of this.entries) {
+      if (entry.refs > 0) continue
+      if (entry.lastUsed < victimAt) {
+        victimAt = entry.lastUsed
+        victimKey = key
+      }
+    }
+    if (victimKey === undefined) return false
+    const victim = this.entries.get(victimKey)
+    victim?.store.close()
+    this.entries.delete(victimKey)
+    return true
+  }
+}
+
+/** Clamp a configured TTL to its level's approved range. */
+function clampTtl(level: OverviewLevel, value: number | undefined): number {
+  const range = OVERVIEW_TTL_MINUTES[level]
+  const fallback = range.fallback * 60_000
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  const min = range.min * 60_000
+  const max = range.max * 60_000
+  return Math.min(max, Math.max(min, value))
+}
+
+/** Cache slot: one aggregate per host and overview scope. */
+const overviewCache = new WeakMap<KnowledgeGraphToolHost, Map<string, { key: string; value: OverviewAggregate }>>()
+
+/** Whether a graph row is one of the computed overviews. */
+export function isOverviewGraph(
+  graph: Pick<KnowledgeGraphNode, 'id' | 'path' | 'computed'>,
+): boolean {
+  if (graph.computed === true) return true
+  return isOverviewStorePath(graph.id) || isOverviewStorePath(graph.path)
+}
+
+/** Whether a path is `<anything>/.graphs/__overview__`. */
+function isOverviewStorePath(value: string): boolean {
+  const parts = value.split('/')
+  return parts.length >= 3
+    && parts[parts.length - 2] === '.graphs'
+    && parts[parts.length - 1] === OVERVIEW_GRAPH_ID
+}
+
+/** The scope base of a graph root (`<base>/知识图谱` → `<base>`). */
+function scopeBaseOfRoot(value: string): string {
+  const parts = value.split('/').filter(segment => segment !== '')
+  if (parts.length > 0 && parts[parts.length - 1] === KNOWLEDGE_GRAPH_FOLDER) parts.pop()
+  return parts.join('/')
+}
+
+/** Turn Host-resolved graph roots into overview scopes. */
+export function overviewScopesFromRoots(
+  roots: ReadonlyArray<{ key: OverviewLevel; actualPath: string; viewPath: string; groupLabel?: string }>,
+): OverviewScopeInput[] {
+  const scopes: OverviewScopeInput[] = []
+  const seen = new Set<string>()
+  for (const root of roots) {
+    const viewBase = scopeBaseOfRoot(root.viewPath)
+    const actualBase = scopeBaseOfRoot(root.actualPath)
+    const key = root.key + ':' + actualBase
+    if (seen.has(key)) continue
+    seen.add(key)
+    scopes.push({
+      level: root.key,
+      viewBase,
+      actualBase,
+      ...(root.groupLabel === undefined || root.groupLabel === '' ? {} : { groupLabel: root.groupLabel }),
+    })
+  }
+  return scopes
+}
+
+/** Derive the store scope of one overview row. */
+export function overviewStoreScopeOf(graph: Pick<KnowledgeGraphNode, 'path' | 'actualPath' | 'scope' | 'group'>): OverviewStoreScope {
+  const suffix = '/.graphs/' + OVERVIEW_GRAPH_ID
+  const viewBase = graph.path.endsWith(suffix) ? graph.path.slice(0, -suffix.length) : scopeBaseOfRoot(graph.path)
+  const actualPath = graph.actualPath ?? graph.path
+  const actualBase = actualPath.endsWith(suffix) ? actualPath.slice(0, -suffix.length) : scopeBaseOfRoot(actualPath)
+  return overviewStoreScope({
+    level: graph.scope,
+    viewBase,
+    actualBase,
+    groupLabel: graph.group,
+  })
+}
+
+/** Complete one scope input into its store coordinates. */
+export function overviewStoreScope(input: OverviewScopeInput): OverviewStoreScope {
+  return {
+    level: input.level,
+    viewBase: input.viewBase,
+    actualBase: input.actualBase,
+    groupLabel: input.groupLabel ?? '',
+    viewPath: joinRel(input.viewBase, '.graphs/' + OVERVIEW_GRAPH_ID),
+    actualPath: joinRel(input.actualBase, '.graphs/' + OVERVIEW_GRAPH_ID),
+  }
+}
+
+/** The synthetic graph row one scope's overview publishes. */
+export function overviewGraphNode(scope: OverviewStoreScope, aggregate?: OverviewAggregate): KnowledgeGraphNode {
+  const counts = aggregate === undefined
+    ? { topics: 0, links: 0, documents: 0 }
+    : {
+        topics: aggregate.nodes.length,
+        links: aggregate.edges.length,
+        documents: aggregate.nodes.length,
+      }
+  return {
+    id: scope.viewPath,
+    name: OVERVIEW_GRAPH_NAME,
+    scope: scope.level,
+    path: scope.viewPath,
+    group: scope.groupLabel,
+    topics: aggregate?.topics ?? [],
+    links: aggregate?.links ?? [],
+    counts,
+    actualPath: scope.actualPath,
+    computed: true,
+    readOnly: true,
+  }
+}
+
+/** The default scope: the caller's personal overview. */
+export async function personalOverviewScope(host: KnowledgeGraphToolHost): Promise<OverviewStoreScope> {
+  const caller = await host.resolveCaller()
+  if (!isSafeSegment(caller.userId)) {
+    throw new KnowledgeToolError('forbidden', 'unsafe caller id; cannot resolve the personal overview')
+  }
+  return overviewStoreScope({
+    level: 'personal',
+    viewBase: 'personal',
+    actualBase: 'personal/' + caller.userId,
+  })
+}
+
+/** Read one hidden path, treating any refusal as "not there". */
+async function readHiddenText(
+  host: KnowledgeGraphToolHost,
+  relPath: string,
+): Promise<string | undefined> {
+  if (host.readActual === undefined) return undefined
+  try {
+    if (host.statActual !== undefined && await host.statActual(relPath) === undefined) return undefined
+    return await host.readActual(relPath)
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether a hidden path exists, through the Host's own stat seam. */
+async function hiddenExists(host: KnowledgeGraphToolHost, relPath: string): Promise<boolean> {
+  if (host.statActual !== undefined) return await host.statActual(relPath) !== undefined
+  return await readHiddenText(host, relPath) !== undefined
+}
+
+/** Parse and validate one link record; returns undefined for an unusable row. */
+function parseOverviewLink(value: unknown): OverviewCrossLink | undefined {
+  if (!isRecord(value)) return undefined
+  const id = typeof value.id === 'string' ? value.id.trim() : ''
+  const fromGraph = typeof value.fromGraph === 'string' ? value.fromGraph.trim() : ''
+  const from = typeof value.from === 'string' ? value.from.trim() : ''
+  const toGraph = typeof value.toGraph === 'string' ? value.toGraph.trim() : ''
+  const to = typeof value.to === 'string' ? value.to.trim() : ''
+  const type = typeof value.type === 'string' ? value.type.trim() : ''
+  if (!GRAPH_ITEM_ID.test(id) || fromGraph === '' || from === '' || toGraph === '' || to === '' || type === '') {
+    return undefined
+  }
+  const authority = value.authority
+  const origin = value.origin
+  const reviewStatus = value.reviewStatus
+  if (!AUTHORITIES.includes(authority as MemoryAuthority)) return undefined
+  if (!ORIGINS.includes(origin as MemoryOrigin)) return undefined
+  if (!REVIEW_STATUSES.includes(reviewStatus as MemoryReviewStatus)) return undefined
+  const tags = Array.isArray(value.tags) && value.tags.every(item => typeof item === 'string')
+    ? (value.tags as string[]).map(item => item.trim()).filter(item => item !== '')
+    : []
+  const sourceRefs = Array.isArray(value.sourceRefs) && value.sourceRefs.every(item => typeof item === 'string')
+    ? (value.sourceRefs as string[]).map(item => item.trim()).filter(item => item !== '')
+    : []
+  const title = typeof value.title === 'string' && value.title.trim() !== '' ? value.title.trim() : undefined
+  const body = typeof value.body === 'string' && value.body.trim() !== '' ? value.body : undefined
+  const createdAt = typeof value.createdAt === 'string' ? value.createdAt : ''
+  const updatedAt = typeof value.updatedAt === 'string' ? value.updatedAt : ''
+  return {
+    id,
+    fromGraph,
+    from,
+    toGraph,
+    to,
+    type,
+    ...(title === undefined ? {} : { title }),
+    authority: authority as MemoryAuthority,
+    internalizable: value.internalizable !== false,
+    origin: origin as MemoryOrigin,
+    reviewStatus: reviewStatus as MemoryReviewStatus,
+    tags,
+    sourceRefs,
+    ...(body === undefined ? {} : { body }),
+    createdAt,
+    updatedAt,
+  }
+}
+
+/** Read the cross-link store of one scope, or an empty one when it does not exist. */
+async function loadOverviewLinks(
+  host: KnowledgeGraphToolHost,
+  scope: OverviewStoreScope,
+): Promise<{ links: OverviewCrossLink[]; issues: string[]; actualPath: string }> {
+  const primary = scope.actualPath + '/' + OVERVIEW_LINKS_FILE
+  const candidates = [primary]
+  // A standalone personal tree keeps the flat `personal/...` spelling. Global and
+  // department scopes have a single authoritative path and need no fallback.
+  if (scope.level === 'personal' && scope.actualBase !== 'personal') {
+    candidates.push('personal/.graphs/' + OVERVIEW_GRAPH_ID + '/' + OVERVIEW_LINKS_FILE)
+  }
+  let source: string | undefined
+  let actualPath = primary
+  for (const candidate of candidates) {
+    source = await readHiddenText(host, candidate)
+    if (source !== undefined) {
+      actualPath = candidate
+      break
+    }
+  }
+  if (source === undefined) return { links: [], issues: [], actualPath }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(source)
+  } catch (error) {
+    return { links: [], issues: ['links.json is not valid JSON: ' + messageOf(error)], actualPath }
+  }
+  if (!isRecord(parsed) || parsed.schemaVersion !== OVERVIEW_LINKS_SCHEMA_VERSION || !Array.isArray(parsed.links)) {
+    return { links: [], issues: ['links.json must be {"schemaVersion":1,"links":[...]}'], actualPath }
+  }
+  const links: OverviewCrossLink[] = []
+  const issues: string[] = []
+  const seen = new Set<string>()
+  for (const [index, row] of parsed.links.entries()) {
+    const link = parseOverviewLink(row)
+    if (link === undefined) {
+      issues.push('links[' + String(index) + '] is not a valid cross-graph link')
+      continue
+    }
+    if (seen.has(link.id)) {
+      issues.push('duplicate cross-graph link id "' + link.id + '" was ignored')
+      continue
+    }
+    seen.add(link.id)
+    links.push(link)
+  }
+  return { links, issues, actualPath }
+}
+
+/** Serialize the store, preserving nothing else: `links.json` is fully owned here. */
+function renderOverviewLinks(links: readonly OverviewCrossLink[]): string {
+  return JSON.stringify({
+    schemaVersion: OVERVIEW_LINKS_SCHEMA_VERSION,
+    links: [...links],
+  }, null, 2) + '\n'
+}
+
+/** Write `links.json` through the Host seam. */
+async function writeOverviewLinks(
+  host: KnowledgeGraphToolHost,
+  actualPath: string,
+  content: string,
+): Promise<void> {
+  const directory = actualPath.split('/').slice(0, -1).join('/')
+  // Check the directory, not the (possibly not-yet-created) file: a grant covers
+  // creating `links.json` inside the scope, and a resolve on a missing file path
+  // would refuse a legitimate first write.
+  if (!await host.canWrite(directory)) {
+    throw new KnowledgeToolError('forbidden', 'write access is required for this overview scope', directory)
+  }
+  await host.createEntry(directory, { directory: true }).catch(() => undefined)
+  if (await hiddenExists(host, actualPath)) {
+    await host.overwriteFile(actualPath, content)
+    return
+  }
+  try {
+    await host.createEntry(actualPath, { directory: false, content })
+  } catch (error) {
+    if ((error as { code?: string }).code === 'exists') {
+      await host.overwriteFile(actualPath, content)
+      return
+    }
+    throw error
+  }
+}
+
+/** Find one readable graph by id, path or unique name. */
+function findGraphReference(
+  graphs: readonly KnowledgeGraphNode[],
+  value: string,
+): KnowledgeGraphNode | undefined {
+  const needle = value.trim()
+  const found = graphs.filter(graph => graph.id === needle || graph.path === needle || graph.name === needle)
+  return found.length === 1 ? found[0] : undefined
+}
+
+/** The readable graphs belonging to one overview level, self excluded. */
+function graphsOfLevel(
+  graphs: readonly KnowledgeGraphNode[],
+  level: OverviewLevel,
+): KnowledgeGraphNode[] {
+  return graphs.filter(graph => !isOverviewGraph(graph) && graph.scope === level)
+}
+
+/** Stable key for the aggregate cache: scope, catalogue content and link snapshot. */
+function overviewSignature(
+  scope: OverviewStoreScope,
+  graphs: readonly KnowledgeGraphNode[],
+  links: readonly OverviewCrossLink[],
+): string {
+  const catalogue = graphs.map(graph => [
+    graph.id,
+    graph.name,
+    graph.scope,
+    String(graph.counts.topics),
+    String(graph.counts.links),
+    graph.topics.map(topic => [
+      topic.id,
+      topic.title,
+      topic.domain ?? '',
+      topic.authority ?? '',
+      topic.reviewStatus ?? '',
+      topic.origin ?? '',
+      topic.tags.join('\u0006'),
+      topic.documents[0]?.path ?? topic.path,
+    ].join('\u0001')).join('\u0002'),
+  ].join('\u0003')).join('\u0004')
+  return scope.level + '\u0007' + scope.actualBase + '\u0005' + catalogue + '\u0005' + JSON.stringify(links)
+}
+
+/** Acquire one store through the manager, or a transient one when none is wired. */
+async function acquireOverviewStore(
+  host: KnowledgeGraphToolHost,
+  scope: OverviewStoreScope,
+): Promise<{ store: OverviewStore; transient: boolean }> {
+  if (host.overviewStores !== undefined) {
+    return { store: await host.overviewStores.acquire(scope), transient: false }
+  }
+  const store = new JsonOverviewStore(host, scope)
+  await store.open()
+  return { store, transient: true }
+}
+
+/** Release one store and close it when it was transient. */
+function releaseOverviewStore(
+  host: KnowledgeGraphToolHost,
+  acquired: { store: OverviewStore; transient: boolean },
+): void {
+  if (!acquired.transient) {
+    host.overviewStores?.release(acquired.store)
+    return
+  }
+  acquired.store.close()
+}
+
+/**
+ * Build the overview from already readable graphs and the cross-link store.
+ *
+ * Pure and permission-agnostic: every graph in `graphs` has already passed
+ * `canReadPath` and belongs to `scope.level`; a cross link is included only when
+ * BOTH endpoint graphs are present in that list. A hidden graph is therefore
+ * neither named nor counted.
+ */
+export function buildOverviewAggregate(
+  scope: OverviewStoreScope,
+  graphs: readonly KnowledgeGraphNode[],
+  crossLinks: readonly OverviewCrossLink[] = [],
+  storeIssues: readonly string[] = [],
+): OverviewAggregate {
+  const readable = graphsOfLevel(graphs, scope.level)
+  const issues: string[] = [...storeIssues]
+  const summaries: OverviewGraphSummary[] = []
+  const nodeIndex = new Map<string, KnowledgeGraphTopic>()
+  const nodes: OverviewNode[] = []
+  const topics: KnowledgeGraphTopic[] = []
+  const edges: OverviewEdge[] = []
+  const links: KnowledgeGraphLink[] = []
+
+  for (const graph of readable) {
+    const format = (graph as GraphNodeWithFormat).format ?? 'legacy'
+    summaries.push({
+      id: graph.id,
+      name: graph.name,
+      scope: scope.level,
+      group: graph.group,
+      path: graph.path,
+      format,
+      counts: { ...graph.counts },
+    })
+    for (const topic of graph.topics) {
+      const namespaced = graph.id + ':' + topic.id
+      if (nodeIndex.has(namespaced)) continue
+      const type = format === 'graph-json' ? (topic.domain ?? 'topic') : 'topic'
+      const docPath = topic.documents[0]?.path ?? topic.path
+      nodeIndex.set(namespaced, topic)
+      nodes.push({
+        id: namespaced,
+        graphId: graph.id,
+        graphName: graph.name,
+        scope: scope.level,
+        nodeId: topic.id,
+        type,
+        title: topic.title,
+        ...(topic.authority === undefined ? {} : { authority: topic.authority }),
+        ...(topic.reviewStatus === undefined ? {} : { reviewStatus: topic.reviewStatus }),
+        tags: [...topic.tags],
+        docPath,
+      })
+      topics.push({
+        ...topic,
+        id: namespaced,
+        domain: type,
+        // The source graph is part of the card's identity in the overview; a tag
+        // keeps it visible without adding a second rendering surface.
+        tags: [graph.name, ...topic.tags],
+        path: docPath,
+        sourceGraphId: graph.id,
+        sourceNodeId: topic.id,
+        scope: scope.level,
+      })
+    }
+  }
+
+  for (const graph of readable) {
+    for (const link of graph.links) {
+      const from = graph.id + ':' + link.a
+      const to = graph.id + ':' + link.b
+      if (!nodeIndex.has(from) || !nodeIndex.has(to)) continue
+      const stem = link.file === undefined ? link.a + '--' + link.b : link.file.replace(/\.md$/iu, '')
+      edges.push({
+        id: graph.id + ':' + stem,
+        graphId: graph.id,
+        edgeId: stem,
+        from,
+        to,
+        type: link.label ?? 'related',
+        ...(link.label === undefined ? {} : { title: link.label }),
+        tags: [],
+        sourceRefs: [],
+        crossGraph: false,
+      })
+      links.push({
+        a: from,
+        b: to,
+        ...(link.label === undefined ? {} : { label: link.label }),
+        body: link.body,
+        ...(link.file === undefined ? {} : { file: link.file }),
+      })
+    }
+  }
+
+  let crossEdges = 0
+  for (const record of crossLinks) {
+    const fromGraph = findGraphReference(readable, record.fromGraph)
+    const toGraph = findGraphReference(readable, record.toGraph)
+    const from = fromGraph === undefined ? undefined : fromGraph.id + ':' + record.from
+    const to = toGraph === undefined ? undefined : toGraph.id + ':' + record.to
+    const missing = from === undefined || to === undefined
+      || !nodeIndex.has(from) || !nodeIndex.has(to)
+    if (missing) {
+      // Never name the unreadable side: the id is the only thing that may cross
+      // this boundary, and even that is generic enough not to disclose a name.
+      issues.push('cross-graph link "' + record.id + '" was skipped: an endpoint is not readable')
+      continue
+    }
+    crossEdges += 1
+    const label = record.title ?? record.type
+    edges.push({
+      id: record.id,
+      graphId: scope.viewPath,
+      edgeId: record.id,
+      from,
+      to,
+      type: record.type,
+      ...(record.title === undefined ? {} : { title: record.title }),
+      authority: record.authority,
+      origin: record.origin,
+      reviewStatus: record.reviewStatus,
+      tags: [...record.tags],
+      sourceRefs: [...record.sourceRefs],
+      crossGraph: true,
+    })
+    links.push({
+      a: from,
+      b: to,
+      label,
+      body: record.body ?? '',
+      crossGraph: true,
+    })
+  }
+
+  const counts = {
+    topics: nodes.length,
+    links: edges.length,
+    documents: nodes.length,
+  }
+  return {
+    graph: {
+      id: scope.viewPath,
+      name: OVERVIEW_GRAPH_NAME,
+      scope: scope.level,
+      group: scope.groupLabel,
+      path: scope.viewPath,
+      format: 'overview',
+      computed: true,
+      readOnly: true,
+      counts,
+    },
+    graphs: summaries,
+    nodes,
+    edges,
+    topics,
+    links,
+    totals: { graphs: summaries.length, nodes: nodes.length, edges: edges.length, crossEdges },
+    issues,
+  }
+}
+
+/**
+ * Load (or reuse) one scope's overview aggregate.
+ *
+ * The cache key covers the scope, every readable graph's identity/counts/attributes
+ * and the cross-link snapshot, so a refresh or write changes the answer without a
+ * TTL; {@link invalidateOverviewCache} still drops it eagerly on the write seams.
+ * The store manager supplies the per-scope snapshot, so the same function serves
+ * the global, department and personal overviews without mixing users' stores.
+ */
+export async function loadOverviewAggregate(
+  host: KnowledgeGraphToolHost,
+  graphs: readonly KnowledgeGraphNode[],
+  scopeInput?: OverviewScopeInput | OverviewStoreScope,
+): Promise<OverviewAggregate> {
+  const scope = scopeInput === undefined
+    ? await personalOverviewScope(host)
+    : ('viewPath' in scopeInput ? scopeInput : overviewStoreScope(scopeInput))
+  const acquired = await acquireOverviewStore(host, scope)
+  try {
+    const links = await acquired.store.query()
+    const levelGraphs = graphsOfLevel(graphs, scope.level)
+    const key = overviewSignature(scope, levelGraphs, links)
+    let cache = overviewCache.get(host)
+    if (cache === undefined) {
+      cache = new Map()
+      overviewCache.set(host, cache)
+    }
+    const cached = cache.get(scope.viewPath)
+    if (cached !== undefined && cached.key === key) return cached.value
+    const value = buildOverviewAggregate(scope, levelGraphs, links, acquired.store.issues())
+    cache.set(scope.viewPath, { key, value })
+    if (acquired.store instanceof JsonOverviewStore) {
+      await acquired.store.materialize(value).catch(() => undefined)
+    }
+    return value
+  } finally {
+    releaseOverviewStore(host, acquired)
+  }
+}
+
+/** The personal-only compatibility wrapper used by tests and early callers. */
+export async function appendOverviewGraph(
+  host: KnowledgeGraphToolHost,
+  graphs: readonly KnowledgeGraphNode[],
+): Promise<KnowledgeGraphNode[]> {
+  const scope = await personalOverviewScope(host)
+  return appendOverviewGraphs(host, graphs, [{
+    level: scope.level,
+    viewBase: scope.viewBase,
+    actualBase: scope.actualBase,
+    groupLabel: scope.groupLabel,
+  }])
+}
+
+/** The `host.listGraphs()` answer plus one synthesized row per resolved scope. */
+export async function appendOverviewGraphs(
+  host: KnowledgeGraphToolHost,
+  graphs: readonly KnowledgeGraphNode[],
+  scopes: readonly OverviewScopeInput[],
+): Promise<KnowledgeGraphNode[]> {
+  const real = graphs.filter(graph => !isOverviewGraph(graph))
+  const entries: KnowledgeGraphNode[] = []
+  const seen = new Set<string>()
+  for (const input of scopes) {
+    const scope = overviewStoreScope(input)
+    if (seen.has(scope.viewPath)) continue
+    seen.add(scope.viewPath)
+    const aggregate = await loadOverviewAggregate(host, real, scope)
+    entries.push(overviewGraphNode(scope, aggregate))
+  }
+  return [...real, ...entries]
+}
+
+/** `kg_get` for one overview: graphs, namespaced nodes and remapped edges. */
+async function getOverview(
+  host: KnowledgeGraphToolHost,
+  graphs: readonly KnowledgeGraphNode[],
+  overview: KnowledgeGraphNode,
+): Promise<Record<string, unknown>> {
+  const aggregate = await loadOverviewAggregate(host, graphs, overviewStoreScopeOf(overview))
+  return {
+    ok: true,
+    overview: true,
+    computed: true,
+    readOnly: true,
+    graph: aggregate.graph,
+    totals: aggregate.totals,
+    graphs: aggregate.graphs,
+    nodes: aggregate.nodes,
+    edges: aggregate.edges,
+    ...(aggregate.issues.length === 0 ? {} : { issues: aggregate.issues }),
+  }
+}
+
+/** `kg_add kind=edge` on an overview: one cross-graph link in that scope. */
+async function addOverviewEdge(
+  host: KnowledgeGraphToolHost,
+  graphs: readonly KnowledgeGraphNode[],
+  overview: KnowledgeGraphNode,
+  args: {
+    id?: string; fromGraph?: string; toGraph?: string; from?: string; to?: string
+    type?: string; title?: string; authority?: string; internalizable?: boolean
+    origin?: string; reviewStatus?: string; tags?: string[]; sourceRefs?: string[]; body?: string
+    confirm?: boolean
+  },
+): Promise<Record<string, unknown>> {
+  const scope = overviewStoreScopeOf(overview)
+  const id = (args.id ?? '').trim()
+  if (!GRAPH_ITEM_ID.test(id)) {
+    throw new KnowledgeToolError('invalid', 'id must be 1-64 lowercase letters, digits or hyphens', id === '' ? undefined : id)
+  }
+  const fromGraphValue = (args.fromGraph ?? '').trim()
+  const toGraphValue = (args.toGraph ?? '').trim()
+  if (fromGraphValue === '' || toGraphValue === '') {
+    throw new KnowledgeToolError(
+      'invalid',
+      'a cross-graph edge needs fromGraph and toGraph (each names a readable graph in this 总图 scope); from/to remain node ids',
+      id,
+    )
+  }
+  if (isOverviewGraph({ id: fromGraphValue, path: fromGraphValue })
+    || isOverviewGraph({ id: toGraphValue, path: toGraphValue })) {
+    throw new KnowledgeToolError('invalid', 'an overview cannot link to itself; name two source graphs', id)
+  }
+  const levelGraphs = graphsOfLevel(graphs, scope.level)
+  const fromGraph = findGraphReference(levelGraphs, fromGraphValue)
+  if (fromGraph === undefined) {
+    throw new KnowledgeToolError(
+      'not-found',
+      'fromGraph must name exactly one readable graph in the ' + scope.level + ' scope',
+      fromGraphValue,
+    )
+  }
+  const toGraph = findGraphReference(levelGraphs, toGraphValue)
+  if (toGraph === undefined) {
+    throw new KnowledgeToolError(
+      'not-found',
+      'toGraph must name exactly one readable graph in the ' + scope.level + ' scope',
+      toGraphValue,
+    )
+  }
+  const from = (args.from ?? '').trim()
+  const to = (args.to ?? '').trim()
+  if (from === '' || to === '') throw new KnowledgeToolError('invalid', 'from and to are required node ids', id)
+  if (fromGraph.id === toGraph.id && from === to) {
+    throw new KnowledgeToolError('invalid', 'from and to must be different nodes', id)
+  }
+  if (!fromGraph.topics.some(topic => topic.id === from)) {
+    throw new KnowledgeToolError('not-found', 'from node is not in ' + fromGraph.name + ': ' + from, from)
+  }
+  if (!toGraph.topics.some(topic => topic.id === to)) {
+    throw new KnowledgeToolError('not-found', 'to node is not in ' + toGraph.name + ': ' + to, to)
+  }
+  const type = (args.type ?? '').trim()
+  if (type === '') throw new KnowledgeToolError('invalid', 'type (the relation label) is required for an edge', id)
+  const caller = await host.resolveCaller()
+  const acquired = await acquireOverviewStore(host, scope)
+  try {
+    const store = acquired.store
+    const existing = await store.query()
+    assertOverviewLinksWritable(store, overview)
+    if (existing.some(link => link.id === id)) {
+      throw new KnowledgeToolError('exists', 'a cross-graph link with this id already exists', id)
+    }
+    const now = new Date().toISOString()
+    const record: OverviewCrossLink = {
+      id,
+      fromGraph: fromGraph.id,
+      from,
+      toGraph: toGraph.id,
+      to,
+      type,
+      ...(args.title === undefined || args.title.trim() === '' ? {} : { title: args.title.trim() }),
+      authority: enumArg(args.authority, AUTHORITIES, 'authority') ?? 'advisory',
+      internalizable: booleanArg(args.internalizable, 'internalizable') ?? true,
+      origin: enumArg(args.origin, ORIGINS, 'origin') ?? 'human',
+      reviewStatus: enumArg(args.reviewStatus, REVIEW_STATUSES, 'reviewStatus') ?? 'draft',
+      tags: stringListArg(args.tags, 'tags') ?? [],
+      sourceRefs: stringListArg(args.sourceRefs, 'sourceRefs') ?? [],
+      ...(args.body === undefined || args.body.trim() === '' ? {} : { body: args.body }),
+      createdAt: now,
+      updatedAt: now,
+    }
+    const next = [...existing, record]
+    const linksPath = overview.path + '/' + OVERVIEW_LINKS_FILE
+    if (args.confirm !== true) {
+      return {
+        ok: true, draft: true, action: 'add', kind: 'edge', format: 'overview',
+        graph: overview.path, scope: scope.level, id,
+        fromGraph: fromGraph.id, toGraph: toGraph.id, from, to, type,
+        path: linksPath, content: renderOverviewLinks(next),
+        next: 'show this draft to the user; call again with confirm:true to write the cross-graph edge',
+      }
+    }
+    await store.replace(next)
+    invalidateOverviewCache(host)
+    await host.refreshView().catch(() => undefined)
+    const audit = await recordAudit(host, caller, {
+      action: 'create', relPath: linksPath, tool: 'kg_add',
+      graphId: overview.path, topicId: id, intent: 'new cross-graph edge',
+      diffSummary: 'linked ' + fromGraph.id + ':' + from + ' -> ' + toGraph.id + ':' + to, outcome: 'applied',
+    })
+    return {
+      ok: true, action: 'add', kind: 'edge', format: 'overview',
+      graph: overview.path, scope: scope.level, id,
+      fromGraph: fromGraph.id, toGraph: toGraph.id, from, to, type,
+      path: linksPath, audit,
+    }
+  } finally {
+    releaseOverviewStore(host, acquired)
+  }
+}
+
+/** `kg_del` on an overview: move one cross-graph link to `_trash/links/`. */
+async function deleteOverviewEdge(
+  host: KnowledgeGraphToolHost,
+  overview: KnowledgeGraphNode,
+  args: { id: string; kind?: string; confirm?: boolean },
+): Promise<Record<string, unknown>> {
+  if (args.kind !== undefined && args.kind !== '' && args.kind !== 'edge') {
+    throw new KnowledgeToolError('invalid', 'an overview only contains cross-graph edges; pass kind:"edge"', args.id)
+  }
+  const scope = overviewStoreScopeOf(overview)
+  const id = args.id.trim()
+  const caller = await host.resolveCaller()
+  const acquired = await acquireOverviewStore(host, scope)
+  try {
+    const store = acquired.store
+    const existing = await store.query()
+    assertOverviewLinksWritable(store, overview)
+    const record = existing.find(link => link.id === id)
+    if (record === undefined) throw new KnowledgeToolError('not-found', 'no cross-graph link has this id', id)
+    const trashName = stamp() + '-' + id + '.json'
+    const trashPath = scope.actualPath + '/_trash/links/' + trashName
+    const linksPath = overview.path + '/' + OVERVIEW_LINKS_FILE
+    const summary = {
+      action: 'del', kind: 'edge', format: 'overview', graph: overview.path, scope: scope.level, id,
+      fromGraph: record.fromGraph, toGraph: record.toGraph, from: record.from, to: record.to,
+      path: linksPath,
+      toPath: overview.path + '/_trash/links/' + trashName,
+    }
+    if (args.confirm !== true) {
+      return {
+        ok: true, draft: true, ...summary,
+        next: 'show these paths to the user; call again with confirm:true to move the cross-graph link to _trash',
+      }
+    }
+    if (!await host.canWrite(scope.actualPath)) {
+      throw new KnowledgeToolError('forbidden', 'write access is required for this overview scope', overview.path)
+    }
+    await host.createEntry(scope.actualPath + '/_trash/links', { directory: true }).catch(() => undefined)
+    await host.createEntry(trashPath, { directory: false, content: JSON.stringify(record, null, 2) + '\n' })
+    await store.replace(existing.filter(link => link.id !== id))
+    invalidateOverviewCache(host)
+    await host.refreshView().catch(() => undefined)
+    const audit = await recordAudit(host, caller, {
+      action: 'delete', relPath: linksPath,
+      toRelPath: overview.path + '/_trash/links/' + trashName,
+      tool: 'kg_del', graphId: overview.path, topicId: id, intent: 'move-to-trash',
+      diffSummary: 'removed cross-graph edge ' + id, outcome: 'applied',
+    })
+    return { ok: true, ...summary, movedToTrash: true, audit }
+  } finally {
+    releaseOverviewStore(host, acquired)
+  }
+}
+
+/** Refuse a write over a `links.json` this store could not parse. */
+function assertOverviewLinksWritable(store: OverviewStore, overview: KnowledgeGraphNode): void {
+  const broken = store.issues().some(issue => (
+    issue.startsWith('links.json is not valid JSON')
+    || issue.startsWith('links.json must be')
+  ))
+  if (broken) {
+    throw new KnowledgeToolError(
+      'invalid',
+      'links.json is unreadable; repair or remove it before writing cross-graph edges',
+      overview.path,
+    )
+  }
+}
+
+/** `kg_set`/`kg_add kind=node` on an overview: an actionable refusal. */
+function overviewReadOnly(field: 'node' | 'item'): KnowledgeToolError {
+  return new KnowledgeToolError(
+    'invalid',
+    'the 总图 overview is computed and read-only: '
+      + (field === 'node'
+        ? 'add the node to its source graph with kg_add {"kind":"node","graph":"<source-graph>",...}; it then appears in that scope\'s 总图 automatically'
+        : 'edit the source graph or node with kg_set graph=<source-graph> id=<node-or-edge-id>'),
+  )
+}
+
+/** Drop every cached aggregate for one host; called on the write seams and refresh. */
+export function invalidateOverviewCache(host: KnowledgeGraphToolHost): void {
+  overviewCache.delete(host)
+}
+
 /** The scope base that owns one graph path, legacy or graph-json. */
 function scopeBaseOfPath(value: string | undefined): string | undefined {
   if (value === undefined || value === '') return undefined
@@ -1420,6 +2869,7 @@ function resolveGraphCreateTarget(
     // `department/知识图谱` while its bytes live at `department/<code>/知识图谱`, so
     // the two coordinate systems genuinely differ there.
     const existing = graphs.find(graph => graph.scope === 'department'
+      && !isOverviewGraph(graph)
       && scopeBaseOfPath(graph.actualPath) !== undefined
       && scopeBaseOfPath(graph.path) !== undefined)
     const viewBase = existing === undefined ? undefined : scopeBaseOfPath(existing.path)
@@ -1510,9 +2960,15 @@ async function createGraphJson(
   if (!GRAPH_ITEM_ID.test(id)) {
     throw new KnowledgeToolError('invalid', 'graph id must be 1-64 lowercase letters, digits or hyphens', id === '' ? undefined : id)
   }
+  if (id === OVERVIEW_GRAPH_ID) {
+    throw new KnowledgeToolError('invalid', 'graph id "__overview__" is reserved for the computed 总图', id)
+  }
   const scopeValue = args.scope ?? (graphArgIsScope ? graphArg : undefined)
   const name = (args.name ?? args.title ?? '').trim()
   if (name === '') throw new KnowledgeToolError('invalid', 'name is required to create a graph')
+  if (name === OVERVIEW_GRAPH_NAME) {
+    throw new KnowledgeToolError('exists', '"总图" is the reserved name of the computed overview graph')
+  }
   if (name.length > 120) throw new KnowledgeToolError('invalid', 'name must be at most 120 characters')
   const description = (args.description ?? '').trim()
   if (description.length > 2000) throw new KnowledgeToolError('invalid', 'description must be at most 2000 characters')
@@ -2192,25 +3648,29 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
       + 'with an id/type/title/authority/internalizable/origin/reviewStatus/tags/sourceRefs front matter block and appends {id,path} '
       + 'to graph.json; kind=edge appends {id,from,to,type} and, when a body or edge attributes are given, writes .graphs/<id>/links/<id>.md. '
       + 'Duplicate ids and unknown edge endpoints are refused. "graph" is the graph path or name; "kind" is topic/link for a legacy graph, '
-      + 'node/edge for a graph-json graph, or graph to create one.',
+      + 'node/edge for a graph-json graph, or graph to create one. '
+      + 'The computed overview graph 总图 is read-only: kind=edge on graph="总图" (or "__overview__") writes a cross-graph link to '
+      + 'personal/.graphs/__overview__/links.json using fromGraph/toGraph (graph ids) plus from/to (node ids); kind=node there is refused.',
     parameters: {
-      graph: { type: 'string', description: 'Graph path or name, e.g. personal/知识图谱/工作轨迹 or personal/.graphs/procurement. Not required for kind=graph.' },
-      kind: { type: 'string', required: true, description: 'topic | link (legacy graph), node | edge (graph-json graph), or graph (create a graph-json graph).' },
+      graph: { type: 'string', description: 'Graph path or name, e.g. personal/知识图谱/工作轨迹 or personal/.graphs/procurement; 总图 for a cross-graph edge. Not required for kind=graph.' },
+      kind: { type: 'string', required: true, description: 'topic | link (legacy graph), node | edge (graph-json graph, or edge on 总图), or graph (create a graph-json graph).' },
       id: { type: 'string', description: 'Item id (topic/node/edge) or new graph id: lowercase letters, digits or hyphens.' },
       name: { type: 'string', description: 'Display name of the new graph (kind=graph).' },
       scope: { type: 'string', description: 'Create scope for kind=graph: personal (default) | department | global, or an explicit department/<chain> path.' },
       description: { type: 'string', description: 'Optional graph description (kind=graph).' },
       title: { type: 'string', description: 'Node title, edge document title, legacy topic card title, or graph name fallback (kind=graph).' },
       path: { type: 'string', description: 'Node document path relative to the graph scope, e.g. 制度/采购制度.md (graph-json node kind).' },
-      type: { type: 'string', description: 'Node type (policy|fact|procedure|case|skill|decision|topic; default fact) or edge relation type (graph-json only).' },
-      authority: { type: 'string', description: 'canonical | advisory | redline; default advisory (graph-json only).' },
-      internalizable: { type: 'boolean', description: 'Whether personal internalization is allowed; default true (graph-json only).' },
-      origin: { type: 'string', description: 'human | ai | mixed; default human (graph-json only).' },
-      reviewStatus: { type: 'string', description: 'draft | reviewed | approved; default draft (graph-json only).' },
-      tags: { type: 'array', items: { type: 'string' }, description: 'Node, edge or graph tags (graph-json only).' },
-      sourceRefs: { type: 'array', items: { type: 'string' }, description: 'Node or edge source references (graph-json only).' },
-      from: { type: 'string', description: 'Source node id of the edge (kind=edge on a graph-json graph).' },
-      to: { type: 'string', description: 'Target node id of the edge (kind=edge on a graph-json graph).' },
+      type: { type: 'string', description: 'Node type (policy|fact|procedure|case|skill|decision|topic; default fact) or edge relation type (graph-json and overview cross-graph edges).' },
+      authority: { type: 'string', description: 'canonical | advisory | redline; default advisory (graph-json and overview edges).' },
+      internalizable: { type: 'boolean', description: 'Whether personal internalization is allowed; default true (graph-json and overview edges).' },
+      origin: { type: 'string', description: 'human | ai | mixed; default human (graph-json and overview edges).' },
+      reviewStatus: { type: 'string', description: 'draft | reviewed | approved; default draft (graph-json and overview edges).' },
+      tags: { type: 'array', items: { type: 'string' }, description: 'Node, edge or graph tags (graph-json and overview edges).' },
+      sourceRefs: { type: 'array', items: { type: 'string' }, description: 'Node or edge source references (graph-json and overview edges).' },
+      from: { type: 'string', description: 'Source node id of the edge (kind=edge).' },
+      to: { type: 'string', description: 'Target node id of the edge (kind=edge).' },
+      fromGraph: { type: 'string', description: 'Source graph id for a 总图 cross-graph edge (kind=edge, graph=总图).' },
+      toGraph: { type: 'string', description: 'Target graph id for a 总图 cross-graph edge (kind=edge, graph=总图).' },
       domain: { type: 'string', description: 'Legacy topic card domain; default default.' },
       status: { type: 'string', description: 'Legacy topic card status: active | paused | done.' },
       depth: { type: 'number', description: 'Legacy topic card depth, 1..5.' },
@@ -2227,6 +3687,7 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
       depth?: number; summary?: string; body?: string; a?: string; b?: string; label?: string; confirm?: boolean;
       path?: string; type?: string; authority?: string; internalizable?: boolean; origin?: string;
       reviewStatus?: string; tags?: string[]; sourceRefs?: string[]; from?: string; to?: string;
+      fromGraph?: string; toGraph?: string;
       name?: string; scope?: string; description?: string;
     }) => run(async () => {
       const kind = (args.kind ?? '').trim()
@@ -2237,6 +3698,14 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
       }
       const graphs = await host.listGraphs()
       const graph = requireGraph(graphs, graphValue)
+      if (isOverviewGraph(graph)) {
+        if (args.kind === 'edge') return addOverviewEdge(host, graphs, graph, args)
+        if (args.kind === 'node') throw overviewReadOnly('node')
+        throw new KnowledgeToolError(
+          'invalid',
+          'the overview graph 总图 is computed and read-only; only kind:"edge" (a cross-graph link) can be added there',
+        )
+      }
       const store = graphJsonStore(graph)
       if (store !== undefined) return addToGraphJson(host, graph, store, args)
       const actualGraph = actualGraphPath(graph)
@@ -2315,24 +3784,31 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
       + 'when none exists the answer names the kg_add kind=graph call that creates one. '
       + 'With graph and no id it lists that graph\'s topics, nodes and relations. With graph+id it returns one item: a legacy topic card, '
       + 'or a graph-json node/edge with its id/title/type/authority/origin/reviewStatus/tags/sourceRefs, path and missing flag. '
-      + 'Graph-json graphs are read from .graphs/<id>/graph.json plus the referenced node documents\' front matter. Read-only; never writes.',
+      + 'Graph-json graphs are read from .graphs/<id>/graph.json plus the referenced node documents\' front matter. '
+      + 'graph="总图" (or "__overview__") returns the computed aggregate: readable graph summaries, nodes namespaced '
+      + '"<graphId>:<nodeId>" and edges with remapped endpoints, including cross-graph links. Read-only; never writes.',
     parameters: {
-      graph: { type: 'string', description: 'Graph path or name. Omit for the overview.' },
+      graph: { type: 'string', description: 'Graph path or name; 总图 defaults to personal, or pass global/__overview__ / department/__overview__ / personal/__overview__. Omit for the catalogue.' },
       id: { type: 'string', description: 'Topic, node or edge id. Omit to list the graph.' },
     },
     output: jsonOutput,
     execute: async (args: { graph?: string; id?: string }) => run(async () => {
       const graphs = await host.listGraphs()
       if (args.graph === undefined || args.graph.trim() === '') {
+        // The synthesized overviews are views over the other graphs; counting them
+        // in the totals would double every node. Advertise them as separate rows.
+        const readable = graphs.filter(graph => !isOverviewGraph(graph))
+        const overviews = graphs.filter(isOverviewGraph)
+        const personalOverview = overviews.find(graph => graph.scope === 'personal')
         return {
           ok: true,
           overview: true,
           totals: {
-            graphs: graphs.length,
-            topics: graphs.reduce((sum, graph) => sum + graph.topics.length, 0),
-            relations: graphs.reduce((sum, graph) => sum + graph.links.length, 0),
+            graphs: readable.length,
+            topics: readable.reduce((sum, graph) => sum + graph.topics.length, 0),
+            relations: readable.reduce((sum, graph) => sum + graph.links.length, 0),
           },
-          graphs: graphs.map(graph => ({
+          graphs: readable.map(graph => ({
             id: graph.id,
             name: graph.name,
             scope: graph.scope,
@@ -2342,12 +3818,38 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
             counts: graph.counts,
             topics: graph.topics.map(topic => topicSummary(graph, topic)),
           })),
-          ...(graphs.length === 0
+          ...(overviews.length === 0
+            ? {}
+            : {
+                overviewGraphs: overviews.map(overview => ({
+                  id: overview.id,
+                  name: overview.name,
+                  scope: overview.scope,
+                  computed: true,
+                  readOnly: true,
+                  counts: overview.counts,
+                })),
+                ...(personalOverview === undefined
+                  ? {}
+                  : {
+                      overviewGraph: {
+                        id: personalOverview.id,
+                        name: personalOverview.name,
+                        scope: personalOverview.scope,
+                        computed: true,
+                        readOnly: true,
+                        counts: personalOverview.counts,
+                        next: 'call kg_get {"graph":"总图"} for personal, or global/__overview__ / department/__overview__',
+                      },
+                    }),
+              }),
+          ...(readable.length === 0
             ? { next: 'no graph exists yet; create one with ' + graphCreateHint() + ' (draft, then confirm:true)' }
             : {}),
         }
       }
       const graph = requireGraph(graphs, args.graph)
+      if (isOverviewGraph(graph)) return getOverview(host, graphs, graph)
       const store = graphJsonStore(graph)
       if (store !== undefined) return getFromGraphJson(host, graph, store, args.id)
       if (args.id === undefined || args.id.trim() === '') {
@@ -2409,6 +3911,7 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
     }) => run(async () => {
       const graphs = await host.listGraphs()
       const graph = requireGraph(graphs, args.graph)
+      if (isOverviewGraph(graph)) throw overviewReadOnly('item')
       const store = graphJsonStore(graph)
       if (store !== undefined) return setOnGraphJson(host, graph, store, args)
       const topic = requireTopic(graph, args.id)
@@ -2469,6 +3972,7 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
     execute: async (args: { graph: string; id: string; kind?: string; cascade?: boolean; force?: boolean; confirm?: boolean }) => run(async () => {
       const graphs = await host.listGraphs()
       const graph = requireGraph(graphs, args.graph)
+      if (isOverviewGraph(graph)) return deleteOverviewEdge(host, graph, args)
       const store = graphJsonStore(graph)
       if (store !== undefined) return deleteFromGraphJson(host, graph, store, args)
       const topic = requireTopic(graph, args.id)

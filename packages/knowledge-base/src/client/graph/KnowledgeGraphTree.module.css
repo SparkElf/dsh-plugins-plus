@@ -58,6 +58,38 @@
   color: var(--dsw-alias-state-business-primary);
 }
 
+/* A computed graph is a live view, not a stored folder. The two chips are part of
+   the row's identity; `OriginBadges` covers provenance and stays independent. */
+.computedBadges {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+}
+
+.computedBadge,
+.readOnlyBadge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 14px;
+  padding: 0 4px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 3px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxxs-11);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.computedBadge {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 35%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
+  color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 80%, var(--dsw-alias-label-primary));
+}
+
 .topicRow {
   display: flex;
   align-items: center;
