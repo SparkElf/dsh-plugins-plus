@@ -19,6 +19,12 @@
  * and calls again with `confirm: true` after approval. This is the §7 trigger rule
  * (user sovereignty) expressed in the tool protocol rather than in a hook.
  *
+ * `kg_add` also creates a graph: `kind: 'graph'` writes a new
+ * `.graphs/<id>/graph.json` under the caller's writable scope, so a model can seed
+ * a knowledge graph instead of being stuck at "no readable graph". Creating a graph
+ * follows the same draft → confirm protocol, id validation, `canWrite` check and
+ * audit record as every other write.
+ *
  * @module @sparkelf/dsh-knowledge-base/graph-tools
  */
 
@@ -51,7 +57,8 @@ import {
   type MemoryOrigin,
   type MemoryReviewStatus,
 } from './graphModel.ts'
-import type { KnowledgeGraphLink, KnowledgeGraphNode, KnowledgeGraphTopic } from './graphTypes.ts'
+import { KNOWLEDGE_GRAPH_FOLDER, type KnowledgeGraphLink, type KnowledgeGraphNode, type KnowledgeGraphTopic } from './graphTypes.ts'
+import { scopeFromAlias } from './scopeAliases.ts'
 
 /** The Host operations graph tools compose. Actual paths are authoritative. */
 export interface KnowledgeGraphToolHost extends Pick<
@@ -89,12 +96,30 @@ const run = async (operation: () => Promise<Record<string, any>>): Promise<Recor
   }
 }
 
+/** The model-facing hint that turns a missing graph into a next step. */
+function graphCreateHint(id = '<graph-id>', name = '<图谱名称>'): string {
+  return 'kg_add {"kind":"graph","scope":"personal","id":' + JSON.stringify(id)
+    + ',"name":' + JSON.stringify(name) + '}'
+}
+
 /** Resolve one graph by id, path or unique name. */
 function requireGraph(graphs: readonly KnowledgeGraphNode[], value: string): KnowledgeGraphNode {
   const needle = value.trim()
   const found = graphs.filter(graph => graph.id === needle || graph.path === needle || graph.name === needle)
   if (found.length === 1) return found[0]!
-  if (found.length === 0) throw new KnowledgeToolError('not-found', 'no readable graph matches ' + JSON.stringify(needle))
+  if (found.length === 0) {
+    // The needle may be a display name or a path; only a value that is already a
+    // legal graph id can be reused as the id in the example.
+    const idHint = GRAPH_ITEM_ID.test(needle) ? needle : '<graph-id>'
+    const nameHint = needle.includes('/') ? '<图谱名称>' : needle
+    throw new KnowledgeToolError(
+      'not-found',
+      'no readable graph matches ' + JSON.stringify(needle)
+        + '. Create it first: ' + graphCreateHint(idHint, nameHint)
+        + ' returns a draft, and calling it again with confirm:true writes .graphs/<id>/graph.json; '
+        + 'then retry with graph="personal/.graphs/<id>"',
+    )
+  }
   throw new KnowledgeToolError('invalid', 'the graph name is ambiguous; pass its path: '
     + found.map(graph => graph.path).join(', '))
 }
@@ -248,6 +273,23 @@ const NODE_TYPES: readonly MemoryNodeType[] = ['policy', 'fact', 'procedure', 'c
 const AUTHORITIES: readonly MemoryAuthority[] = ['canonical', 'advisory', 'redline']
 const ORIGINS: readonly MemoryOrigin[] = ['human', 'ai', 'mixed']
 const REVIEW_STATUSES: readonly MemoryReviewStatus[] = ['draft', 'reviewed', 'approved']
+
+/** The scopes a new graph may be created in; a department chain may also be given exactly. */
+const GRAPH_CREATE_SCOPES = ['personal', 'department', 'global'] as const
+type GraphCreateScopeKey = (typeof GRAPH_CREATE_SCOPES)[number]
+
+/** One resolved create target: where `.graphs/<id>` goes and what the manifest records. */
+interface GraphCreateTarget {
+  key: GraphCreateScopeKey
+  /** View-relative scope base, e.g. `personal` or `department/D1/D2`. */
+  viewBase: string
+  /** Authoritative scope base; gains the owner segment for the personal scope. */
+  actualBase: string
+  /** Manifest `scope` value, e.g. `personal:u1` or `department:D1/D2`. */
+  manifestScope: string
+  /** Manifest `visibility`, derived from the scope. */
+  visibility: 'private' | 'department' | 'global'
+}
 
 /** A graph node as the Projection publishes it: `format` is a runtime-only tag. */
 type GraphNodeWithFormat = KnowledgeGraphNode & { format?: string }
@@ -1326,6 +1368,276 @@ function edgeSummary(store: GraphJsonStore, edge: LoadedGraphEdge): Record<strin
   }
 }
 
+/** The scope base that owns one graph path, legacy or graph-json. */
+function scopeBaseOfPath(value: string | undefined): string | undefined {
+  if (value === undefined || value === '') return undefined
+  const store = storePathParts(value)
+  if (store !== undefined) return store.base
+  // A legacy graph is `<scopeBase>/知识图谱/<name>`; the manifest of a graph-json
+  // graph is `<scopeBase>/.graphs/<id>`, already handled by storePathParts.
+  const parts = value.split('/')
+  if (parts.length >= 3 && parts[parts.length - 2] === KNOWLEDGE_GRAPH_FOLDER) {
+    return parts.slice(0, -2).join('/')
+  }
+  return undefined
+}
+
+/**
+ * Resolve where a new graph goes.
+ *
+ * `personal` is the default and the only scope whose authoritative path differs
+ * from its view path (it gains the caller's owner segment). `department` reuses
+ * the department path of an existing readable department graph, because the
+ * model never sees department codes; an explicit `department/<chain>` is accepted
+ * for the first graph, and `canWrite` still decides whether the caller may write
+ * there. `global` is admin-only in practice for the same reason.
+ */
+function resolveGraphCreateTarget(
+  graphs: readonly KnowledgeGraphNode[],
+  value: string | undefined,
+  caller: { userId: string },
+): GraphCreateTarget {
+  const raw = (value ?? '').trim()
+  const scope = raw === '' ? 'personal' : (scopeFromAlias(raw) ?? raw)
+  if (scope === 'personal') {
+    if (!isSafeSegment(caller.userId)) {
+      throw new KnowledgeToolError('forbidden', 'unsafe caller id; cannot resolve the personal scope')
+    }
+    return {
+      key: 'personal',
+      viewBase: 'personal',
+      actualBase: 'personal/' + caller.userId,
+      manifestScope: 'personal:' + caller.userId,
+      visibility: 'private',
+    }
+  }
+  if (scope === 'global') {
+    return { key: 'global', viewBase: 'global', actualBase: 'global', manifestScope: 'global', visibility: 'global' }
+  }
+  if (scope === 'department') {
+    // Reuse the department path of an existing readable graph. View and actual
+    // bases are derived separately: a legacy flat graph is linked at
+    // `department/知识图谱` while its bytes live at `department/<code>/知识图谱`, so
+    // the two coordinate systems genuinely differ there.
+    const existing = graphs.find(graph => graph.scope === 'department'
+      && scopeBaseOfPath(graph.actualPath) !== undefined
+      && scopeBaseOfPath(graph.path) !== undefined)
+    const viewBase = existing === undefined ? undefined : scopeBaseOfPath(existing.path)
+    const actualBase = existing === undefined ? undefined : scopeBaseOfPath(existing.actualPath)
+    if (viewBase === undefined || actualBase === undefined) {
+      throw new KnowledgeToolError(
+        'invalid',
+        'this caller has no readable department graph to copy the department path from; '
+          + 'pass scope:"department/<chain>" (the department path in the graph tree) to create one',
+      )
+    }
+    return {
+      key: 'department',
+      viewBase,
+      actualBase,
+      manifestScope: 'department:' + actualBase.replace(/^department\//u, ''),
+      visibility: 'department',
+    }
+  }
+  if (scope.startsWith('department/')) {
+    if (!isSafeRelPath(scope) || scope === 'department') {
+      throw new KnowledgeToolError('invalid', 'scope "department/<chain>" must be a safe relative path')
+    }
+    return {
+      key: 'department',
+      viewBase: scope,
+      actualBase: scope,
+      manifestScope: 'department:' + scope.slice('department/'.length),
+      visibility: 'department',
+    }
+  }
+  throw new KnowledgeToolError(
+    'invalid',
+    'scope must be one of ' + GRAPH_CREATE_SCOPES.join(', ') + ' or an explicit department/<chain> path',
+  )
+}
+
+/** The manifest a freshly created graph holds: metadata only, no topology yet. */
+function newGraphManifest(input: {
+  id: string
+  name: string
+  description?: string
+  target: GraphCreateTarget
+  owner: string
+  tags: readonly string[]
+  now: string
+}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    id: input.id,
+    name: input.name,
+    ...(input.description === undefined || input.description === '' ? {} : { description: input.description }),
+    scope: input.target.manifestScope,
+    version: 1,
+    status: 'draft',
+    owner: input.owner,
+    createdAt: input.now,
+    updatedAt: input.now,
+    tags: [...input.tags],
+    visibility: input.target.visibility,
+    defaultView: { layout: 'hierarchy', direction: 'TB' },
+    topics: [],
+    nodes: [],
+    edges: [],
+  }
+}
+
+/** Whether a value names a create scope rather than a graph id or name. */
+function isGraphCreateScope(value: string): boolean {
+  const normalized = scopeFromAlias(value) ?? value
+  return normalized === 'personal' || normalized === 'department' || normalized === 'global'
+    || normalized.startsWith('department/')
+}
+
+/** `kg_add kind="graph"` for a new `.graphs/<id>/graph.json` graph. */
+async function createGraphJson(
+  host: KnowledgeGraphToolHost,
+  args: {
+    graph?: string; id?: string; name?: string; title?: string; scope?: string; description?: string
+    tags?: string[]; confirm?: boolean
+  },
+): Promise<Record<string, unknown>> {
+  // A model that learned the other kinds often puts the new graph's id (or the
+  // scope) in `graph`. Accept both spellings instead of creating the wrong graph.
+  const graphArg = (args.graph ?? '').trim()
+  const graphArgIsScope = graphArg !== '' && isGraphCreateScope(graphArg)
+  const id = (args.id ?? (GRAPH_ITEM_ID.test(graphArg) && !graphArgIsScope ? graphArg : '')).trim()
+  if (!GRAPH_ITEM_ID.test(id)) {
+    throw new KnowledgeToolError('invalid', 'graph id must be 1-64 lowercase letters, digits or hyphens', id === '' ? undefined : id)
+  }
+  const scopeValue = args.scope ?? (graphArgIsScope ? graphArg : undefined)
+  const name = (args.name ?? args.title ?? '').trim()
+  if (name === '') throw new KnowledgeToolError('invalid', 'name is required to create a graph')
+  if (name.length > 120) throw new KnowledgeToolError('invalid', 'name must be at most 120 characters')
+  const description = (args.description ?? '').trim()
+  if (description.length > 2000) throw new KnowledgeToolError('invalid', 'description must be at most 2000 characters')
+  const tags = stringListArg(args.tags, 'tags') ?? []
+  const caller = await host.resolveCaller()
+  const graphs = await host.listGraphs()
+  const target = resolveGraphCreateTarget(graphs, scopeValue, caller)
+  const viewStorePath = joinRel(target.viewBase, '.graphs/' + id)
+  const actualStorePath = joinRel(target.actualBase, '.graphs/' + id)
+  const manifestRel = '.graphs/' + id + '/graph.json'
+
+  if (graphs.some(graph => graph.scope === target.key && graph.path === viewStorePath)) {
+    throw new KnowledgeToolError('exists', 'a graph with this id already exists in this scope', viewStorePath)
+  }
+  if (graphs.some(graph => graph.scope === target.key && graph.name.trim() === name)) {
+    throw new KnowledgeToolError('exists', 'a graph with this name already exists in this scope', name)
+  }
+  // An unreadable or half-written `.graphs/<id>` directory is not in `listGraphs`,
+  // but creating on top of it would silently adopt its bytes. Refuse instead: the
+  // model can pick another id or repair the directory explicitly.
+  if (await host.statEntry(viewStorePath) !== undefined) {
+    throw new KnowledgeToolError('exists', 'a .graphs directory already exists for this graph id', viewStorePath)
+  }
+  // The create target does not exist yet, so `canWrite` decides on the scope path
+  // and its ancestors. Checking here also refuses an unauthorized draft instead of
+  // handing the model a draft it can never confirm.
+  if (!await host.canWrite(actualStorePath)) {
+    throw new KnowledgeToolError('forbidden', 'write access is required for this scope', target.viewBase)
+  }
+
+  const now = new Date().toISOString()
+  const manifest = newGraphManifest({ id, name, ...(description === '' ? {} : { description }), target, owner: caller.userId, tags, now })
+  const content = JSON.stringify(manifest, null, 2) + '\n'
+  if (args.confirm !== true) {
+    return {
+      ok: true, draft: true, action: 'create', kind: 'graph', format: 'graph-json',
+      graph: viewStorePath, id, name, scope: target.key, scopePath: target.viewBase,
+      path: viewStorePath, manifestPath: manifestRel, visibility: target.visibility, content,
+      next: 'show this draft to the user; call again with confirm:true to create the graph',
+    }
+  }
+
+  try {
+    await host.createEntry(joinRel(viewStorePath, 'graph.json'), { directory: false, content })
+  } catch (error) {
+    if (error instanceof KnowledgeToolError) throw error
+    if ((error as { code?: string }).code === 'exists') {
+      throw new KnowledgeToolError('exists', 'a graph already exists at this path', viewStorePath)
+    }
+    throw asKnowledgeToolError(error)
+  }
+  await host.refreshView().catch(() => undefined)
+
+  // Validate through the same loader every reader uses, so a manifest that the
+  // projection would refuse cannot be reported as created. The authoritative
+  // personal base differs by deployment: a team tree is `personal/<uid>/…`, while
+  // a standalone install keeps the flat `personal/…` spelling. Rather than guess,
+  // validate the team spelling first and fall back to the view spelling; the
+  // manifest is generated here, so a failure of the first spelling on a standalone
+  // install can only mean the write landed at the flat path.
+  const candidateBases = target.key === 'personal' && target.actualBase !== target.viewBase
+    ? [target.actualBase, target.viewBase]
+    : [target.actualBase]
+  let validated = false
+  let validationError: unknown
+  for (const actualBase of candidateBases) {
+    const graph: KnowledgeGraphNode & { format: string } = {
+      id: viewStorePath,
+      name,
+      scope: target.key,
+      path: viewStorePath,
+      group: '',
+      topics: [],
+      links: [],
+      counts: { topics: 0, links: 0, documents: 0 },
+      actualPath: joinRel(actualBase, '.graphs/' + id),
+      format: 'graph-json',
+    }
+    const store: GraphJsonStore = {
+      graph,
+      graphId: id,
+      viewBase: target.viewBase,
+      actualBase,
+      viewStorePath,
+      actualStorePath: joinRel(actualBase, '.graphs/' + id),
+    }
+    try {
+      requireValidGraph(await validateGraphStore(host, store), store)
+      validated = true
+      break
+    } catch (error) {
+      validationError = error
+    }
+  }
+  if (!validated) {
+    const cleanupStore: GraphJsonStore = {
+      graph: {
+        id: viewStorePath, name, scope: target.key, path: viewStorePath, group: '',
+        topics: [], links: [], counts: { topics: 0, links: 0, documents: 0 },
+        actualPath: viewStorePath, format: 'graph-json',
+      } as KnowledgeGraphNode & { format: string },
+      graphId: id,
+      viewBase: target.viewBase,
+      actualBase: target.viewBase,
+      viewStorePath,
+      actualStorePath: viewStorePath,
+    }
+    await moveToTrash(host, cleanupStore, caller, joinRel(viewStorePath, 'graph.json'), 'rejected/graphs', stamp() + '-graph.json')
+      .catch(() => undefined)
+    throw validationError
+  }
+  await host.refreshView().catch(() => undefined)
+  const audit = await recordAudit(host, caller, {
+    action: 'create', relPath: viewStorePath, tool: 'kg_add', graphId: viewStorePath,
+    intent: 'new graph', diffSummary: 'created graph ' + name, outcome: 'applied',
+  })
+  return {
+    ok: true, action: 'create', kind: 'graph', format: 'graph-json',
+    graph: viewStorePath, id, name, scope: target.key, scopePath: target.viewBase,
+    path: viewStorePath, manifestPath: manifestRel, visibility: target.visibility, audit,
+    next: 'add the first node with kg_add {"kind":"node","graph":' + JSON.stringify(viewStorePath)
+      + ',"id":"<node-id>","path":"<分类/文档.md>","title":"<标题>"} (draft, then confirm:true)',
+  }
+}
+
 /** `kg_add` for a `.graphs/<id>/graph.json` graph. */
 async function addToGraphJson(
   host: KnowledgeGraphToolHost,
@@ -1872,23 +2184,30 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
     name: 'kg_add',
     description: 'Add one graph item and WRITE the knowledge tree. Call without confirm:true first to receive the exact draft; '
       + 'show that draft to the user; call again with confirm:true only after they approve. '
+      + 'kind=graph creates a new graph-json graph: it writes .graphs/<id>/graph.json under the caller\'s writable scope '
+      + '(scope=personal by default, or department/global when the caller may write there). Use it when kg_add/kg_get say '
+      + 'no readable graph matches; the draft is the exact manifest, and confirm:true creates the graph so later kg_add calls resolve it. '
       + 'Legacy folder graphs: kind=topic creates a visible folder + index.md card; kind=link creates a hidden .kg/links document. '
       + 'Graph-json graphs (format=graph-json, stored under .graphs/<id>/graph.json): kind=node creates the node document at "path" '
       + 'with an id/type/title/authority/internalizable/origin/reviewStatus/tags/sourceRefs front matter block and appends {id,path} '
       + 'to graph.json; kind=edge appends {id,from,to,type} and, when a body or edge attributes are given, writes .graphs/<id>/links/<id>.md. '
-      + 'Duplicate ids and unknown edge endpoints are refused. "graph" is the graph path or name; "kind" is topic/link for a legacy graph, node/edge for a graph-json graph.',
+      + 'Duplicate ids and unknown edge endpoints are refused. "graph" is the graph path or name; "kind" is topic/link for a legacy graph, '
+      + 'node/edge for a graph-json graph, or graph to create one.',
     parameters: {
-      graph: { type: 'string', required: true, description: 'Graph path or name, e.g. personal/知识图谱/工作轨迹 or personal/.graphs/procurement.' },
-      kind: { type: 'string', required: true, description: 'topic | link (legacy graph) or node | edge (graph-json graph).' },
-      id: { type: 'string', description: 'Item id: topic id, node id or edge id (lowercase letters/digits/hyphens).' },
-      title: { type: 'string', description: 'Node title, edge document title, or legacy topic card title.' },
+      graph: { type: 'string', description: 'Graph path or name, e.g. personal/知识图谱/工作轨迹 or personal/.graphs/procurement. Not required for kind=graph.' },
+      kind: { type: 'string', required: true, description: 'topic | link (legacy graph), node | edge (graph-json graph), or graph (create a graph-json graph).' },
+      id: { type: 'string', description: 'Item id (topic/node/edge) or new graph id: lowercase letters, digits or hyphens.' },
+      name: { type: 'string', description: 'Display name of the new graph (kind=graph).' },
+      scope: { type: 'string', description: 'Create scope for kind=graph: personal (default) | department | global, or an explicit department/<chain> path.' },
+      description: { type: 'string', description: 'Optional graph description (kind=graph).' },
+      title: { type: 'string', description: 'Node title, edge document title, legacy topic card title, or graph name fallback (kind=graph).' },
       path: { type: 'string', description: 'Node document path relative to the graph scope, e.g. 制度/采购制度.md (graph-json node kind).' },
       type: { type: 'string', description: 'Node type (policy|fact|procedure|case|skill|decision|topic; default fact) or edge relation type (graph-json only).' },
       authority: { type: 'string', description: 'canonical | advisory | redline; default advisory (graph-json only).' },
       internalizable: { type: 'boolean', description: 'Whether personal internalization is allowed; default true (graph-json only).' },
       origin: { type: 'string', description: 'human | ai | mixed; default human (graph-json only).' },
       reviewStatus: { type: 'string', description: 'draft | reviewed | approved; default draft (graph-json only).' },
-      tags: { type: 'array', items: { type: 'string' }, description: 'Node or edge tags (graph-json only).' },
+      tags: { type: 'array', items: { type: 'string' }, description: 'Node, edge or graph tags (graph-json only).' },
       sourceRefs: { type: 'array', items: { type: 'string' }, description: 'Node or edge source references (graph-json only).' },
       from: { type: 'string', description: 'Source node id of the edge (kind=edge on a graph-json graph).' },
       to: { type: 'string', description: 'Target node id of the edge (kind=edge on a graph-json graph).' },
@@ -1904,13 +2223,20 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
     },
     output: jsonOutput,
     execute: async (args: {
-      graph: string; kind: string; id?: string; title?: string; domain?: string; status?: string;
+      graph?: string; kind: string; id?: string; title?: string; domain?: string; status?: string;
       depth?: number; summary?: string; body?: string; a?: string; b?: string; label?: string; confirm?: boolean;
       path?: string; type?: string; authority?: string; internalizable?: boolean; origin?: string;
       reviewStatus?: string; tags?: string[]; sourceRefs?: string[]; from?: string; to?: string;
+      name?: string; scope?: string; description?: string;
     }) => run(async () => {
+      const kind = (args.kind ?? '').trim()
+      if (kind === 'graph') return createGraphJson(host, args)
+      const graphValue = (args.graph ?? '').trim()
+      if (graphValue === '') {
+        throw new KnowledgeToolError('invalid', 'graph is required unless kind is "graph"; create one first with ' + graphCreateHint())
+      }
       const graphs = await host.listGraphs()
-      const graph = requireGraph(graphs, args.graph)
+      const graph = requireGraph(graphs, graphValue)
       const store = graphJsonStore(graph)
       if (store !== undefined) return addToGraphJson(host, graph, store, args)
       const actualGraph = actualGraphPath(graph)
@@ -1985,7 +2311,8 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
 
   defineTool({
     name: 'kg_get',
-    description: 'Read the knowledge graph. Without graph/id it returns the overview of every readable graph. '
+    description: 'Read the knowledge graph. Without graph/id it returns the overview of every readable graph; '
+      + 'when none exists the answer names the kg_add kind=graph call that creates one. '
       + 'With graph and no id it lists that graph\'s topics, nodes and relations. With graph+id it returns one item: a legacy topic card, '
       + 'or a graph-json node/edge with its id/title/type/authority/origin/reviewStatus/tags/sourceRefs, path and missing flag. '
       + 'Graph-json graphs are read from .graphs/<id>/graph.json plus the referenced node documents\' front matter. Read-only; never writes.',
@@ -2015,6 +2342,9 @@ export const createKnowledgeGraphTools = (host: KnowledgeGraphToolHost) => [
             counts: graph.counts,
             topics: graph.topics.map(topic => topicSummary(graph, topic)),
           })),
+          ...(graphs.length === 0
+            ? { next: 'no graph exists yet; create one with ' + graphCreateHint() + ' (draft, then confirm:true)' }
+            : {}),
         }
       }
       const graph = requireGraph(graphs, args.graph)

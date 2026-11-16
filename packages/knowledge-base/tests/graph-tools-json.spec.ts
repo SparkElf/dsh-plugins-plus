@@ -1,9 +1,10 @@
-import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createKnowledgeGraphTools, type KnowledgeGraphToolHost } from '../src/graphTools.ts'
 import { loadGraph, type GraphManifest } from '../src/graphModel.ts'
+import { projectGraphJsonScope } from '../src/graphJsonProjection.ts'
 import type { KnowledgeAuditEntry } from '../src/views.ts'
 import type { KnowledgeGraphNode, KnowledgeGraphScopeKey } from '../src/graphTypes.ts'
 
@@ -84,6 +85,8 @@ interface FakeHostOptions {
   canWrite?: (relPath: string) => boolean
   /** Rewrite one write before it lands; lets a test force a post-write validator error. */
   tamper?: (relPath: string, content: string) => string
+  /** A standalone layout has no `personal/<uid>` segment; view and actual coincide. */
+  localLayout?: boolean
 }
 
 /**
@@ -95,6 +98,7 @@ function makeHost(root: string, graphs: KnowledgeGraphNode[], options: FakeHostO
   const audits: KnowledgeAuditEntry[] = []
   const toActual = (relPath: string): string => {
     const clean = relPath.replace(/^\/+/u, '')
+    if (options.localLayout === true) return join(root, clean)
     if (clean === 'personal' || clean.startsWith('personal/')) {
       const rest = clean.slice('personal'.length).replace(/^\//u, '')
       if (rest === 'u1' || rest.startsWith('u1/')) return join(root, clean)
@@ -153,6 +157,70 @@ function makeHost(root: string, graphs: KnowledgeGraphNode[], options: FakeHostO
     },
   }
   return { host, audits }
+}
+
+/**
+ * A Host whose `listGraphs` scans `<root>/personal/u1/.graphs` through the same
+ * loader and projection the real Host uses.
+ *
+ * `makeHost` returns a fixed list, so it cannot prove that a graph a tool just
+ * created becomes readable on the next call. This host closes that gap: creating
+ * `graph.json` is enough for `kg_get`/`kg_add` to see the graph, exactly as the
+ * scanner behaves in production.
+ */
+function makeScanningHost(root: string, legacy: KnowledgeGraphNode[] = [], options: FakeHostOptions = {}) {
+  const made = makeHost(root, [], options)
+  made.host.listGraphs = async () => {
+    const graphs: KnowledgeGraphNode[] = [...legacy]
+    const scope = join(root, 'personal', 'u1')
+    const entries = await readdir(join(scope, '.graphs'), { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+      try {
+        const loaded = await loadGraph(scope, entry.name)
+        graphs.push(...projectGraphJsonScope({
+          key: 'personal',
+          viewBase: 'personal',
+          actualBase: 'personal/u1',
+          graphs: [loaded],
+        }))
+      } catch {
+        // A directory without a readable manifest is not a graph; the scanner skips
+        // it too, so the test must not invent one.
+      }
+    }
+    return graphs
+  }
+  return made
+}
+
+/**
+ * The same scanning host for a standalone layout: no `personal/<uid>` segment,
+ * which is the deployment where composing an owner segment would break creation.
+ */
+function makeLocalScanningHost(root: string) {
+  const made = makeHost(root, [], { localLayout: true })
+  made.host.listGraphs = async () => {
+    const graphs: KnowledgeGraphNode[] = []
+    const scope = join(root, 'personal')
+    const entries = await readdir(join(scope, '.graphs'), { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+      try {
+        const loaded = await loadGraph(scope, entry.name)
+        graphs.push(...projectGraphJsonScope({
+          key: 'personal',
+          viewBase: 'personal',
+          actualBase: 'personal',
+          graphs: [loaded],
+        }))
+      } catch {
+        // Not a readable graph.
+      }
+    }
+    return graphs
+  }
+  return made
 }
 
 const toolFor = (host: KnowledgeGraphToolHost, name: string) => {
@@ -664,5 +732,214 @@ describe('graph-json write permission', () => {
     await expect(execute(host, 'kg_add', {
       graph: 'personal/.graphs/proc', kind: 'node', id: 'node-x', path: '制度/x.md', title: 'X', confirm: true,
     })).rejects.toMatchObject({ code: 'forbidden' })
+  })
+})
+describe('graph-json graph creation (`kg_add kind=graph`)', () => {
+  it('returns the exact manifest draft without writing until confirmed', async () => {
+    const root = await tempRoot()
+    const { host } = makeScanningHost(root)
+
+    const draft = await execute(host, 'kg_add', {
+      kind: 'graph',
+      scope: 'personal',
+      id: 'nenghui-governance',
+      name: '能汇制度图谱',
+      description: '能汇制度与流程',
+      tags: ['制度'],
+    })
+    expect(draft).toMatchObject({
+      ok: true,
+      draft: true,
+      action: 'create',
+      kind: 'graph',
+      format: 'graph-json',
+      graph: 'personal/.graphs/nenghui-governance',
+      manifestPath: '.graphs/nenghui-governance/graph.json',
+      visibility: 'private',
+    })
+    expect(draft.content).toContain('"schemaVersion": 1')
+    expect(draft.content).toContain('"id": "nenghui-governance"')
+    expect(draft.content).toContain('"name": "能汇制度图谱"')
+    expect(draft.content).toContain('"scope": "personal:u1"')
+    expect(draft.next).toContain('confirm:true')
+    expect(await exists(join(root, 'personal', 'u1', '.graphs', 'nenghui-governance', 'graph.json'))).toBe(false)
+  })
+
+  it('accepts the scope or the new graph id in the graph argument', async () => {
+    const root = await tempRoot()
+    const { host } = makeScanningHost(root)
+
+    const byId = await execute(host, 'kg_add', {
+      kind: 'graph', graph: 'nenghui-governance', name: '能汇制度图谱',
+    })
+    expect(byId).toMatchObject({ draft: true, id: 'nenghui-governance', graph: 'personal/.graphs/nenghui-governance' })
+
+    const byScope = await execute(host, 'kg_add', {
+      kind: 'graph', graph: 'global', id: 'shared-policy', name: '共享制度图谱',
+    })
+    expect(byScope).toMatchObject({ draft: true, graph: 'global/.graphs/shared-policy', visibility: 'global' })
+  })
+
+  it('confirm creates graph.json, kg_get lists it, and kg_add kind=node works afterwards', async () => {
+    const root = await tempRoot()
+    const { host, audits } = makeScanningHost(root)
+
+    const created = await execute(host, 'kg_add', {
+      kind: 'graph',
+      id: 'nenghui-governance',
+      name: '能汇制度图谱',
+      confirm: true,
+    })
+    expect(created).toMatchObject({ ok: true, action: 'create', kind: 'graph', audit: { written: true } })
+    const manifestPath = join(root, 'personal', 'u1', '.graphs', 'nenghui-governance', 'graph.json')
+    const written = JSON.parse(await readFile(manifestPath, 'utf8'))
+    expect(written).toMatchObject({
+      schemaVersion: 1,
+      id: 'nenghui-governance',
+      name: '能汇制度图谱',
+      scope: 'personal:u1',
+      visibility: 'private',
+      version: 1,
+      status: 'draft',
+      nodes: [],
+      edges: [],
+    })
+
+    // The graph is visible to the same scanner the graph tab uses.
+    const overview = await execute(host, 'kg_get', {})
+    expect(overview.graphs.map((graph: any) => graph.id)).toContain('personal/.graphs/nenghui-governance')
+    const listed = await execute(host, 'kg_get', { graph: 'personal/.graphs/nenghui-governance' })
+    expect(listed.graph).toMatchObject({ format: 'graph-json', name: '能汇制度图谱' })
+    expect(listed.nodes).toEqual([])
+
+    // A subsequent kg_add resolves the new graph and adds its first node.
+    const nodeDraft = await execute(host, 'kg_add', {
+      graph: 'personal/.graphs/nenghui-governance',
+      kind: 'node',
+      id: 'policy-1',
+      path: '制度/采购制度.md',
+      title: '采购制度',
+      type: 'policy',
+    })
+    expect(nodeDraft).toMatchObject({ draft: true, graph: 'personal/.graphs/nenghui-governance', id: 'policy-1' })
+    const node = await execute(host, 'kg_add', {
+      graph: 'personal/.graphs/nenghui-governance',
+      kind: 'node',
+      id: 'policy-1',
+      path: '制度/采购制度.md',
+      title: '采购制度',
+      type: 'policy',
+      confirm: true,
+    })
+    expect(node).toMatchObject({ ok: true, kind: 'node', id: 'policy-1' })
+    const read = await execute(host, 'kg_get', { graph: 'personal/.graphs/nenghui-governance', id: 'policy-1' })
+    expect(read.node).toMatchObject({ id: 'policy-1', title: '采购制度', type: 'policy' })
+    expect(audits.map(entry => entry.intent)).toContain('new graph')
+  })
+
+  it('creates a personal graph in a standalone layout without an owner segment', async () => {
+    const root = await tempRoot()
+    const { host } = makeLocalScanningHost(root)
+
+    await execute(host, 'kg_add', { kind: 'graph', id: 'local-graph', name: '本地图谱', confirm: true })
+    expect(await exists(join(root, 'personal', '.graphs', 'local-graph', 'graph.json'))).toBe(true)
+    const listed = await execute(host, 'kg_get', { graph: 'personal/.graphs/local-graph' })
+    expect(listed.graph).toMatchObject({ format: 'graph-json', name: '本地图谱' })
+    // A node add must work on the same flat coordinates.
+    await execute(host, 'kg_add', {
+      graph: 'personal/.graphs/local-graph', kind: 'node', id: 'note-1', path: '资料/说明.md', title: '说明', confirm: true,
+    })
+    const read = await execute(host, 'kg_get', { graph: 'personal/.graphs/local-graph', id: 'note-1' })
+    expect(read.node).toMatchObject({ id: 'note-1', title: '说明' })
+  })
+
+  it('refuses a duplicate graph id and a duplicate display name in one scope', async () => {
+    const root = await tempRoot()
+    const { host } = makeScanningHost(root)
+    await execute(host, 'kg_add', { kind: 'graph', id: 'proc', name: '采购制度图谱', confirm: true })
+
+    await expect(execute(host, 'kg_add', {
+      kind: 'graph', id: 'proc', name: '另一个名字', confirm: true,
+    })).rejects.toMatchObject({ code: 'exists' })
+    await expect(execute(host, 'kg_add', {
+      kind: 'graph', id: 'proc-2', name: '采购制度图谱', confirm: true,
+    })).rejects.toMatchObject({ code: 'exists' })
+    // The draft is refused too: the model never receives a draft it cannot write.
+    await expect(execute(host, 'kg_add', {
+      kind: 'graph', id: 'proc', name: '另一个名字',
+    })).rejects.toMatchObject({ code: 'exists' })
+  })
+
+  it('refuses an unauthorized scope and an invalid id or scope', async () => {
+    const root = await tempRoot()
+    const { host } = makeScanningHost(root, [], {
+      canWrite: relPath => !relPath.startsWith('global'),
+    })
+
+    await expect(execute(host, 'kg_add', {
+      kind: 'graph', scope: 'global', id: 'shared-policy', name: '共享制度图谱',
+    })).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(execute(host, 'kg_add', {
+      kind: 'graph', id: 'Bad_ID', name: '坏 Id',
+    })).rejects.toMatchObject({ code: 'invalid' })
+    await expect(execute(host, 'kg_add', {
+      kind: 'graph', id: 'ok-id', name: '未知范围', scope: 'nonsense',
+    })).rejects.toMatchObject({ code: 'invalid' })
+    expect(await exists(join(root, 'personal', 'u1', '.graphs', 'shared-policy'))).toBe(false)
+  })
+
+  it('creates a department graph under the caller department path', async () => {
+    const root = await tempRoot()
+    const legacy: KnowledgeGraphNode = {
+      id: 'department/D1/D2/知识图谱/legacy',
+      name: 'legacy',
+      scope: 'department',
+      path: 'department/D1/D2/知识图谱/legacy',
+      group: 'D1 / D2',
+      topics: [],
+      links: [],
+      counts: { topics: 0, links: 0, documents: 0 },
+      actualPath: 'department/D1/D2/知识图谱/legacy',
+    }
+    const { host } = makeHost(root, [legacy])
+
+    const draft = await execute(host, 'kg_add', {
+      kind: 'graph', scope: 'department', id: 'dept-policy', name: '部门制度图谱',
+    })
+    expect(draft).toMatchObject({
+      draft: true,
+      graph: 'department/D1/D2/.graphs/dept-policy',
+      visibility: 'department',
+    })
+    expect(draft.content).toContain('"scope": "department:D1/D2"')
+
+    await execute(host, 'kg_add', {
+      kind: 'graph', scope: 'department', id: 'dept-policy', name: '部门制度图谱', confirm: true,
+    })
+    const manifestPath = join(root, 'department', 'D1', 'D2', '.graphs', 'dept-policy', 'graph.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    expect(manifest).toMatchObject({ scope: 'department:D1/D2', visibility: 'department' })
+  })
+
+  it('answers "no readable graph" with an actionable kg_add kind=graph step', async () => {
+    const root = await tempRoot()
+    const { host } = makeScanningHost(root)
+
+    const overview = await execute(host, 'kg_get', {})
+    expect(overview.graphs).toEqual([])
+    expect(overview.next).toContain('kind')
+    expect(overview.next).toContain('graph')
+
+    let message = ''
+    try {
+      await execute(host, 'kg_add', {
+        graph: 'nenghui-governance', kind: 'node', id: 'policy-1', path: '制度/a.md', title: 'A',
+      })
+    } catch (error) {
+      message = String((error as Error).message)
+    }
+    expect(message).toContain('no readable graph matches')
+    expect(message).toContain('kind')
+    expect(message).toContain('confirm:true')
   })
 })
