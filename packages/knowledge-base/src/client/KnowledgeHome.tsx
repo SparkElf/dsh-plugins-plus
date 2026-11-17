@@ -1368,7 +1368,9 @@ export function KnowledgeHome(props: KnowledgeHomeProps) {
         pasteInto={menu === null ? null : (menu.target.relPath.includes('/')
           ? menu.target.relPath.slice(0, menu.target.relPath.lastIndexOf('/'))
           : '')}
+        onOpen={(path) => { props.onOpen(path) }}
         onClose={() => { setMenu(null) }}
+        canManageGrants={props.canManageGrants === true}
         onGrant={(path) => { props.onGrant?.(path) }}
         onPin={(path, pinned) => { props.onPin?.(path, pinned) }}
         onFavorite={(path, favorite) => { props.onFavorite?.(path, favorite); void refreshRows() }}

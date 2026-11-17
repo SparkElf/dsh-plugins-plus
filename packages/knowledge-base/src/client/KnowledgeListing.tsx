@@ -780,7 +780,9 @@ export function KnowledgeListing(props: KnowledgeListingProps) {
         favorite={menu === null ? false : props.isFavorite?.(menu.target.relPath) === true}
         clipboard={clipboard}
         pasteInto={menu === null ? null : (props.pasteTargetFor?.(menu.target.relPath, menu.target.isDir) ?? null)}
+        onOpen={(path) => { props.onOpen(path) }}
         onClose={() => { setMenu(null) }}
+        canManageGrants={props.onGrant !== undefined}
         onGrant={(path) => { props.onGrant?.(path) }}
         onPin={(path, pinned) => { props.onPin?.(path, pinned) }}
         onFavorite={(path, favorite) => { props.onFavorite?.(path, favorite) }}

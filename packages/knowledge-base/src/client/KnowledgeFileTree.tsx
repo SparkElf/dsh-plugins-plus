@@ -216,6 +216,22 @@ export interface KnowledgeFileTreeProps {
    */
   onPasteInto?: (directory: string) => void
   /**
+   * Open the page's own row menu at the pointer.
+   *
+   * This is how the KNOWLEDGE menu reaches a tree row. The explorer builds a workspace
+   * file menu inside itself (copy path, new folder, upload here), which is the wrong
+   * vocabulary for a curated knowledge export and cannot carry knowledge actions such
+   * as preview, permissions, or trash. When this hook is present the wrapper suppresses
+   * that menu for a row and hands the gesture to the page, which renders the same
+   * `KnowledgeContextMenu` the table uses. Omitted (the upload destination picker), the
+   * explorer menu is left untouched.
+   */
+  onRowContextMenu?: (
+    target: { relPath: string; name: string; isDir: boolean },
+    at: { x: number; y: number },
+    selection?: readonly { relPath: string; name: string; isDir: boolean }[],
+  ) => void
+  /**
    * Called the moment an extraction is REQUESTED for one document, before it settles.
    *
    * Carries the path so the progress panel can show that document as queued straight away:
@@ -282,20 +298,28 @@ function rowOf(node: Element): Element | null {
 }
 
 /**
+ * Whether one explorer row is a directory.
+ *
+ * The explorer marks directory rows with a class from its CSS module, whose generated
+ * name cannot be imported here. CSS modules keep the original name inside the generated
+ * one, so matching the fragment finds the marker without depending on the hash.
+ * @param row - one explorer row.
+ * @returns True for a directory row.
+ */
+function isDirRow(row: Element): boolean {
+  return /(^|\s)[A-Za-z0-9_-]*explorerDir(\s|$)/u.test(row.getAttribute('class') ?? '')
+}
+
+/**
  * Keep the borrowed explorer's rows in step with the caller's favourites.
  *
- * The explorer has no row-decoration hook and builds its context menu internally, so
- * neither a star nor a menu can be passed as a prop. Both are therefore applied by
- * observing the rows after they render:
+ * The explorer has no row-decoration hook, so the star is applied by observing the rows
+ * after they render. It is inserted before the row's timestamp (the placement the reader
+ * asked for), once and then toggled, so a re-render does not stack a second star.
  *
- * - The star is an element this code inserts before the row's timestamp, which is the
- *   placement the reader asked for ("left of the date"). It is inserted once and then
- *   toggled, so a re-render does not stack a second star on the same row.
- * - The context menu is NOT touched. The explorer builds its own menu and offers no way
- *   to append to it, so the only possible interference was replacement -- and replacing
- *   it removed the six actions a reader already relies on. The star is all this hook
- *   does; the plugin's own actions live in the selection bar, which appears on selection
- *   and competes with nothing.
+ * The row menu is handled by {@link useRowContextMenu}, not here: decoration and the
+ * gesture are separate decisions, and the upload destination picker needs the star (it
+ * marks the chosen folder) while it must keep the explorer's own menu.
  *
  * A MutationObserver drives it, because every expansion re-renders rows and a one-shot
  * pass on mount would decorate only the top level.
@@ -548,6 +572,72 @@ function useContextMenuExtras(options: {
 }
 
 /**
+ * Hand a row's right-click to the page's knowledge menu.
+ *
+ * The listener is a normal bubble-phase React capture handler: it runs before the
+ * explorer's own row handler, which is why it can suppress that handler and open one
+ * menu instead of two. The row, its directory flag and the selected set are read from
+ * the DOM the explorer already rendered -- `data-dsh-selected` is the only selection
+ * state it publishes -- so the menu acts on exactly the rows the reader saw highlighted.
+ *
+ * Omitted `onRowContextMenu` leaves the gesture untouched; that is what keeps the upload
+ * destination picker's explorer menu working.
+ * @param options - the wrapping element, the root, and the caller's menu opener.
+ * @returns The capture handler for the wrapping element.
+ */
+function useRowContextMenu(options: {
+  container: React.RefObject<HTMLDivElement | null>
+  root: string
+  onRowContextMenu: KnowledgeFileTreeProps['onRowContextMenu']
+}): (event: React.MouseEvent<HTMLDivElement>) => void {
+  const { container, root, onRowContextMenu } = options
+
+  const relPathOf = useCallback((absolute: string): string | undefined => {
+    const base = root.endsWith('/') ? root.slice(0, -1) : root
+    if (absolute === base) return ''
+    return absolute.startsWith(base + '/') ? absolute.slice(base.length + 1) : undefined
+  }, [root])
+
+  return useCallback((event: React.MouseEvent<HTMLDivElement>): void => {
+    if (onRowContextMenu === undefined) return
+    const node = event.target instanceof Element ? event.target : null
+    const row = node === null ? null : rowOf(node)
+    if (row === null) return
+    const absolute = rowPathOf(row)
+    if (absolute === undefined) return
+    const relPath = relPathOf(absolute)
+    if (relPath === undefined || relPath === '') return
+    event.preventDefault()
+    event.stopPropagation()
+
+    const target = { relPath, name: relPath.split('/').pop() ?? relPath, isDir: isDirRow(row) }
+    const host = container.current
+    const picked = host === null
+      ? []
+      : [...host.querySelectorAll('[data-dsh-selected="true"]')].flatMap((candidate) => {
+        const candidateAbsolute = rowPathOf(candidate)
+        if (candidateAbsolute === undefined) return []
+        const candidateRel = relPathOf(candidateAbsolute)
+        if (candidateRel === undefined || candidateRel === '') return []
+        return [{
+          relPath: candidateRel,
+          name: candidateRel.split('/').pop() ?? candidateRel,
+          isDir: isDirRow(candidate),
+        }]
+      })
+    // A click inside a multi-selection acts on the whole selection; one outside it is a
+    // single-row action. The shared rule keeps the menu and the reference picker
+    // agreeing about which rows a count refers to.
+    const covered = batchRowsFor(target, picked)
+    onRowContextMenu(
+      target,
+      { x: event.clientX, y: event.clientY },
+      covered.length > 0 ? covered : undefined,
+    )
+  }, [container, onRowContextMenu, relPathOf])
+}
+
+/**
  * The knowledge tree, rendered by the product's file explorer.
  * @param props - the root, the reader's expansion state, and the actions.
  * @returns The explorer's tree, rooted at the knowledge directory.
@@ -602,9 +692,9 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
   /**
    * The element wrapping the explorer, which the row decoration observes.
    *
-   * The explorer renders its own rows, so neither a star nor a context menu can be
-   * handed to it; both are applied from outside through this element. See
-   * `useRowDecoration` for what it decorates and why.
+   * The explorer renders its own rows, so the star and the row gesture are applied from
+   * outside through this element. See `useRowDecoration` for the star and
+   * `useRowContextMenu` for the knowledge menu.
    */
   const container = useRef<HTMLDivElement | null>(null)
   const mtimes = useRowTimes({ root, expanded, refreshTick })
@@ -668,6 +758,11 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
     ]
   }, [copy, extractMarkdown, props])
   const onTreeContextMenu = useContextMenuExtras({ root, actions: menuActions })
+  const onRowContextMenu = useRowContextMenu({
+    container,
+    root,
+    onRowContextMenu: props.onRowContextMenu,
+  })
 
   /** Every exclusion pattern at once, in the one array identity the explorer keys on. */
   const exclude = useMemo(() => [
@@ -709,7 +804,7 @@ export function KnowledgeFileTree(props: KnowledgeFileTreeProps) {
   }, [props.bucketLabels, departmentCodes, departmentNames])
 
   return (
-    <div ref={container} className={styles.treeFrame} onContextMenuCapture={onTreeContextMenu}>
+    <div ref={container} className={styles.treeFrame} onContextMenuCapture={props.onRowContextMenu === undefined ? onTreeContextMenu : onRowContextMenu}>
     <FileTree
       sessionId={sessionId}
       cwd={root}

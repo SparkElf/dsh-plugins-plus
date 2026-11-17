@@ -95,7 +95,7 @@ import { KnowledgeGraphView } from './graph/KnowledgeGraphView.tsx'
 import { useKnowledgeGraph } from './graph/useKnowledgeGraph.ts'
 import { knowledgeGraphsOf } from '../graphTypes.ts'
 import { useFavorites } from './useFavorites.ts'
-import type { TreeClipboard } from './KnowledgeContextMenu.tsx'
+import { KnowledgeContextMenu, type ContextTarget, type TreeClipboard } from './KnowledgeContextMenu.tsx'
 import { usePinnedPaths } from './usePinnedPaths.ts'
 import { useTreeState } from './useTreeState.ts'
 import { DEFAULT_TREE_SORT, TREE_SORT_KEYS, useTreeSort } from './useTreeSort.ts'
@@ -536,7 +536,6 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
     setRefreshTick(t => t + 1)
   }, [])
 
-  // Set by a row's context menu so the permission form opens on that path.
   const [folded, setFolded] = useState<boolean>(readFolded)
   // The tree header's own narrowing, which costs no request. Kept apart from the
   // rail's search term: one narrows what is displayed, the other queries the tree.
@@ -795,6 +794,21 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   const [clipboard, setClipboard] = useState<TreeClipboard | null>(null)
 
   /**
+   * The knowledge tree's own row menu.
+   *
+   * Held here rather than inside `KnowledgeFileTree` because the menu outlives the row
+   * that opened it: the explorer re-renders rows on every refresh, and a menu owned by a
+   * row would unmount mid-interaction. `selection` is present only when the right-click
+   * landed inside a multi-selection; the menu decides whether each entry is a batch one
+   * from that list.
+   */
+  const [treeMenu, setTreeMenu] = useState<{
+    target: ContextTarget
+    at: { x: number; y: number }
+    selection?: readonly ContextTarget[]
+  } | null>(null)
+
+  /**
    * Remember that the reader asked to extract one document.
    * @param relPath - the document, tree-relative.
    */
@@ -831,9 +845,9 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
   /**
    * Paste the clipboard into one directory.
    *
-   * The toolbar's batch bar and the native context menu both call this, so there is one
-   * implementation of what "paste" means: a cut moves, a copy duplicates, and a cut clears
-   * the clipboard once everything landed.
+   * The batch bar and the shared row menu both call this, so there is one implementation
+   * of what "paste" means: a cut moves, a copy duplicates, and a cut clears the clipboard
+   * once everything landed.
    * @param into - the tree-relative directory to paste into.
    */
   const pasteInto = useCallback(async (into: string): Promise<void> => {
@@ -885,7 +899,38 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
    *
    * A folder pastes into itself; a file pastes beside itself. `''` is the tree root,
    * which is a real destination rather than "unknown".
+   * @param relPath - the row the menu was opened on.
+   * @param isDir - whether that row is a folder.
+   * @returns The tree-relative destination directory.
    */
+  const pasteTargetFor = (relPath: string, isDir: boolean): string =>
+    isDir ? relPath : (relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '')
+
+  /**
+   * Move one tree row into a typed destination directory.
+   *
+   * Both ends are resolved through `resolveUploadDir`: the view hides the owner segment
+   * of `personal`, and a move that sent the view path unchanged would address a path the
+   * Host does not know. The menu owns the prompt and the close; this handler owns only
+   * the request and its refusal.
+   * @param row - the row the reader right-clicked.
+   * @param destination - the tree-relative directory the reader typed.
+   */
+  const moveTreeRow = useCallback(async (row: ContextTarget, destination: string): Promise<void> => {
+    const from = resolveUploadDir(row.relPath, callerId)
+    const to = resolveUploadDir(destination, callerId)
+    if (from === undefined || to === undefined) throw new Error(t('dropRefusedNoCaller'))
+    const response = await fetch(kbApiPath(KB_API.move), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ from, to }),
+      cache: 'no-store',
+    })
+    const body = await readKnowledgeJson<{ error?: string }>(response)
+    if (!response.ok || body.error !== undefined) {
+      throw new Error(body.error ?? 'HTTP ' + String(response.status))
+    }
+  }, [callerId, t])
 
   /**
    * The rows the batch bar acts on.
@@ -1623,9 +1668,11 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
                     // star in both places instead of each surface keeping its own set.
                     isFavorite={favorites.has}
                     onToggleFavorite={(relPath, next) => { favorites.setFavorite(relPath, next) }}
-                    // The tree offers Share / Cut / Copy / Paste in its native menu, but the
-                    // dialog and the clipboard belong to the page: one Share dialog, one
-                    // clipboard, shared with the table so a copy in one pastes in the other.
+                    // The page owns the row menu, the share dialog and the clipboard, so the tree
+                    // and the table offer one action set rather than two that can drift.
+                    onRowContextMenu={(target, at, selection) => {
+                      setTreeMenu({ target, at, ...(selection === undefined ? {} : { selection }) })
+                    }}
                     onShare={(relPath) => { setShareTarget(relPath) }}
                     onClipboard={(entry) => { setClipboard(entry) }}
                     hasClipboard={clipboard !== null}
@@ -1981,7 +2028,43 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
       )}
       </div>
 
-      {/* One Share dialog for the whole page. The tree's native menu and the table's
+      {/* One row menu for the knowledge tree. Rendered outside the tree's scroll
+          container so it is never clipped, and outside the explorer so the workspace
+          file menu is not reused: this menu carries the knowledge actions (preview,
+          save, rename, move, trash) and the permission entry only when the Host says
+          this caller may manage grants. */}
+      <KnowledgeContextMenu
+        target={treeMenu?.target ?? null}
+        at={treeMenu?.at ?? null}
+        {...(treeMenu?.selection === undefined ? {} : { selection: treeMenu.selection })}
+        t={t}
+        shareCopy={shareCopyFor(props.locale)}
+        pinned={treeMenu === null ? false : pins.has(treeMenu.target.relPath)}
+        favorite={treeMenu === null ? false : favorites.has(treeMenu.target.relPath)}
+        clipboard={clipboard}
+        pasteInto={treeMenu === null ? null : pasteTargetFor(treeMenu.target.relPath, treeMenu.target.isDir)}
+        // The knowledge permission admin page is not part of this build; the Host still
+        // answers `canManageGrants`, but there is no surface to open, so the entry stays
+        // withdrawn instead of offering a dead dialog.
+        canManageGrants={false}
+        onOpen={(path) => { openDocument(path) }}
+        onClose={() => { setTreeMenu(null) }}
+        onPin={(path, pinned) => { pins.setPinned(path, pinned) }}
+        onFavorite={(path, favorite) => { favorites.setFavorite(path, favorite) }}
+        onReference={(path, isDir) => { askReferenceTarget(path, isDir) }}
+        onClipboard={(entry) => { setClipboard(entry) }}
+        onMove={moveTreeRow}
+        onRenamed={() => { setRefreshTick(t => t + 1) }}
+        onDeleted={() => { setRefreshTick(t => t + 1) }}
+        onMoved={() => {
+          // A cut consumes the clipboard; a copy keeps it so one entry can be pasted
+          // into a second folder.
+          setClipboard(current => (current?.cut === true ? null : current))
+          setRefreshTick(t => t + 1)
+        }}
+      />
+
+      {/* One Share dialog for the whole page. The tree's own menu and the table's
           actions column both open it through state on this component: the dialog is
           self-contained (path in, callbacks out), so mounting it once here is what keeps
           two surfaces from drifting apart in behaviour. */}

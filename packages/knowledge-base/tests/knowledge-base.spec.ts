@@ -5575,30 +5575,41 @@ describe('the @-mention target picker', () => {
   })
 
   /**
-   * The explorer's own context menu must survive.
+   * The knowledge row menu, not the workspace explorer's.
    *
-   * It offers six actions the plugin never had (upload here, new folder, new file,
-   * zip-and-download, copy relative/absolute address). An earlier revision intercepted
-   * the gesture in the capture phase and replaced that menu with the plugin's, which
-   * took all six away -- the reported bug. These assertions pin the retreat: the tree
-   * does not touch the event at all, and nothing is left half-disabled.
+   * The explorer's menu is a workspace file menu (upload here, new folder, new file,
+   * zip, copy address). That vocabulary belongs to editing the workspace, not to a
+   * curated knowledge export, and on a 0.2.2-rc.2 host its old anchor prop placed the
+   * card away from the pointer -- which is the reported "right-click did nothing".
+   * The tree now hands the gesture to the page's own `KnowledgeContextMenu`, while a
+   * caller that omits the hook (the upload destination picker) keeps the explorer's
+   * menu untouched.
    */
-  it('never intercepts the explorer context menu', async () => {
+  it('hands a row right-click to the knowledge menu', async () => {
     const tree = await read('KnowledgeFileTree.tsx')
-    // No capture-phase listener on the container.
-    expect(tree).not.toMatch(/addEventListener\(\s*'contextmenu'/u)
-    expect(tree).not.toMatch(/onContextCapture/u)
-    // And no leftover prop that would let a caller reinstate the interception.
-    expect(tree).not.toMatch(/onRowContextMenu/u)
+    expect(tree).toMatch(/onRowContextMenu/u)
+    // The native row handler is suppressed, not merely observed.
+    expect(tree).toMatch(/event\.preventDefault\(\)/u)
+    expect(tree).toMatch(/event\.stopPropagation\(\)/u)
+    // The picker that passes no opener still reaches the explorer's own menu.
+    expect(tree).toMatch(/props\.onRowContextMenu === undefined \? onTreeContextMenu : onRowContextMenu/u)
   })
 
-  it('leaves no commented-out interception behind', async () => {
-    // A disabled copy is what a later reader turns back on. The removal must be real:
-    // no comment line may still contain the listener registration, which is the form a
-    // "just disable it" edit leaves behind.
-    const tree = await read('KnowledgeFileTree.tsx')
-    expect(tree).not.toMatch(/^\s*(\/\/|\*).*addEventListener\(\s*'contextmenu'/imu)
-    expect(tree).not.toMatch(/^\s*(\/\/|\*).*onContextCapture/imu)
+  it('anchors the knowledge menu at the pointer on both host generations', async () => {
+    const menu = await read('KnowledgeContextMenu.tsx')
+    // 0.2.2-rc.2 reads `anchorPoint`; older hosts read `getAnchorRect`. Supplying both
+    // is what keeps the card at the click instead of at the detached anchor span.
+    expect(menu).toMatch(/getAnchorRect=\{getAnchorRect\}/u)
+    expect(menu).toMatch(/anchorPoint: \{ x: at\.x, y: at\.y \}/u)
+  })
+
+  it('offers preview, move and delete, and hides permissions without a surface', async () => {
+    const menu = await read('KnowledgeContextMenu.tsx')
+    for (const id of ["'open'", "'download'", "'rename'", "'move'", "'delete'"]) {
+      expect(menu).toContain('id: ' + id)
+    }
+    // The permission row is conditional on BOTH the Host's answer and a handler.
+    expect(menu).toMatch(/props\.canManageGrants === true && props\.onGrant !== undefined/u)
   })
 
   it('keeps the plugin actions reachable from the selection bar', async () => {

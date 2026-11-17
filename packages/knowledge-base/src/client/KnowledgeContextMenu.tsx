@@ -78,8 +78,26 @@ export interface KnowledgeContextMenuProps {
   shareCopy: ShareDialogCopy
   /** Close the menu. */
   onClose: () => void
+  /** Open one file for preview. Absent on a surface with no preview. */
+  onOpen?: (path: string) => void
+  /**
+   * Move one row into a destination directory, both tree-relative.
+   *
+   * The destination is typed by the reader and resolved by the caller, because only the
+   * page knows the caller's authoritative `personal/<id>/...` path. Absent means this
+   * surface has no move route and the entry is not offered.
+   */
+  onMove?: (row: ContextTarget, destination: string) => Promise<void> | void
   /** Open the permission surface for this path. */
-  onGrant: (path: string) => void
+  onGrant?: (path: string) => void
+  /**
+   * Whether the caller may manage grants.
+   *
+   * The permission entry is hidden unless this is exactly true AND `onGrant` is present:
+   * a row that opens a surface the backend will refuse is worse than no row, and the
+   * answer comes from the Host rather than being derived here.
+   */
+  canManageGrants?: boolean
   /** Toggle the pin state for this path. */
   onPin: (path: string, pinned: boolean) => void
   /** Whether this path is currently pinned. */
@@ -221,6 +239,33 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
       props.onRenamed()
     } catch (error: unknown) {
       setNotice(error instanceof Error ? error.message : t('renameFailed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Move one row into a typed destination directory.
+   *
+   * The prompt is the same gesture the batch bar uses, and the page resolves both ends
+   * through the caller's authoritative path -- a view path for `personal` omits the
+   * owner segment, so sending the view path unchanged would move a path the Host does
+   * not know. The caller's handler owns that resolution and reports its own refusal;
+   * this component only closes and refreshes on success.
+   */
+  const move = async (row: ContextTarget): Promise<void> => {
+    if (props.onMove === undefined) { onClose(); return }
+    const answer = window.prompt(t('moveSelected'), '')
+    if (answer === null) { onClose(); return }
+    const destination = answer.trim()
+    if (destination === '') { onClose(); return }
+    setBusy(true); setNotice(undefined)
+    try {
+      await props.onMove(row, destination)
+      onClose()
+      props.onMoved()
+    } catch (error: unknown) {
+      setNotice(t('moveFailed').replace('{reason}', error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(false)
     }
@@ -412,6 +457,11 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
   const favoriteAll = many > 0 && batch.every(entry => props.favorite)
 
   const items: MenuEntry[] = row !== null ? [
+    // Opening is the action a file list is expected to lead with; a directory has no
+    // preview route here, so the entry is absent rather than a no-op.
+    ...(many === 0 && !row.isDir && props.onOpen !== undefined
+      ? [{ id: 'open', label: t('actionOpen'), disabled: busy } as MenuEntry]
+      : []),
     // A directory has no bytes to save, so the row is absent rather than disabled: a
     // permanently disabled entry teaches the reader nothing.
     ...(many === 0 && !row.isDir ? [{ id: 'download', label: t('actionDownload'), disabled: busy }] : []),
@@ -449,7 +499,18 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
     { id: 'pin', label: props.pinned ? t('actionUnpin') : t('actionPin') },
     { id: 'reference', label: t('actionReference') },
     { type: 'separator', id: 'sep-3' },
-    { id: 'grant', label: t('actionPermissions') },
+    // Moving one row is a prompt, not a submenu of every directory: the tree already
+    // offers drag-and-drop for the same job, and a batch move has one shared
+    // destination only when the reader names it.
+    ...(many === 0 && props.onMove !== undefined
+      ? [{ id: 'move', label: t('moveSelected'), disabled: busy } as MenuEntry]
+      : []),
+    // The permission entry exists only when the Host answered that this caller may
+    // manage grants AND the page supplied a surface to open. Hiding it otherwise keeps
+    // a refused dialog out of the menu.
+    ...(many === 0 && props.canManageGrants === true && props.onGrant !== undefined
+      ? [{ id: 'grant', label: t('actionPermissions') } as MenuEntry]
+      : []),
     { id: 'delete', label: many > 0 ? count('actionDeleteMany') : t('actionDelete'), danger: true, disabled: busy },
   ] : []
 
@@ -463,6 +524,7 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
           // The menu only exists while `row` is set; this keeps the handlers typed
           // against a real target rather than re-checking at each branch.
           if (row === null) return
+          if (id === 'open') { props.onOpen?.(row.relPath); onClose(); return }
           if (id === 'download') { void download(row); return }
           if (id === 'rename') { void rename(row); return }
           if (id === 'share') {
@@ -494,7 +556,8 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
             onClose()
             return
           }
-          if (id === 'grant') { props.onGrant(row.relPath); onClose() }
+          if (id === 'move') { void move(row); return }
+          if (id === 'grant') { props.onGrant?.(row.relPath); onClose() }
           if (id === 'delete') {
             if (many > 0) { void removeMany(); return }
             void remove(row)
@@ -503,6 +566,12 @@ export function KnowledgeContextMenu(props: KnowledgeContextMenuProps) {
         onClose={onClose}
         portal
         getAnchorRect={getAnchorRect}
+        // 0.2.2-rc.2 replaced `getAnchorRect` with `anchorPoint` (client viewport
+        // coordinates). Supplying both keeps the card at the pointer on either host:
+        // each version ignores the prop it does not know, and without `anchorPoint`
+        // the newer host falls back to the detached anchor span and places the card
+        // somewhere the reader did not click.
+        {...(at === null ? {} : { anchorPoint: { x: at.x, y: at.y } })}
         side="bottom"
         align="start"
         autoFocus
