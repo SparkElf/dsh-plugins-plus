@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-officecli",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "DeepSeek Harness tool adapter for the official OfficeCLI binary.",
   "type": "module",
   "main": "./lib/index.js",

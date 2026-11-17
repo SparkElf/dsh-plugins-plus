@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-office-viewer-fonts",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Office and Chinese government font assets for Better Sidebar Office Viewer and OfficeCLI workflow instructions.",
   "type": "module",
   "main": "./lib/index.js",
