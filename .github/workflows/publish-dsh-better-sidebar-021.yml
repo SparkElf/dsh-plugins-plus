@@ -54,6 +54,20 @@ jobs:
           cache: pnpm
           cache-dependency-path: sidebar/pnpm-lock.yaml
 
+      - name: Check the registry credential
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${NODE_AUTH_TOKEN:-}" || { echo 'NPM_TOKEN secret is empty or unset'; exit 1; }
+          # Prints the authenticated npm user only. The token is never read or echoed.
+          whoami_output=$(npm whoami --registry "$REGISTRY" 2>&1) || {
+            echo "npm whoami failed:"
+            echo "$whoami_output"
+            exit 1
+          }
+          echo "authenticated as $whoami_output"
+
       - name: Install dependencies
         working-directory: sidebar
         run: pnpm install --frozen-lockfile
