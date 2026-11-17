@@ -1,0 +1,147 @@
+name: Publish DSH Better Sidebar 0.30.1-sparkelf.21
+
+# One-shot release path for @sparkelf/dsh-better-sidebar 0.30.1-sparkelf.21.
+#
+# The package belongs to SparkElf/DSH-better-sidebar, but that repository has no
+# NPM_TOKEN and its release workflow relies on npm Trusted Publishing, which this
+# package is not configured for (0.30.1-sparkelf.20 shipped without provenance).
+# This repository already carries a working `NPM_TOKEN` Actions secret, so the
+# release is packed and published from here against the exact upstream commit.
+#
+# The commit is pinned by full SHA: `dev` moves, a release must not.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-dsh-better-sidebar-021
+  cancel-in-progress: false
+
+env:
+  SIDEBAR_REPOSITORY: SparkElf/DSH-better-sidebar
+  SIDEBAR_COMMIT: 2b4a22d68d6a43d5246af96dd5807a9ef454f1e5
+  PACKAGE_NAME: '@sparkelf/dsh-better-sidebar'
+  PACKAGE_VERSION: 0.30.1-sparkelf.21
+  REGISTRY: https://registry.npmjs.org
+
+jobs:
+  publish:
+    name: pack, assert, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the sidebar release commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SIDEBAR_REPOSITORY }}
+          ref: ${{ env.SIDEBAR_COMMIT }}
+          path: sidebar
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: sidebar/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: sidebar
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: sidebar
+        run: pnpm build
+
+      - name: Pack
+        working-directory: sidebar
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          pnpm pack --pack-destination "$RUNNER_TEMP/pack"
+          tarball=$(find "$RUNNER_TEMP/pack" -maxdepth 1 -name '*.tgz' -print -quit)
+          test -n "$tarball" || { echo 'pnpm pack produced no tarball'; exit 1; }
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+          echo "packed $(basename "$tarball") ($(stat -c %s "$tarball") bytes)"
+          sha256sum "$tarball"
+
+      - name: Assert the tarball is the 0.30.1-sparkelf.21 build with the fixes
+        env:
+          EXPECTED_NAME: ${{ env.PACKAGE_NAME }}
+          EXPECTED_VERSION: ${{ env.PACKAGE_VERSION }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/verify"
+          rm -rf "$work"
+          mkdir -p "$work"
+          tar -xzf "$TARBALL" -C "$work"
+
+          node - <<'NODE'
+          const { readFileSync } = require('node:fs')
+          const manifest = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/verify/package/package.json`, 'utf8'))
+          const expectedName = process.env.EXPECTED_NAME
+          const expectedVersion = process.env.EXPECTED_VERSION
+          if (manifest.name !== expectedName) {
+            throw new Error(`tarball name ${manifest.name} !== ${expectedName}`)
+          }
+          if (manifest.version !== expectedVersion) {
+            throw new Error(`tarball version ${manifest.version} !== ${expectedVersion}`)
+          }
+          console.log(`manifest ${manifest.name}@${manifest.version} ok`)
+          NODE
+
+          for entry in lib/index.js lib/client.js lib/client-registry.js dsh.plugin.json; do
+            test -f "$work/package/$entry" || { echo "missing $entry in tarball"; exit 1; }
+          done
+
+          # Each marker is a fix that must be present in the shipped bundle, not
+          # only in the repository sources.
+          assert_marker() {
+            marker="$1"
+            if ! grep -RFq -- "$marker" "$work/package/lib" "$work/package/src"; then
+              echo "marker not found in tarball: $marker"
+              exit 1
+            fi
+            echo "marker ok: $marker"
+          }
+          assert_marker 'catalog-unavailable'
+          assert_marker 'SESSION_QUERY_CORRUPT_SESSION'
+          assert_marker 'anchorPoint'
+          assert_marker 'team.members ??'
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${NODE_AUTH_TOKEN:-}" || { echo 'NPM_TOKEN secret is empty or unset'; exit 1; }
+          npm publish "$TARBALL" \
+            --access public \
+            --tag latest \
+            --registry "$REGISTRY"
+
+      - name: Verify the published version and dist-tags
+        run: |
+          set -euo pipefail
+          version=$(npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version --registry "$REGISTRY")
+          test "$version" = "$PACKAGE_VERSION"
+          latest=$(npm view "$PACKAGE_NAME" dist-tags.latest --registry "$REGISTRY")
+          test "$latest" = "$PACKAGE_VERSION"
+          shasum=$(npm view "$PACKAGE_NAME@$PACKAGE_VERSION" dist.shasum --registry "$REGISTRY")
+          echo "version=$version latest=$latest shasum=$shasum"
+          {
+            echo "#### dsh-better-sidebar publish"
+            echo ""
+            echo "- version: \`$version\`"
+            echo "- dist-tags.latest: \`$latest\`"
+            echo "- dist.shasum: \`$shasum\`"
+            echo "- tarball sha256: \`$(sha256sum "$TARBALL" | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
