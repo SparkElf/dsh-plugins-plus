@@ -38,26 +38,43 @@ export interface RoomEvent {
   readonly surfaceOp?: string
 }
 
+/** A messaging platform a room can mirror. */
+export type ExternalChannelKind = 'qqbot' | 'wecom' | 'dingtalk'
+
 /**
  * An external system a room is bridged to.
  *
  * A room with an external channel accepts messages written by someone who has no DataOps account;
  * the bridge names the sender on each message it forwards, and the room shows it as foreign rather
  * than pretending the workspace said it.
+ *
+ * `externalGroupId` is the canonical group id for every platform. `groupOpenid` remains on the
+ * shape because QQ rooms created by older deployments stored their group id under that name; a
+ * reader must accept either, while a writer always fills `externalGroupId`.
  */
 export interface ExternalChannel {
-  readonly kind: 'qqbot'
+  readonly kind: ExternalChannelKind
   /** The external group this room mirrors. */
-  readonly groupOpenid: string
+  readonly externalGroupId: string
+  /** QQ's historical name for {@link externalGroupId}. Present on QQ rooms. */
+  readonly groupOpenid?: string
+  /** Platform chat id, when the platform distinguishes a chat from its group id. */
+  readonly chatId?: string
+  /** The bot that delivered the external group's messages. */
+  readonly botId?: string
 }
 
 /** One message author that came from an external channel. */
 export interface ExternalSender {
-  readonly kind: 'qqbot'
+  readonly kind: ExternalChannelKind
   /** The sender's id inside the external system. */
-  readonly openid: string
+  readonly senderId: string
   /** Display name the external system reported, already user-facing. */
-  readonly nickname: string
+  readonly senderName: string
+  /** The bot that delivered this message. */
+  readonly botId?: string
+  /** When the platform received the message, as an ISO-8601 instant. */
+  readonly receivedAt?: string
 }
 
 export interface RoomSummary {

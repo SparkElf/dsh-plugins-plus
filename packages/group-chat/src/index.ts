@@ -239,6 +239,27 @@ interface RoomRuntime {
   modelKey: string
   /** This room's poll loop, owned here so dissolving one room can stop only that loop. */
   readonly timer: ReturnType<typeof setInterval>
+  /**
+   * True while a turn is running in this room's session.
+   *
+   * Context injected mid-turn is folded into that turn's next step, which would make a mirrored
+   * external message look like something the agent was asked to answer. Non-waking deliveries
+   * therefore wait for `turn/end` instead of being handed to a running turn.
+   */
+  busy: boolean
+  /** Mirrored lines waiting for an ordered, non-waking append. */
+  pendingInject: unknown[]
+  /** Debounce that groups a burst (poll page + stream push) before appending in id order. */
+  lineTimer?: ReturnType<typeof setTimeout>
+  /**
+   * The last backend page cursor this runtime has consumed.
+   *
+   * Deliberately separate from the tracker's seen set: a stream push of this workspace's own
+   * just-published reply carries a high row id, and using it as the cursor would skip every
+   * room message id below it that this workspace never read (a mirror message posted before the
+   * room was first opened is exactly that case). Only `sync` pages move it.
+   */
+  cursor?: string
 }
 
 /**
@@ -841,6 +862,7 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
     const runtime = runtimes.get(roomId)
     if (runtime === undefined) return
     clearInterval(runtime.timer)
+    if (runtime.lineTimer !== undefined) clearTimeout(runtime.lineTimer)
     timers.delete(runtime.timer)
     runtimes.delete(roomId)
   }
@@ -859,6 +881,86 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
 
   const cwd = (): string => resolveWorkspaceRoot()
 
+
+  /**
+   * Whether this session already has the protected `system/message` surface head.
+   *
+   * Appending a `user/message` before that head makes the reader reject the whole session
+   * ("system/message requires a protected first surface head"), so a room that has never
+   * completed a turn holds its mirrored lines until the warm-up creates the head.
+   */
+  const hasSurfaceHead = (session: Session): boolean =>
+    session.snapshotEvents().some((event) => event.type === 'system/message')
+
+  /** Append one mirrored message to the room's visible log without starting a turn. */
+  const appendRoomLine = (session: Session, message: unknown): void => {
+    try {
+      session.append('user/message', message as never, { surfaceOp: 'append' })
+    } catch (error) {
+      log?.warn?.('[group-chat] appending a mirrored room message failed', error)
+    }
+  }
+
+  /**
+   * Whether the session's last turn boundary is a start with no matching end.
+   *
+   * A process killed mid-turn leaves that shape on disk. Treating it as idle would append
+   * mirrored lines into a turn the runtime may resume, which is exactly how a mirror message
+   * ends up answered. The flag stays set until a real `turn/end` arrives.
+   */
+  const isTurnOpen = (session: Session): boolean => {
+    const events = session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (events[index].type === 'turn/end') return false
+      if (events[index].type === 'turn/start') return true
+    }
+    return false
+  }
+
+  /** The backend row id a mirrored line carries, used only to order a burst. */
+  const lineOrder = (message: unknown): bigint | undefined => {
+    const id = (message as { source?: { messageId?: unknown } }).source?.messageId
+    return typeof id === 'string' && /^\d+$/.test(id) ? BigInt(id) : undefined
+  }
+
+  const sortLines = (lines: unknown[]): unknown[] =>
+    lines.sort((left, right) => {
+      const a = lineOrder(left)
+      const b = lineOrder(right)
+      if (a === undefined || b === undefined || a === b) return 0
+      return a < b ? -1 : 1
+    })
+
+  /** Append the queued mirrored lines in backend order, but only past the protected head. */
+  const flushRoomLines = (runtime: RoomRuntime): void => {
+    if (runtime.lineTimer !== undefined) {
+      clearTimeout(runtime.lineTimer)
+      runtime.lineTimer = undefined
+    }
+    if (runtime.busy) return
+    const queued = sortLines(runtime.pendingInject.splice(0))
+    if (queued.length === 0) return
+    if (!hasSurfaceHead(runtime.session)) {
+      runtime.pendingInject.unshift(...queued)
+      return
+    }
+    for (const line of queued) appendRoomLine(runtime.session, line)
+  }
+
+  /**
+   * Queue a mirrored line.
+   *
+   * Both the poll page and the push stream call here, and the two can hand over the same burst
+   * in either order. A short debounce lets one sort cover the whole burst, so the transcript
+   * always follows the backend's ids rather than whichever transport spoke first.
+   */
+  const enqueueRoomLine = (runtime: RoomRuntime, message: unknown): void => {
+    if (runtime.pendingInject.length >= 100) return
+    runtime.pendingInject.push(message)
+    sortLines(runtime.pendingInject)
+    if (runtime.busy || runtime.lineTimer !== undefined) return
+    runtime.lineTimer = setTimeout(() => { flushRoomLines(runtime) }, 120)
+  }
 
   deliver = (roomId: string, record: { id: string; event: RoomEvent }): void => {
     const runtime = runtimes.get(roomId)
@@ -908,10 +1010,13 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
     if (runtime === undefined || runtime.syncing) return
     runtime.syncing = true
     try {
-      let cursor = tracker.cursorOf(roomId)
+      // Start from this runtime's own page cursor, not from the highest id the tracker has
+      // seen: a pushed reply can be newer than messages this workspace has not read yet.
+      let cursor = runtime.cursor
       for (;;) {
         const page = await backend.listEvents(roomId, cursor)
         for (const record of page.events) deliver(roomId, record)
+        if (page.nextCursor !== null) runtime.cursor = page.nextCursor
         if (!page.hasMore || page.nextCursor === null || page.events.length === 0) break
         cursor = page.nextCursor
       }
@@ -1009,14 +1114,9 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
     } catch (error) {
       log?.error?.('[group-chat] reading room members failed', room.id, error)
     }
-    // A session that has never run a turn is the one the shell lists as `blank`, and the
-    // conversation view refuses to bind to it: the member gets an empty pane with no composer
-    // on a room they just created. Config events and seeds are written at creation, so counting
-    // events would miss it — the marker is that no turn has ever started.
-    if (!session.snapshotEvents().some((event) => event.type === 'turn/start')) {
-      void warmUp(room.id, session)
-    }
-    tracker.seedFromSession(room.id, session.snapshotEvents())
+    // Registered before the warm-up and the first sync: a mirrored message pulled by `sync`
+    // must see the room's `busy` flag, or it is injected into the warm-up turn's next step and
+    // the model answers a message nobody addressed to it.
     const timer = setInterval(() => { void sync(room.id) }, POLL_INTERVAL_MS)
     timers.add(timer)
     runtimes.set(room.id, {
@@ -1026,7 +1126,18 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       policy: room.agentTrigger,
       modelKey: modelKeyOf(room),
       timer,
+      busy: isTurnOpen(session),
+      pendingInject: [],
+      cursor: undefined,
     })
+    // A session that has never run a turn is the one the shell lists as `blank`, and the
+    // conversation view refuses to bind to it: the member gets an empty pane with no composer
+    // on a room they just created. Config events and seeds are written at creation, so counting
+    // events would miss it — the marker is that no turn has ever started.
+    if (!session.snapshotEvents().some((event) => event.type === 'turn/start')) {
+      void warmUp(room.id, session)
+    }
+    tracker.seedFromSession(room.id, session.snapshotEvents())
     await sync(room.id)
   }
 
@@ -1051,6 +1162,11 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
    * session, but a member must never find it in the room's history.
    */
   const warmUp = async (roomId: string, session: Session): Promise<void> => {
+    // Holds non-waking deliveries from the moment the warm-up is queued until its turn ends:
+    // resolving the agent takes an await, and an inject that lands in that window would be
+    // folded into the warm-up turn's first step.
+    const runtime = runtimes.get(roomId)
+    if (runtime !== undefined) runtime.busy = true
     try {
       const sessionId = roomSessionId(roomId)
       let agent = ctx.agents.get(sessionId as never)
@@ -1061,7 +1177,10 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       }
       // Re-checked after the await: two opens racing on the same room must not both queue a
       // turn, and a member may have sent the first message while the agent was resolving.
-      if (session.snapshotEvents().some((event) => event.type === 'turn/start')) return
+      if (session.snapshotEvents().some((event) => event.type === 'turn/start')) {
+        if (runtime !== undefined) runtime.busy = false
+        return
+      }
       const prompt = {
         id: `${WARM_UP_PREFIX}${roomId}`,
         role: 'user' as const,
@@ -1074,12 +1193,30 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       if (isUserMessageData(prompt)) agent.followup(prompt)
     } catch (error) {
       // A warm-up that fails is not worth failing the open over: the room works, it just opens
-      // empty until someone sends the first message.
+      // empty until someone sends the first message. Its queued injects still have to flow, so
+      // the busy flag is released here rather than waiting for a turn that never started.
+      if (runtime !== undefined) runtime.busy = false
       log?.warn?.('[group-chat] warming up a new room session failed', roomId, error)
     }
   }
 
   const deliverToAgent = async (roomId: string, prompt: unknown, wake: boolean): Promise<void> => {
+    // The prompt is the message `deliver` already built for this record, not a re-read of the
+    // session's last event: the surface holds whatever the driver last committed, which after a
+    // turn is the assistant's reply rather than the message that triggered it.
+    if (!isUserMessageData(prompt)) return
+    const runtime = runtimes.get(roomId)
+    const authorKind = (prompt as { source?: { authorKind?: unknown } }).source?.authorKind
+    if (!wake && authorKind === 'external') {
+      // Mirrored messages are shown by appending them to the room's own log, not by handing
+      // them to the driver. `inject` writes them only as part of a turn's next step, so a
+      // message that arrives mid-turn either gets answered or waits invisibly for a turn that
+      // may never come. A direct append has no such coupling: it is visible immediately and
+      // enters model history on the next turn like any other line.
+      if (runtime === undefined) return
+      enqueueRoomLine(runtime, prompt)
+      return
+    }
     const sessionId = roomSessionId(roomId)
     // A room session exists but carries no agent until one is resolved onto it, so the
     // live lookup is expected to miss on the first message. `resolveAgent` resumes the
@@ -1095,23 +1232,19 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       }
       agent = resolved.agent
     }
-    // The prompt is the message `deliver` already built for this record, not a re-read of the
-    // session's last event: the surface holds whatever the driver last committed, which after a
-    // turn is the assistant's reply rather than the message that triggered it.
-    if (!isUserMessageData(prompt)) return
     try {
-      // Two official channels, chosen by whether this delivery should also produce a reply.
       // `followup` "queue[s] an ordinary follow-up turn and wake[s] the driver", so the agent
-      // answers; `inject` "queue[s] model-facing context for the next pre-step without waking
-      // the driver", so the message reaches the model's context on a later turn without
-      // starting one. Neither writes the surface here — the driver does, in its own order.
-      //
-      // A room where only mentions reached the session would not be a group chat: the agent
-      // has to be able to read what was said around it, which is why the unmentioned case
-      // still delivers.
-      if (wake) agent.followup(prompt)
-      else agent.inject(prompt)
+      // answers; `inject` only queues context for a later step, which is how every message
+      // around the agent stays readable without starting a turn.
+      if (wake) {
+        if (runtime !== undefined) runtime.busy = true
+        agent.followup(prompt)
+      } else {
+        agent.inject(prompt)
+      }
     } catch (error) {
+      if (runtime !== undefined) runtime.busy = false
+      log?.warn?.('[group-chat] delivering a room message to the agent failed', roomId, error)
     }
   }
 
@@ -1125,6 +1258,26 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
   const onSessionEvent = (session: Session, event: SessionEvent): void => {
     const roomId = roomIdOfSession(session)
     if (roomId === undefined) return
+    const runtime = runtimes.get(roomId)
+    if (event.type === 'turn/start') {
+      if (runtime !== undefined) runtime.busy = true
+      return
+    }
+    if (event.type === 'turn/end') {
+      if (runtime !== undefined) {
+        runtime.busy = false
+        // Flush what arrived during the turn now that no step is running: `inject` adds it to
+        // the session without waking the driver, so a mirrored message can never answer itself.
+        flushRoomLines(runtime)
+      }
+      if (pendingReply === undefined) return
+      const reply = pendingReply
+      pendingReply = undefined
+      backend
+        .reportAgentEvent(roomId, { rpcId: `${roomId}:${String((event as { seq?: number }).seq ?? 'end')}`, event: reply.event })
+        .catch((error: unknown) => { log?.error?.('[group-chat] reporting the agent reply failed', roomId, error) })
+      return
+    }
     if (event.type === 'user/message') {
       // Only what the member actually typed is published. The runtime delivers its own
       // bookkeeping as `user/message` too — workspace instructions, reminders, the state
@@ -1186,12 +1339,6 @@ export const activate = (ctx: GroupChatContext, target: ServerTarget): (() => vo
       }
       return
     }
-    if (event.type !== 'turn/end' || pendingReply === undefined) return
-    const reply = pendingReply
-    pendingReply = undefined
-    backend
-      .reportAgentEvent(roomId, { rpcId: `${roomId}:${String((event as { seq?: number }).seq ?? 'end')}`, event: reply.event })
-      .catch((error: unknown) => { log?.error?.('[group-chat] reporting the agent reply failed', roomId, error) })
   }
 
   ctx.on('session/event', onSessionEvent)
@@ -1751,14 +1898,36 @@ const isString = (value: unknown): value is string => typeof value === 'string'
  * `cwd` and the preset decide what the room's agent may touch on any member's behalf, so
  * they travel with creation and are never accepted as later updates.
  */
+/**
+ * The platforms a room may mirror.
+ *
+ * A closed list rather than any string: the backend stores the channel and later trusts it when
+ * it stamps incoming messages, so an unknown kind would create a room that claims a bridge no
+ * consumer can render.
+ */
+const EXTERNAL_CHANNEL_KINDS: readonly ExternalChannel['kind'][] = ['qqbot', 'wecom', 'dingtalk']
+
 /** Read a well-formed external channel from a create/update payload. */
 const externalChannelOf = (payload: Record<string, unknown> | undefined): ExternalChannel | undefined => {
   const raw = payload?.['externalChannel']
   if (typeof raw !== 'object' || raw === null) return undefined
   const channel = raw as Record<string, unknown>
-  if (channel['kind'] !== 'qqbot') return undefined
-  const groupOpenid = typeof channel['groupOpenid'] === 'string' ? channel['groupOpenid'].trim() : ''
-  return groupOpenid.length === 0 ? undefined : { kind: 'qqbot', groupOpenid }
+  const kind = channel['kind']
+  if (typeof kind !== 'string' || !(EXTERNAL_CHANNEL_KINDS as readonly string[]).includes(kind)) return undefined
+  const text = (value: unknown): string => typeof value === 'string' ? value.trim() : ''
+  const groupOpenid = text(channel['groupOpenid'])
+  const chatId = text(channel['chatId'])
+  // QQ rooms predate `externalGroupId`, so its group id is accepted from either field. Every
+  // other platform has only the canonical field; `chatId` is an alias, not a second group.
+  const externalGroupId = text(channel['externalGroupId']) || groupOpenid || chatId
+  if (externalGroupId.length === 0) return undefined
+  return {
+    kind: kind as ExternalChannel['kind'],
+    externalGroupId,
+    ...kind === 'qqbot' ? { groupOpenid: groupOpenid || externalGroupId } : {},
+    ...chatId.length === 0 ? {} : { chatId },
+    ...text(channel['botId']).length === 0 ? {} : { botId: text(channel['botId']) },
+  }
 }
 
 /** Exposed for tests: the exact shape a create/update may forward. */

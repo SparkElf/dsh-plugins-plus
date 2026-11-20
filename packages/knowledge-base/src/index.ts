@@ -112,8 +112,12 @@ import { ensurePersonalMemoryGraph } from './memoryGraphBootstrap.ts'
 import { MemoryStore } from './memoryStore.ts'
 import { MemorySettingsStore } from './memorySettings.ts'
 import { handleMemoryRoute } from './memoryRoutes.ts'
+import { handleMemoryPromotionRoute } from './memoryPromotionRoutes.ts'
+import { promotionStorePath, SHARED_MEMORY_GRAPH_ID } from './memoryPromotion.ts'
+import { sharedMemoryScopeRoots } from './memoryShared.ts'
 import { MemoryGraphWriter, PERSONAL_MEMORY_FOLDER } from './memoryGraphWriter.ts'
 import {
+  DEFAULT_GUARDIAN_TIMEOUT_MS,
   GuardianSessionStore,
   type GuardianAgentRef,
   type GuardianSessionHost,
@@ -308,6 +312,18 @@ export interface Config {
   memorySkillsRoot: string
   /** Idle minutes before a normal session notifies the memory guardian. */
   memoryIdleMinutes: number
+  /**
+   * DataOps permission whose holders start memory enabled when they have no
+   * settings file yet.
+   *
+   * The default `kb:config:manage` is granted by the DataOps permission
+   * manifest to the global administrator and super administrator roles only.
+   * A deployment can point this at a stricter key, or set it to an empty string
+   * to disable the default entirely; the KB package never hard-codes a role
+   * name. An explicit `memoryEnabled: false` in the user's settings file always
+   * wins over this default.
+   */
+  memoryDefaultEnabledPermission: string
   /** Comma-separated export spec of clients allowed to mount the NFS export. */
   permitted: string
   /** Host serving the export, as an address or `address:/path` pseudo root. */
@@ -445,6 +461,11 @@ export const Config: z<Config> = z.object({
   memorySkillsRoot: z.string().default(''),
   // The idle debounce is a product default; operators may tune it.
   memoryIdleMinutes: z.number().default(30),
+  // Admin/super-admin first-read default. `kb:config:manage` is the existing
+  // DataOps permission granted to those two built-in roles; an explicit false
+  // written by the user still wins because the default applies only when the
+  // settings file is absent.
+  memoryDefaultEnabledPermission: z.string().default('kb:config:manage'),
   permitted: z.string().default('*'),
     // Host serving the export. The mount step builds `address:/` from it, because `fsid=0`
     // in the export makes the share the NFSv4 pseudo root: clients mount the server root
@@ -1909,6 +1930,15 @@ export interface KnowledgeCaller {
   departmentPathCodes?: string[]
   /** The organization path's display names, index-aligned with the codes. */
   departmentPathNames?: string[]
+  /**
+   * DataOps permission keys resolved for the caller by `/auth/me`.
+   *
+   * Used by product defaults that must follow the existing permission model
+   * (for example the administrator memory default). Authorization decisions
+   * still go through the backend; this is the projection the plugin already
+   * receives, not a second policy source.
+   */
+  permissions?: string[]
 }
 
 /**
@@ -2030,7 +2060,7 @@ export async function fetchCaller(ctx: Context, config: Config): Promise<Knowled
   // empty because there are no roles -- a surface that renders role names must not invent
   // one for a deployment that has none.
   if (!isTeamDeployment(config)) {
-    return { userId: LOCAL_USER_ID, label: '本地用户', roleCodes: [] }
+    return { userId: LOCAL_USER_ID, label: '本地用户', roleCodes: [], permissions: [] }
   }
   const body = await request<Record<string, unknown>>(ctx, config, ENDPOINTS.me)
   // The route answers `{ user: {...} }`, not the profile at the top level. Read
@@ -2049,6 +2079,12 @@ export async function fetchCaller(ctx: Context, config: Config): Promise<Knowled
       .map(role => (role as Record<string, unknown>).code)
       .filter((code): code is string => typeof code === 'string' && code !== '')
     : []
+  // `/auth/me` carries the caller's resolved permission keys. Product defaults
+  // that must follow the existing principal model (the administrator memory
+  // default) read this list instead of hard-coding role names.
+  const permissions = Array.isArray(profile.permissions)
+    ? profile.permissions.filter((key): key is string => typeof key === 'string' && key !== '')
+    : []
   let department = readDepartmentOf(profile.department)
   // Older deployments answer /auth/me with the leaf department only. Recover the chain
   // from the catalogue this plugin already reads for grant subjects, so the department
@@ -2064,6 +2100,7 @@ export async function fetchCaller(ctx: Context, config: Config): Promise<Knowled
     userId,
     label,
     roleCodes,
+    permissions,
     ...(department === undefined
       ? {}
       : {
@@ -3035,8 +3072,16 @@ export function permissionForKbRoute(method: string): string | undefined {
   // Memory management is a product surface over the caller's own personal tree:
   // reading the page needs read, correcting needs write, forgetting needs delete.
   if (method === 'memory.list' || method === 'memory.get' || method === 'memory.settings') return 'kb:file:read'
-  if (method === 'memory.update' || method === 'memory.set-enabled') return 'kb:file:write'
+  if (method === 'memory.update' || method === 'memory.set-enabled' || method === 'memory.save-settings') return 'kb:file:write'
   if (method === 'memory.forget') return 'kb:file:delete'
+  // Promotion is a review action: the shared list stays a normal read, while the
+  // three management methods require the review capability. A department
+  // administrator holds `kb:review:decide` but not `kb:config:manage`; the route
+  // then narrows further to the departments that principal actually reviews.
+  if (method === 'memory.shared') return 'kb:file:read'
+  if (method === 'memory.promote' || method === 'memory.promotions' || method === 'memory.review-promotion') {
+    return 'kb:review:decide'
+  }
   if (method === 'index' || method === 'extract.retry') return 'kb:file:extract'
   if (method === 'index.status') return 'kb:file:read'
   if (method === 'audit.list') return 'kb:audit:read'
@@ -6595,7 +6640,8 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
           case 'memory.update':
           case 'memory.forget':
           case 'memory.settings':
-          case 'memory.set-enabled': {
+          case 'memory.set-enabled':
+          case 'memory.save-settings': {
             // The memory page manages ONLY the caller's own personal tree. Identity
             // comes from the request (never the body); the stores are built from the
             // same `<actualRoot>/personal/<userId>` root the guardian writes.
@@ -6605,13 +6651,83 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
             }
             const body = await readJsonBody(req)
             const personalScope = personalScopeRootFor(caller.userId)
+            // First-read default for the administrator: use the existing DataOps
+            // permission projection already resolved for this request. No role
+            // name is hard-coded here, and an explicit setting in the user's
+            // settings.json is read before this default is considered.
+            const defaultEnabled = config.memoryDefaultEnabledPermission.trim() !== ''
+              && (caller.permissions ?? []).includes(config.memoryDefaultEnabledPermission)
             const result = await handleMemoryRoute({
               method,
               body,
               caller: { userId: caller.userId, ...(caller.label === undefined ? {} : { label: caller.label }) },
               store: new MemoryStore(join(personalScope, PERSONAL_MEMORY_FOLDER)),
               settings: new MemorySettingsStore(memoryUsersRoot),
+              defaultEnabled,
               graphWriter: new MemoryGraphWriter({ scopeRoot: personalScope }),
+            })
+            return writeJson(res, result.status, result.body)
+          }
+          case 'memory.promote':
+          case 'memory.promotions':
+          case 'memory.review-promotion':
+          case 'memory.shared': {
+            // Promotion crosses the personal boundary, so it needs the review
+            // projection rather than the personal-page caller. DataOps remains the
+            // authority for the target read/write decision; the projection only
+            // narrows which queue a caller sees and answers 403 with a reason.
+            const caller = await fetchCaller(host, config)
+            if (!isSafeUserId(caller.userId)) {
+              return writeJson(res, 400, { error: 'unsafe caller id; memory is scoped to the authenticated user' })
+            }
+            let reviewContext: Awaited<ReturnType<typeof managementHost.context>> | undefined
+            if (isTeamDeployment(config)) {
+              reviewContext = await managementHost.context()
+            }
+            const reviewer = reviewContext === undefined
+              // A personal deployment has one operator and no grants; the local
+              // owner is the reviewer by construction, and there is no department.
+              ? {
+                  userId: caller.userId,
+                  name: caller.label ?? caller.userId,
+                  isGlobalAdmin: true,
+                  canManageConfig: true,
+                  reviewDepartments: [] as string[],
+                  visibleDepartmentCodes: [] as string[],
+                }
+              : {
+                  userId: caller.userId,
+                  name: caller.label ?? caller.userId,
+                  // Do NOT reuse managementTools.isGlobalAdmin here: it treats a broad
+                  // data scope as platform administration. A department administrator
+                  // can report `dataScope.all` while `review.canReviewGlobal` is false
+                  // (MASTER E12 found the same amplification), and promotion must not
+                  // turn that into authority over every department's review queue.
+                  isGlobalAdmin: reviewContext.review.canReviewGlobal === true
+                    || reviewContext.roleCodes.some(code => code === 'SUPER_ADMIN' || code === 'ADMIN'),
+                  canManageConfig: hasPermission(reviewContext, 'kb:config:manage'),
+                  ...(caller.departmentCode === undefined ? {} : { departmentCode: caller.departmentCode }),
+                  ...(caller.departmentName === undefined ? {} : { departmentName: caller.departmentName }),
+                  ...(caller.departmentPathCodes === undefined
+                    ? (reviewContext.departmentPathCodes === undefined
+                        ? {}
+                        : { departmentPathCodes: [...reviewContext.departmentPathCodes] })
+                    : { departmentPathCodes: [...caller.departmentPathCodes] }),
+                  reviewDepartments: [...reviewContext.review.departments],
+                  visibleDepartmentCodes: [...reviewContext.dataScope.departmentCodes],
+                }
+            const body = await readJsonBody(req)
+            const personalScope = personalScopeRootFor(caller.userId)
+            const result = await handleMemoryPromotionRoute({
+              method,
+              body,
+              actor: { id: caller.userId, name: caller.label ?? caller.userId },
+              reviewer,
+              store: new MemoryStore(join(personalScope, PERSONAL_MEMORY_FOLDER)),
+              queuePath: promotionStorePath(memoryUsersRoot),
+              actualRoot: localConfig(config).actualRoot,
+              canWrite: relPath => canWritePath(host, config, relPath),
+              canRead: relPath => canReadPath(host, config, relPath),
             })
             return writeJson(res, result.status, result.body)
           }
@@ -8062,7 +8178,52 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       ? join(localConfig(config).actualRoot, '.memory', 'users')
       : resolveStorageRoot(configured)
   })()
-  const memorySettings = new MemorySettingsStore(memoryUsersRoot)
+  // The store itself has no notion of an administrator. The host injects the
+  // existing DataOps permission projection here, so guardian/tool callers see
+  // the same first-read default as the settings page without the KB package
+  // hard-coding a role name.
+  const memorySettings = new MemorySettingsStore(memoryUsersRoot, {
+    memoryEnabled: async (userId) => {
+      const permission = config.memoryDefaultEnabledPermission.trim()
+      if (permission === '' || !isTeamDeployment(config)) return false
+      try {
+        const caller = await fetchCaller(host, config)
+        return caller.userId === userId && (caller.permissions ?? []).includes(permission)
+      } catch {
+        // A principal lookup failure is a paused default, never an opt-in.
+        return false
+      }
+    },
+  })
+  const personalScopeRootFor = (userId: string): string => {
+    if (!isSafeUserId(userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
+    return join(localConfig(config).actualRoot, 'personal', userId)
+  }
+  /**
+   * Load the department/global shared-memory graphs the caller may read.
+   *
+   * A promotion writes `<scope>/记忆共享/<id>.md` and
+   * `<scope>/.graphs/shared-memory/graph.json` beside the `知识图谱` folder, so the
+   * ordinary graph-tab loader never sees it. The scope list is the caller's own
+   * department chain plus `global` — never a sibling department — and DataOps
+   * `canRead` is asked once for each scope root, the same gate `memory.shared`
+   * uses. An absent graph or an unreadable manifest is normal and skips the scope.
+   */
+  const loadSharedMemoryGraphs = async (): Promise<LoadedGraph[]> => {
+    const caller = await fetchCaller(host, config)
+    if (!isSafeUserId(caller.userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
+    const actualRoot = localConfig(config).actualRoot
+    const graphs: LoadedGraph[] = []
+    for (const scope of sharedMemoryScopeRoots(caller)) {
+      if (!await canReadPath(host, config, scope.relPath)) continue
+      try {
+        graphs.push(await loadGraph(join(actualRoot, scope.relPath), SHARED_MEMORY_GRAPH_ID))
+      } catch {
+        // No shared memory has been promoted in this scope yet; that is not an error.
+      }
+    }
+    return graphs
+  }
   const memoryToolHost: MemoryToolHost = {
     resolveCaller: async () => {
       const caller = await managementHost.context()
@@ -8084,6 +8245,12 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       }
     },
     usersRoot: memoryUsersRoot,
+    // The caller's own MemoryStore tree. `memory_record` writes here without a
+    // binding, so `memory_context` must read it directly to see new memories.
+    personalMemoryRoot: viewer => join(
+      personalScopeRootFor(viewer.userId),
+      PERSONAL_MEMORY_FOLDER,
+    ),
     loadGraphs: async () => {
       const caller = await fetchCaller(host, config)
       if (!isSafeUserId(caller.userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
@@ -8091,6 +8258,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
       const sets = await loadGraphJsonScopeSets(host, config, roots, caller.userId)
       return sets.flatMap(set => set.graphs)
     },
+    loadSharedGraphs: async () => loadSharedMemoryGraphs(),
     canManage: async () => {
       const caller = await managementHost.context()
       return hasPermission(caller, 'kb:config:manage')
@@ -8104,11 +8272,6 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
     const dshHome = (process.env.DSH_HOME ?? '').trim()
     return join(dshHome !== '' ? dshHome : join(homedir(), '.dsh'), 'skills')
   })()
-  const personalScopeRootFor = (userId: string): string => {
-    if (!isSafeUserId(userId)) throw new KnowledgeToolError('forbidden', 'unsafe caller id')
-    return join(localConfig(config).actualRoot, 'personal', userId)
-  }
-
   // Guardian runtime: a standard-mode DSH agent (no custom preset). The state
   // file is the identity; the title is display-only. `ctx.agentLoop` is the real
   // AgentFactory in this release (`ctx.agents` only carries the registry).
@@ -8169,6 +8332,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
   const guardianSessionHost: GuardianSessionHost = {
     usersRoot: memoryUsersRoot,
     cwd: process.cwd(),
+    timeoutMs: DEFAULT_GUARDIAN_TIMEOUT_MS,
     getAgent: sessionId => guardianRegistry?.get(sessionId),
     createAgent: async ({ sessionId, cwd, title }) => {
       if (guardianLoop === undefined) throw new Error('the DSH agent loop is not available')

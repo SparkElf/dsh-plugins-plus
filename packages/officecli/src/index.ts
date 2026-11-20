@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
@@ -9,10 +10,13 @@ import {
   formatStylePackList,
   listStylePacks,
 } from './style-packs.js'
+import { bundledSkillText, createSkillProviders } from './skills.js'
+import { startOfficeKitBridge } from './office-kit-bridge.js'
 
 const require = createRequire(import.meta.url)
 const officecli = require('@officecli/officecli') as { binaryPath(): string }
 const OFFICECLI_BINARY = officecli.binaryPath()
+const PDF_EXPORTER = fileURLToPath(new URL('../plugins/officecli-pdf/officecli-pdf', import.meta.url))
 
 interface OfficeCliResult {
   stdout: string
@@ -32,9 +36,14 @@ interface CreateCommand {
 /** 在当前 Harness 进程世界执行官方 OfficeCLI argv，并保留其原始输出。 */
 function runOfficeCli(command: string[], signal: AbortSignal): Promise<OfficeCliResult> {
   return new Promise((resolve, reject) => {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      // The package carries its exporter; pointing OfficeCLI at it works without a system install.
+      OFFICECLI_PLUGIN_EXPORTER_PDF: PDF_EXPORTER,
+    }
     const child = spawn(OFFICECLI_BINARY, command, {
       cwd: process.cwd(),
-      env: process.env,
+      env,
       signal,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -142,6 +151,9 @@ async function releaseResident(file: string, signal: AbortSignal): Promise<void>
 }
 
 async function executeCreate(command: string[], signal: AbortSignal): Promise<OfficeCliResult> {
+  const bundled = bundledSkillText(command)
+  if (bundled !== undefined) return { stdout: bundled, stderr: '' }
+
   const parsed = parseCreateCommand(command)
   if (parsed === null || wantsHelp(command)) return runOfficeCli(command, signal)
 
@@ -188,13 +200,20 @@ const output = {
 } as const
 
 export const name = 'officecli'
-export const inject = ['tools']
+export const inject = ['tools', 'skills']
 
 /** 注册 OfficeCLI 工具；命令语义继续由官方二进制定义。 */
 export function apply(ctx: Context): void {
+  // The exporter is a separate OfficeCLI child process; this loopback bridge lends it the
+  // Host's officeKit converter. It is idempotent, resolves officeKit per request, and a
+  // missing service only fails an export, never skill/tool registration.
+  // A bare test context has no lifecycle; only a real Host owns the bridge's listener.
+  if (typeof ctx.effect === 'function') startOfficeKitBridge(ctx)
+  for (const provider of createSkillProviders()) ctx.skills.registerProvider(() => provider)
+
   ctx.tools.register(defineTool({
     name: 'officecli',
-    description: 'Run the official OfficeCLI binary to create, read, validate, and modify original DOCX, XLSX, or PPTX files. Pass a pre-split argv array without the leading officecli command. `create` of a .docx defaults to the gbt9704-2012 style-pack template (GB/T 9704-2012 page geometry, fonts, black headings); pass --style-pack <name> to switch, or --minimal for the raw Word baseline. Before editing, call load_skill with word, excel, or pptx and use help for element schemas. Use absolute workspace file paths. Do not create HTML, PNG, PDF, or Univer preview copies. End a completed workflow with save and include each original file path in the final response.',
+    description: 'Run the official OfficeCLI binary to create, read, validate, and modify original DOCX, XLSX, or PPTX files. Pass a pre-split argv array without the leading officecli command. `create` of a .docx defaults to the gbt9704-2012 style-pack template (GB/T 9704-2012 page geometry, fonts, black headings); pass --style-pack <name> to switch, or --minimal for the raw Word baseline. Before editing, load the matching bundled skill (`word`, `excel`, `pptx`, or a scene skill such as `data-dashboard` / `financial-model`) through the DSH skill loader; `officecli load_skill` is answered with the same Wanxiang-customized text. Use help for element schemas. Use absolute workspace file paths. Do not create HTML, PNG, PDF, or Univer preview copies. End a completed workflow with save and include each original file path in the final response.',
     parameters: {
       command: {
         type: 'array',
@@ -218,10 +237,10 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'officecli-create',
-    description: 'Create a blank DOCX from an OfficeCLI style-pack template, then edit it with the officecli tool. Default style pack gbt9704-2012 (GB/T 9704-2012: A4, 37/35/28/26 mm margins, 3号仿宋 body, 2号小标宋 title, black Heading 1–6/Title, 22 lines × 28 chars, page-number footer). Use --style-pack red-header for 红头文件. This is the preferred create path for Chinese government and ordinary Word documents; use officecli create only for xlsx/pptx or an explicit --minimal raw baseline.',
+    description: 'Create a blank DOCX from an OfficeCLI style-pack template, then edit it with the officecli tool. Default style pack gbt9704-2012 (GB/T 9704-2012: A4, 37/35/28/26 mm margins, 3号仿宋 body, 2号小标宋 title, black Heading 1–6/Title, 22 lines × 28 chars, page-number footer). Use --style-pack red-header for 红头文件. This is the preferred create path for Chinese government and ordinary Word documents: default gbt9704-2012, --style-pack gbt9704-letter for 函, --style-pack gbt9704-minutes for 纪要, --style-pack red-header for 红头文件. Use officecli create only for xlsx/pptx or an explicit --minimal raw baseline.',
     parameters: {
       file: { type: 'string', description: 'Absolute (or workspace-relative) .docx path to create.' },
-      style_pack: { type: 'string', description: `Style pack name; defaults to ${DEFAULT_STYLE_PACK}.` },
+      style_pack: { type: 'string', description: `Style pack name: gbt9704-2012 (default), gbt9704-letter for 函, gbt9704-minutes for 纪要, red-header for 红头.` },
       force: { type: 'boolean', description: 'Overwrite an existing file. Default false.' },
       list: { type: 'boolean', description: 'List installed style packs instead of creating a file.' },
     },

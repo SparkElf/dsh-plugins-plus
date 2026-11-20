@@ -7,9 +7,12 @@ import type { GraphViewer } from '../src/graphPolicy.ts'
 import type { PersonalBinding } from '../src/memoryBindings.ts'
 import {
   SYSTEM_POLICY_MARKER,
+  renderMemoryContextMarkdown,
   resolveMemoryContext,
   type MemoryContextResult,
 } from '../src/memoryContext.ts'
+import { MemoryStore } from '../src/memoryStore.ts'
+import { memoryEntryTitle } from '../src/memoryDisplay.ts'
 
 const NOW = '2026-11-12T10:00:00.000Z'
 
@@ -439,5 +442,623 @@ describe('memory context resolver', () => {
       from: 'node-b',
       to: 'node-c',
     })
+  })
+})
+describe('personal memory store context', () => {
+  const roots: string[] = []
+
+  afterEach(async () => {
+    await Promise.all(roots.map(root => rm(root, { recursive: true, force: true })))
+    roots.length = 0
+  })
+
+  async function personalFixture(): Promise<{
+    root: string
+    usersRoot: string
+    memoryRoot: string
+    store: MemoryStore
+  }> {
+    const root = await mkdtemp(join(tmpdir(), 'kb-memory-personal-'))
+    roots.push(root)
+    const usersRoot = join(root, 'users')
+    const memoryRoot = join(root, 'personal', 'u1', '个人记忆图谱')
+    const store = new MemoryStore(memoryRoot, { now: () => new Date(NOW) })
+    return { root, usersRoot, memoryRoot, store }
+  }
+
+  async function seedFour(store: MemoryStore): Promise<Record<string, string>> {
+    const preference = await store.upsertPreference({
+      type: 'preference',
+      topic: '反诈分析',
+      value: '先给结论，再列关键证据',
+      displayTitle: '反诈分析先结论后证据',
+      privacy: 'normal',
+      origin: 'explicit',
+      sourceLabel: '会话「反诈分析先结论后证据」中的显式要求',
+    })
+    const pitfall = await store.upsertPitfall({
+      type: 'pitfall',
+      errorSignature: '文件写入路径错误',
+      context: '写入临时目录失败',
+      solution: '先校验目录再写入',
+      privacy: 'normal',
+      origin: 'auto',
+    })
+    const fact = await store.upsertFact({
+      type: 'fact',
+      factKind: 'decision',
+      key: '指标口径',
+      statement: '先查上游再下结论',
+      scope: '指标排查',
+      privacy: 'normal',
+      origin: 'explicit',
+    })
+    const sop = await store.writeSop({
+      type: 'sop',
+      title: '每日检查',
+      trigger: '每天一次',
+      steps: ['读取会话', '合并候选'],
+      privacy: 'normal',
+      origin: 'auto',
+      status: 'testing',
+    })
+    const episodic = await store.appendLog({
+      type: 'episodic',
+      summary: '完成记忆上下文验收',
+      privacy: 'normal',
+      origin: 'auto',
+    })
+    return {
+      preference: preference.id,
+      pitfall: pitfall.id,
+      fact: fact.id,
+      sop: sop.sop.id,
+      episodic: episodic.id,
+    }
+  }
+
+  it('returns the caller\'s current MemoryStore entries with no binding at all', async () => {
+    const fixture = await personalFixture()
+    const ids = await seedFour(fixture.store)
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+    })
+
+    expect(result.personalCount).toBe(5)
+    expect(result.entries.map(entry => entry.type)).toEqual([
+      'preference',
+      'pitfall',
+      'fact',
+      'sop',
+      'episodic',
+    ])
+    for (const entry of result.entries) {
+      expect(entry).toMatchObject({
+        mode: 'personal',
+        graphId: 'personal-memory',
+        sourceType: 'entry',
+        authority: 'advisory',
+        status: 'active',
+        nonOverridable: false,
+      })
+      expect(entry.privacy).toBe('normal')
+    }
+
+    const preference = result.entries.find(entry => entry.sourceId === ids.preference)!
+    expect(preference.title).toBe('反诈分析先结论后证据')
+    expect(preference.body).toContain('topic: 反诈分析')
+    expect(preference.body).toContain('先给结论，再列关键证据')
+    expect(preference.path).toBe('偏好.md')
+
+    const pitfall = result.entries.find(entry => entry.sourceId === ids.pitfall)!
+    expect(pitfall.title).toBe('文件写入路径错误')
+    expect(pitfall.body).toContain('solution: 先校验目录再写入')
+
+    const sop = result.entries.find(entry => entry.sourceId === ids.sop)!
+    expect(sop.sourceVersion).toBe(1)
+    expect(sop.body).toContain('status: testing')
+    expect(sop.body).toContain('1. 读取会话')
+  })
+
+  it('keeps bindings and personal memory together, deduped by id and content', async () => {
+    const fixture = await makeFixture()
+    roots.push(fixture.root)
+    const memoryRoot = join(fixture.root, 'personal', 'u1', '个人记忆图谱')
+    const store = new MemoryStore(memoryRoot, { now: () => new Date(NOW) })
+
+    // Same id as the binding source id: the binding wins and the copy is skipped.
+    await store.upsertPreference({
+      id: 'node-a',
+      type: 'preference',
+      topic: '采购',
+      value: 'binding duplicate',
+      privacy: 'normal',
+    })
+    // Two daily-log entries with identical content: only one is injected.
+    await store.appendLog({
+      type: 'episodic',
+      summary: '重复的情景',
+      privacy: 'normal',
+      origin: 'auto',
+    })
+    await store.appendLog({
+      type: 'episodic',
+      summary: '重复的情景',
+      privacy: 'normal',
+      origin: 'auto',
+    })
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+      bindings: [binding({ sourceType: 'node', sourceId: 'node-a', mode: 'subscribe' })],
+      personalMemoryRoot: memoryRoot,
+    })
+
+    expect(result.entries.map(entry => entry.sourceId)).toEqual(['node-a', expect.any(String)])
+    expect(result.entries[0]?.mode).toBe('subscribe')
+    expect(result.entries[1]?.mode).toBe('personal')
+    expect(result.entries[1]?.body).toContain('重复的情景')
+    expect(result.entries.filter(entry => entry.body.includes('binding duplicate'))).toHaveLength(0)
+    expect(result.entries.filter(entry => entry.body.includes('重复的情景'))).toHaveLength(1)
+  })
+
+  it('skips a superseded value that is still present in the daily log', async () => {
+    const fixture = await personalFixture()
+    const old = await fixture.store.appendLog({
+      id: 'mem-old-preference',
+      type: 'preference',
+      topic: '汇报',
+      value: '先讲过程',
+      privacy: 'normal',
+    })
+    await fixture.store.upsertPreference({
+      type: 'preference',
+      topic: '汇报',
+      value: '先讲结论',
+      privacy: 'normal',
+      supersedes: old.id,
+    })
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+    })
+
+    expect(result.entries.some(entry => entry.sourceId === old.id)).toBe(false)
+    expect(result.entries.some(entry => entry.body.includes('先讲过程'))).toBe(false)
+    expect(result.entries.some(entry => entry.body.includes('先讲结论'))).toBe(true)
+  })
+
+  it('honours the character budget and never returns a personal entry as a redline', async () => {
+    const fixture = await personalFixture()
+    await seedFour(fixture.store)
+
+    const wide = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+    })
+    const preference = wide.entries.find(entry => entry.type === 'preference')!
+
+    const tight = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+      maxChars: preference.chars,
+    })
+    expect(tight.entries.map(entry => entry.type)).toEqual(['preference'])
+    expect(tight.charCount).toBe(preference.chars)
+    expect(tight.dropped.length).toBe(wide.entries.length - 1)
+    expect(tight.dropped.every(drop => drop.reason === 'budget')).toBe(true)
+    expect(tight.redlineCount).toBe(0)
+    expect(tight.systemPolicy).toBe('')
+
+    const zero = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+      maxChars: 0,
+    })
+    expect(zero.entries).toEqual([])
+    expect(zero.dropped).toHaveLength(wide.entries.length)
+  })
+
+  it('keeps a department redline above personal memory and never drops the redline', async () => {
+    const fixture = await makeFixture()
+    roots.push(fixture.root)
+    const memoryRoot = join(fixture.root, 'personal', 'u1', '个人记忆图谱')
+    const store = new MemoryStore(memoryRoot, { now: () => new Date(NOW) })
+    await seedFour(store)
+
+    const zero = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+      bindings: [binding({ sourceType: 'node', sourceId: 'node-c', mode: 'subscribe' })],
+      personalMemoryRoot: memoryRoot,
+      maxChars: 0,
+    })
+    expect(zero.entries).toHaveLength(1)
+    expect(zero.entries[0]).toMatchObject({
+      sourceId: 'node-c',
+      mode: 'subscribe',
+      authority: 'redline',
+      nonOverridable: true,
+    })
+    expect(zero.personalCount).toBe(0)
+    expect(zero.systemPolicy).toBe(SYSTEM_POLICY_MARKER)
+    expect(zero.dropped.every(drop => drop.mode === 'personal')).toBe(true)
+  })
+
+  it('never exposes sensitive or secret entries, or another user\'s tree', async () => {
+    const fixture = await personalFixture()
+    const sensitive = await fixture.store.upsertPreference({
+      type: 'preference',
+      topic: '联系方式',
+      value: '手机号 13800000000',
+      privacy: 'sensitive',
+      displayTitle: '联系方式',
+    })
+    const secret = await fixture.store.upsertFact({
+      type: 'fact',
+      factKind: 'clarification',
+      key: 'API Key',
+      statement: '使用凭据管理器里的 key',
+      privacy: 'secret',
+      credentialRef: 'DASHSCOPE_API_KEY',
+      displayTitle: '模型凭据',
+    })
+    const normal = await fixture.store.upsertPreference({
+      type: 'preference',
+      topic: '汇报',
+      value: '先讲结论',
+      privacy: 'normal',
+      displayTitle: '汇报先讲结论',
+    })
+
+    // A second user's tree exists next to the caller's tree; the resolver must
+    // only read the root the Host supplied for the authenticated caller.
+    const otherRoot = join(fixture.root, 'personal', 'u2', '个人记忆图谱')
+    const other = new MemoryStore(otherRoot, { now: () => new Date(NOW) })
+    await other.upsertPreference({
+      type: 'preference',
+      topic: 'secret-of-u2',
+      value: 'OTHER-USER-PRIVATE',
+      privacy: 'normal',
+      displayTitle: 'OTHER-USER-PRIVATE',
+    })
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+    })
+
+    expect(result.entries.map(entry => entry.sourceId)).toEqual([normal.id])
+    expect(result.entries.some(entry => entry.sourceId === sensitive.id)).toBe(false)
+    expect(result.entries.some(entry => entry.sourceId === secret.id)).toBe(false)
+    expect(result.entries.some(entry => entry.body.includes('OTHER-USER-PRIVATE'))).toBe(false)
+    expect(result.entries.some(entry => entry.body.includes('DASHSCOPE_API_KEY'))).toBe(false)
+    expect(result.entries.some(entry => entry.body.includes('13800000000'))).toBe(false)
+  })
+
+  it('drops a forgotten entry on the next resolve', async () => {
+    const fixture = await personalFixture()
+    const ids = await seedFour(fixture.store)
+
+    const before = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+    })
+    expect(before.entries.some(entry => entry.sourceId === ids.preference)).toBe(true)
+
+    await fixture.store.forgetEntry(ids.preference)
+    const after = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [],
+      personalMemoryRoot: fixture.memoryRoot,
+    })
+    expect(after.entries.some(entry => entry.sourceId === ids.preference)).toBe(false)
+    expect(after.personalCount).toBe(before.personalCount - 1)
+  })
+
+  it('stays bindings-only when no personal root is supplied', async () => {
+    const fixture = await makeFixture()
+    roots.push(fixture.root)
+    const memoryRoot = join(fixture.root, 'personal', 'u1', '个人记忆图谱')
+    const store = new MemoryStore(memoryRoot, { now: () => new Date(NOW) })
+    await store.upsertPreference({
+      type: 'preference',
+      topic: '汇报',
+      value: '先讲结论',
+      privacy: 'normal',
+    })
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+      bindings: [binding({ sourceType: 'node', sourceId: 'node-a', mode: 'subscribe' })],
+    })
+    expect(result.personalCount).toBe(0)
+    expect(result.entries.map(entry => entry.sourceId)).toEqual(['node-a'])
+  })
+})
+
+describe('shared memory context', () => {
+  const roots: string[] = []
+
+  afterEach(async () => {
+    await Promise.all(roots.map(root => rm(root, { recursive: true, force: true })))
+    roots.length = 0
+  })
+
+  interface SharedFixture {
+    root: string
+    usersRoot: string
+    scopeRoot: string
+    graph: LoadedGraph
+  }
+
+  async function sharedFixture(scope = 'department:D1'): Promise<SharedFixture> {
+    const root = await mkdtemp(join(tmpdir(), 'kb-memory-shared-'))
+    roots.push(root)
+    const usersRoot = join(root, 'users')
+    const scopeRoot = join(root, ...scope.replace(':', '/').split('/'))
+    await writeDocument(scopeRoot, '记忆共享/mp-1.md',
+      'id: mem-mp-1\ntitle: 部门周报结论先行\ntype: topic\nauthority: advisory\norigin: human\nreviewStatus: approved\nscope: ' + scope,
+      '部门周报先写结论，再列数据。')
+    const graph: LoadedGraph = {
+      manifest: manifest({
+        id: 'shared-memory',
+        name: '部门共享记忆',
+        scope,
+        version: 7,
+        visibility: scope === 'global' ? 'global' : 'department',
+      }),
+      root: scopeRoot,
+      nodes: [node('mem-mp-1', '记忆共享/mp-1.md', {
+        title: '部门周报结论先行',
+        type: 'topic',
+        authority: 'advisory',
+      })],
+      edges: [],
+      issues: [],
+    }
+    return { root, usersRoot, scopeRoot, graph }
+  }
+
+  it('injects approved shared memory as an advisory [SHARED] entry with its scope', async () => {
+    const fixture = await sharedFixture()
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+    })
+
+    expect(result.sharedCount).toBe(1)
+    const entry = result.entries[0]!
+    expect(entry.mode).toBe('shared')
+    expect(entry.sourceId).toBe('mem-mp-1')
+    expect(entry.authority).toBe('advisory')
+    expect(entry.nonOverridable).toBe(false)
+    expect(entry.scope).toBe('department:D1')
+    expect(entry.privacy).toBe('normal')
+    expect(entry.sourceVersion).toBe(7)
+
+    const rendered = renderMemoryContextMarkdown(result)
+    expect(rendered).toContain('## [SHARED] 部门周报结论先行')
+    expect(rendered).toContain('scope: department:D1')
+    expect(rendered).toContain('shared: 1')
+    expect(rendered).not.toContain(SYSTEM_POLICY_MARKER)
+  })
+
+  it('dedupes a shared node against a subscription by id and another shared document by content', async () => {
+    const fixture = await sharedFixture()
+    // The same node also has a legacy subscription binding: the live proxy wins.
+    await writeDocument(fixture.scopeRoot, '记忆共享/mp-2.md',
+      'id: mem-mp-2\ntitle: 部门周报结论先行\ntype: topic\nauthority: advisory\norigin: human\nreviewStatus: approved',
+      '部门周报先写结论，再列数据。')
+    fixture.graph.nodes.push(node('mem-mp-2', '记忆共享/mp-2.md', { title: '部门周报结论先行', type: 'topic' }))
+
+    const subscribed = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+      bindings: [binding({ sourceType: 'node', sourceId: 'mem-mp-1', graphId: 'shared-memory', mode: 'subscribe' })],
+    })
+    expect(subscribed.entries.map(entry => entry.mode)).toEqual(['subscribe'])
+
+    const duplicate = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+    })
+    expect(duplicate.sharedCount).toBe(1)
+  })
+
+  it('never injects sensitive or secret shared documents', async () => {
+    const fixture = await sharedFixture()
+    await writeDocument(fixture.scopeRoot, '记忆共享/mp-sensitive.md',
+      'id: mem-mp-sensitive\ntitle: 敏感部门记录\nauthority: advisory\nprivacy: sensitive',
+      '敏感正文：手机号 13800000000。')
+    await writeDocument(fixture.scopeRoot, '记忆共享/mp-secret.md',
+      'id: mem-mp-secret\ntitle: 凭据部门记录\nauthority: advisory\nprivacy: secret',
+      '凭据正文：credentialRef=kb-prod。')
+    fixture.graph.nodes.push(
+      node('mem-mp-sensitive', '记忆共享/mp-sensitive.md', { title: '敏感部门记录', type: 'topic' }),
+      node('mem-mp-secret', '记忆共享/mp-secret.md', { title: '凭据部门记录', type: 'topic' }),
+    )
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+    })
+    expect(result.entries.map(entry => entry.sourceId)).toEqual(['mem-mp-1'])
+    const rendered = renderMemoryContextMarkdown(result)
+    expect(rendered).not.toContain('13800000000')
+    expect(rendered).not.toContain('credentialRef')
+  })
+
+  it('omits a department shared graph the viewer cannot see', async () => {
+    const fixture = await sharedFixture('department:D2')
+    const result = await resolveMemoryContext({
+      viewer: viewer({ departmentCode: 'D1', visibleDepartmentCodes: ['D1'] }),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+    })
+    expect(result.sharedCount).toBe(0)
+    expect(renderMemoryContextMarkdown(result)).not.toContain('部门周报先写结论')
+  })
+
+  it('keeps department/global policy and shared memory while personal memory is paused', async () => {
+    const fixture = await makeFixture()
+    const shared = await sharedFixture()
+    roots.push(fixture.root)
+    const memoryRoot = join(fixture.root, 'personal', 'u1', '个人记忆图谱')
+    const store = new MemoryStore(memoryRoot, { now: () => new Date(NOW) })
+    await store.upsertPreference({
+      type: 'preference',
+      topic: '汇报',
+      value: '先讲结论',
+      privacy: 'normal',
+    })
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph, shared.graph],
+      // A redline subscription and a personal internalized copy of a department node.
+      bindings: [
+        binding({ sourceType: 'node', sourceId: 'node-c', mode: 'subscribe' }),
+        binding({ sourceType: 'node', sourceId: 'node-b', mode: 'internalize', localPath: 'memory/g1/node-b.md' }),
+      ],
+      personalMemoryRoot: memoryRoot,
+      paused: true,
+    })
+
+    const entryIds = result.entries.map(entry => entry.sourceId)
+    expect(entryIds).toContain('node-c')
+    expect(entryIds).not.toContain('node-b')
+    expect(result.personalCount).toBe(0)
+    expect(result.sharedCount).toBe(1)
+    const redline = result.entries.find(entry => entry.sourceId === 'node-c')!
+    expect(redline.nonOverridable).toBe(true)
+    expect(result.systemPolicy).toBe(SYSTEM_POLICY_MARKER)
+    const rendered = renderMemoryContextMarkdown(result)
+    expect(rendered).toContain('[REDLINE] 安全红线')
+    expect(rendered).toContain('[SHARED] 部门周报结论先行')
+    expect(rendered).not.toContain('本地内化正文')
+    expect(rendered).not.toContain('[PERSONAL]')
+  })
+
+  it('drops shared advisory memory before a canonical proxy or a redline', async () => {
+    const fixture = await makeFixture()
+    const shared = await sharedFixture()
+    roots.push(fixture.root)
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph, shared.graph],
+      bindings: [
+        binding({ sourceType: 'node', sourceId: 'node-a', mode: 'subscribe' }),
+        binding({ sourceType: 'node', sourceId: 'node-c', mode: 'subscribe' }),
+      ],
+      maxChars: 0,
+    })
+
+    expect(result.entries.map(entry => entry.sourceId)).toEqual(['node-c'])
+    expect(result.redlineCount).toBe(1)
+    expect(result.sharedCount).toBe(0)
+    expect(result.dropped.map(drop => drop.sourceId)).toContain('mem-mp-1')
+    expect(result.dropped.map(drop => drop.sourceId)).toContain('node-a')
+  })
+
+  it('marks a shared redline nonOverridable and never drops it for the budget', async () => {
+    const fixture = await sharedFixture()
+    await writeDocument(fixture.scopeRoot, '记忆共享/mp-redline.md',
+      'id: mem-mp-redline\ntitle: 部门安全红线\nauthority: redline\norigin: human\nreviewStatus: approved',
+      '红线正文：禁止外发部门数据。')
+    fixture.graph.nodes.push(
+      node('mem-mp-redline', '记忆共享/mp-redline.md', { title: '部门安全红线', type: 'policy', authority: 'redline' }),
+    )
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph],
+      maxChars: 0,
+    })
+    expect(result.entries.map(entry => entry.sourceId)).toEqual(['mem-mp-redline'])
+    expect(result.entries[0]!.nonOverridable).toBe(true)
+    expect(result.systemPolicy).toBe(SYSTEM_POLICY_MARKER)
+  })
+
+  it('orders redline, canonical, personal current memory, then shared advisory', async () => {
+    const fixture = await makeFixture()
+    const shared = await sharedFixture()
+    roots.push(fixture.root)
+    const memoryRoot = join(fixture.root, 'personal', 'u1', '个人记忆图谱')
+    const store = new MemoryStore(memoryRoot, { now: () => new Date(NOW) })
+    const preference = await store.upsertPreference({
+      type: 'preference',
+      topic: '汇报',
+      value: '先讲结论',
+      displayTitle: '汇报先讲结论',
+      privacy: 'normal',
+    })
+
+    const result = await resolveMemoryContext({
+      viewer: viewer(),
+      usersRoot: fixture.usersRoot,
+      userId: 'u1',
+      graphs: [fixture.graph, shared.graph],
+      bindings: [
+        binding({ sourceType: 'node', sourceId: 'node-a', mode: 'subscribe' }),
+        binding({ sourceType: 'node', sourceId: 'node-c', mode: 'subscribe' }),
+      ],
+      personalMemoryRoot: memoryRoot,
+    })
+    expect(result.entries.map(entry => entry.sourceId)).toEqual([
+      'node-c',
+      'node-a',
+      preference.id,
+      'mem-mp-1',
+    ])
   })
 })

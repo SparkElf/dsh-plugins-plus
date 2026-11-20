@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { RoomEvent, RoomMember } from '../src/backend.ts'
 import {
   isAgentReply,
+  isExternalAuthor,
   mentionsOf,
   messageId,
   senderId,
@@ -137,12 +138,25 @@ describe('shouldTriggerAgent', () => {
     expect(shouldTriggerAgent(humanEvent({ mentions: ['user-ghost'] }), ZHANG, members)).toBe(false)
   })
 
-  it('never re-triggers on an agent reply, which would echo forever', () => {
+  it('never triggers on an agent reply, which would echo forever', () => {
     const reply = humanEvent({ mentions: [ZHANG] })
     const source = (reply.data as Record<string, unknown>)['source'] as Record<string, unknown>
     source['authorKind'] = 'agent'
     expect(isAgentReply(reply)).toBe(true)
     expect(shouldTriggerAgent(reply, ZHANG, members)).toBe(false)
+  })
+
+  it('never runs an agent for an external author, even with a spoofed member id', () => {
+    // External channels have no DataOps account. A bridge that stamped this workspace's own
+    // member id on the event must still not make an external message look like a self-mention.
+    const forwarded = humanEvent({ sender: ZHANG, mentions: [ZHANG] })
+    const source = (forwarded.data as Record<string, unknown>)['source'] as Record<string, unknown>
+    source['authorKind'] = 'external'
+    source['senderExternal'] = { kind: 'wecom', senderId: 'zhangsan', senderName: '张三' }
+    expect(isExternalAuthor(forwarded)).toBe(true)
+    for (const policy of ['mention', 'always', 'never'] as const) {
+      expect(shouldTriggerAgent(forwarded, ZHANG, members, policy)).toBe(false)
+    }
   })
 })
 

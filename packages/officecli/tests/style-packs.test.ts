@@ -9,7 +9,21 @@ interface RegisteredTool {
   execute: (args: Record<string, unknown>, exec: { signal: AbortSignal }) => Promise<{ stdout: string; stderr: string }>
 }
 
+interface RegisteredSkillProvider {
+  name: string
+  list: () => Promise<readonly { name: string; description: string; source: string; resourceBase?: { kind: string; path: string } }[]>
+  get: (candidate: unknown) => Promise<{ name: string; content: string }>
+}
+
+interface RegisteredSkillCandidate {
+  name: string
+  description: string
+  source: string
+  resourceBase?: { kind: string; path: string }
+}
+
 const tools = new Map<string, RegisteredTool>()
+const providers = new Map<string, RegisteredSkillProvider>()
 const exec = { signal: new AbortController().signal }
 let root = ''
 let previousPacksDir: string | undefined
@@ -23,10 +37,16 @@ beforeAll(async () => {
   }
   previousPacksDir = process.env.OFFICECLI_STYLE_PACKS_DIR
   process.env.OFFICECLI_STYLE_PACKS_DIR = path.join(root, 'style-packs')
-  apply({
+  await apply({
     tools: {
       register(tool: RegisteredTool) {
         tools.set(tool.name, tool)
+      },
+    },
+    skills: {
+      registerProvider(factory: () => RegisteredSkillProvider) {
+        const provider = factory()
+        providers.set(provider.name, provider)
       },
     },
   } as never)
@@ -110,5 +130,64 @@ describe('officecli-create style packs', () => {
     await mkdir(path.join(root, 'style-packs', 'incomplete'), { recursive: true })
     const result = await tools.get('officecli-create')!.execute({ list: true }, exec)
     expect(result.stdout).not.toContain('incomplete')
+  })
+})
+describe('bundled OfficeCLI skills', () => {
+  it('registers the nine bundled skill providers', () => {
+    expect([...providers.keys()].sort()).toEqual([
+      'officecli-academic-paper',
+      'officecli-data-dashboard',
+      'officecli-excel',
+      'officecli-financial-model',
+      'officecli-morph-ppt',
+      'officecli-pitch-deck',
+      'officecli-pptx',
+      'officecli-word',
+      'officecli-word-form',
+    ])
+  })
+
+  it('serves each skill as bundled with its own resource directory', async () => {
+    const names: string[] = []
+    for (const provider of providers.values()) {
+      const [candidate] = await provider.list()
+      expect(candidate.source).toBe('bundled')
+      expect(candidate.description.length).toBeGreaterThan(20)
+      expect(candidate.resourceBase?.kind).toBe('directory')
+      expect(candidate.resourceBase?.path).toContain('/skills/')
+      names.push(candidate.name)
+    }
+    expect(names.sort()).toEqual([
+      'academic-paper', 'data-dashboard', 'excel', 'financial-model', 'morph-ppt',
+      'pitch-deck', 'pptx', 'word', 'word-form',
+    ])
+  })
+
+  it('applies the GB/T 9704 rule to the word skill', async () => {
+    const provider = providers.get('officecli-word')!
+    const [candidate] = await provider.list() as RegisteredSkillCandidate[]
+    const definition = await provider.get(candidate)
+    expect(definition.content).toContain('GB/T 9704-2012')
+    expect(definition.content).toContain('方正小标宋简体，二号（22pt）')
+    expect(definition.content).toContain('黑体（SimHei），三号（16pt）')
+    expect(definition.content).toContain('仿宋_GB2312（FangSong_GB2312），三号（16pt）')
+    expect(definition.content).toContain('禁止用 `officecli create`')
+  })
+
+  it('applies the Wanxiang brand rule to excel and pptx', async () => {
+    for (const key of ['officecli-excel', 'officecli-pptx']) {
+      const provider = providers.get(key)!
+      const [candidate] = await provider.list() as RegisteredSkillCandidate[]
+      const definition = await provider.get(candidate)
+      expect(definition.content).toContain('禁止默认 Calibri')
+      expect(definition.content).toContain('#2563EB')
+      expect(definition.content).toContain('微软雅黑')
+    }
+  })
+
+  it('answers officecli load_skill from the customized file', async () => {
+    const result = await tools.get('officecli')!.execute({ command: ['load_skill', 'word'] }, exec)
+    expect(result.stdout).toContain('name: word')
+    expect(result.stdout).toContain('GB/T 9704-2012')
   })
 })

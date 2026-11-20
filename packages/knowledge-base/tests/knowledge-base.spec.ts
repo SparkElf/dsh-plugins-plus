@@ -946,6 +946,8 @@ describe('per-user views', () => {
         // A profile with no roles yields an empty list rather than undefined, so the
         // grant-management check reads a definite answer instead of guessing.
         roleCodes: [],
+        // Same for the permission projection used by product defaults.
+        permissions: [],
       })
     } finally {
       // The stub must not outlive this case: the SSH transport block below uses the
@@ -998,6 +1000,23 @@ describe('per-user views', () => {
     }
   })
 
+  it('reads the permission projection product defaults rely on', async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify({
+      user: {
+        id: 'u-admin',
+        displayName: 'Admin',
+        permissions: ['kb:config:manage', 'kb:file:read', 7],
+      },
+    }), { status: 200 })) as unknown as typeof fetch
+    const { ctx, disposers } = fakeHost({ token: 't', fetchImpl })
+    try {
+      const caller = await fetchCaller(ctx as never, CONFIG)
+      expect(caller.permissions).toEqual(['kb:config:manage', 'kb:file:read'])
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  })
+
   it('treats a malformed roles field as no roles rather than failing the profile', async () => {
     const fetchImpl = (async () => new Response(JSON.stringify({
       user: { id: 'u1', displayName: 'X', roles: 'not-an-array' },
@@ -1008,6 +1027,7 @@ describe('per-user views', () => {
         userId: 'u1',
         label: 'X',
         roleCodes: [],
+        permissions: [],
       })
     } finally {
       for (const dispose of disposers) dispose()

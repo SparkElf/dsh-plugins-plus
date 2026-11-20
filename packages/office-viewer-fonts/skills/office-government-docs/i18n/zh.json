@@ -1,8 +1,0 @@
-{
-  "_meta": {
-    "source": "manual"
-  },
-  "title": "政务文档制作",
-  "description": "用 OfficeCLI 创建和修改中文政务 DOCX、XLSX、PPTX 原件；适用于公文层级、版式排版、红头编排、公文字体、黑色标题、GB/T 9704-2012 样式包、校验与可点击原件交付。",
-  "summary": "通过 officecli-create 样式包包装器创建 DOCX，默认使用 gbt9704-2012（GB/T 9704-2012 版式：37/35/28/26mm 页边距、三号仿宋、二号小标宋、22×28 行字、黑色标题），红头文件切换 red-header；再用 officecli 批量编辑、检查层级样式、扫描标题颜色并用 validate 验收。"
-}

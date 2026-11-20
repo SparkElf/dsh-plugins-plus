@@ -44,6 +44,17 @@ export const senderId = (event: RoomEvent): string | undefined => {
 export const isAgentReply = (event: RoomEvent): boolean =>
   eventSource(event)?.['authorKind'] === 'agent'
 
+/**
+ * True when the event was forwarded from an external channel.
+ *
+ * Those authors have no DataOps account and no member row, so an event carrying their id must
+ * never be able to impersonate one — including the case where a bridge bug stamps this workspace's
+ * own member id on it. The check is on the declared author kind, which the server sets, not on the
+ * id shape.
+ */
+export const isExternalAuthor = (event: RoomEvent): boolean =>
+  eventSource(event)?.['authorKind'] === 'external'
+
 /** The global backend id carried on the event, used for local deduplication. */
 export const messageId = (event: RoomEvent): string | undefined => {
   const id = eventSource(event)?.['messageId']
@@ -111,6 +122,9 @@ export const shouldTriggerAgent = (
   // Settled before any per-message reasoning: under `never` a message that would
   // otherwise qualify still starts nothing.
   if (policy === 'never') return false
+  // An external author has no DataOps account. Even if a bridge stamped a member id on the
+  // event, the message is not that member speaking, so it can never run an agent.
+  if (isExternalAuthor(event)) return false
   const sender = senderId(event)
   if (sender === undefined || sender !== workspaceUserId) return false
   // An agent's own reply must never re-trigger an agent; that is an infinite echo, and

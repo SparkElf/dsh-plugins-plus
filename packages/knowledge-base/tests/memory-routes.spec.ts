@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -47,12 +47,14 @@ const call = (
   method: string,
   body: Record<string, unknown> = {},
   userId = 'u1',
+  options: { defaultEnabled?: boolean } = {},
 ): Promise<MemoryRouteResponse> => handleMemoryRoute({
   method,
   body,
   caller: { userId, label: userId },
   store: f.store,
   settings: f.settings,
+  ...(options.defaultEnabled === undefined ? {} : { defaultEnabled: options.defaultEnabled }),
   graphWriter: { syncAll: f.graphSync as never },
 })
 
@@ -271,21 +273,121 @@ describe('memory.forget', () => {
   })
 })
 
-describe('memory.settings / memory.set-enabled', () => {
-  it('defaults to paused and persists the per-user switch', async () => {
+describe('memory.settings / memory.set-enabled / memory.save-settings', () => {
+  const defaults = {
+    enabled: false,
+    consolidationIntervalMinutes: 60,
+    intervalMin: 15,
+    intervalMax: 1440,
+    intervalDefault: 60,
+  }
+
+  it('defaults to paused with a 60-minute interval and persists the per-user switch', async () => {
     const f = await fixture()
 
-    await expect(call(f, 'memory.settings')).resolves.toEqual({ status: 200, body: { enabled: false } })
+    await expect(call(f, 'memory.settings')).resolves.toEqual({ status: 200, body: defaults })
 
     const enabled = await call(f, 'memory.set-enabled', { enabled: true })
-    expect(enabled).toEqual({ status: 200, body: { enabled: true } })
+    expect(enabled).toEqual({ status: 200, body: { ...defaults, enabled: true } })
     expect(await f.settings.isEnabled('u1')).toBe(true)
     await expect(call(f, 'memory.list')).resolves.toMatchObject({ body: { enabled: true } })
 
     const paused = await call(f, 'memory.set-enabled', { enabled: false })
-    expect(paused).toEqual({ status: 200, body: { enabled: false } })
+    expect(paused).toEqual({ status: 200, body: { ...defaults, enabled: false } })
 
     await expect(call(f, 'memory.set-enabled', { enabled: 'yes' })).resolves.toMatchObject({ status: 400 })
+  })
+
+  it('saves the interval with the switch in one call and reads it back', async () => {
+    const f = await fixture()
+
+    const saved = await call(f, 'memory.save-settings', {
+      enabled: true,
+      consolidationIntervalMinutes: 30,
+    })
+    expect(saved).toEqual({
+      status: 200,
+      body: { ...defaults, enabled: true, consolidationIntervalMinutes: 30 },
+    })
+    await expect(call(f, 'memory.settings')).resolves.toEqual({
+      status: 200,
+      body: { ...defaults, enabled: true, consolidationIntervalMinutes: 30 },
+    })
+    expect(JSON.parse(await readFile(f.settings.filePath('u1'), 'utf8'))).toEqual({
+      version: 2,
+      memoryEnabled: true,
+      consolidationIntervalMinutes: 30,
+    })
+
+    // Saving only the interval preserves the switch.
+    const intervalOnly = await call(f, 'memory.save-settings', { consolidationIntervalMinutes: 90 })
+    expect(intervalOnly).toMatchObject({ body: { enabled: true, consolidationIntervalMinutes: 90 } })
+  })
+
+  it('accepts both interval boundaries and rejects out-of-range or non-integer values', async () => {
+    const f = await fixture()
+
+    await expect(call(f, 'memory.save-settings', { consolidationIntervalMinutes: 15 })).resolves.toMatchObject({
+      status: 200,
+      body: { consolidationIntervalMinutes: 15 },
+    })
+    await expect(call(f, 'memory.save-settings', { consolidationIntervalMinutes: 1440 })).resolves.toMatchObject({
+      status: 200,
+      body: { consolidationIntervalMinutes: 1440 },
+    })
+    for (const value of [14, 1441, 30.5, '30', Number.NaN]) {
+      const result = await call(f, 'memory.save-settings', { consolidationIntervalMinutes: value })
+      expect(result.status).toBe(400)
+      expect(result.body).toMatchObject({ code: 'invalid-interval', min: 15, max: 1440 })
+    }
+    // A rejected write leaves the previous value intact.
+    await expect(call(f, 'memory.settings')).resolves.toMatchObject({
+      body: { consolidationIntervalMinutes: 1440 },
+    })
+  })
+
+  it('applies the administrator default on the first read but never over an explicit false', async () => {
+    const f = await fixture()
+
+    await expect(call(f, 'memory.settings', {}, 'admin', { defaultEnabled: true })).resolves.toMatchObject({
+      status: 200,
+      body: { enabled: true },
+    })
+    // The default read did not create a file.
+    await expect(readFile(f.settings.filePath('admin'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const paused = await call(f, 'memory.set-enabled', { enabled: false }, 'admin', { defaultEnabled: true })
+    expect(paused).toMatchObject({ status: 200, body: { enabled: false } })
+
+    // Even after a fresh route process would apply the default again, the
+    // explicit file wins.
+    const fresh = new MemorySettingsStore(f.usersRoot)
+    expect(await fresh.isEnabled('admin', { defaultEnabled: true })).toBe(false)
+    await expect(call(f, 'memory.settings', {}, 'admin', { defaultEnabled: true })).resolves.toMatchObject({
+      body: { enabled: false },
+    })
+  })
+
+  it('leaves non-administrator first reads paused', async () => {
+    const f = await fixture()
+    await expect(call(f, 'memory.settings', {}, 'u1', { defaultEnabled: false })).resolves.toMatchObject({
+      body: { enabled: false },
+    })
+  })
+
+  it('rejects unknown fields, a body-supplied userId and empty writes', async () => {
+    const f = await fixture()
+    await expect(call(f, 'memory.save-settings', { enabled: true, userId: 'other' })).resolves.toMatchObject({
+      status: 400,
+    })
+    await expect(call(f, 'memory.save-settings', { surprise: 1 })).resolves.toMatchObject({
+      status: 400,
+      body: { code: 'invalid' },
+    })
+    await expect(call(f, 'memory.save-settings', {})).resolves.toMatchObject({
+      status: 400,
+      body: { code: 'invalid' },
+    })
   })
 
   it('keeps one user’s switch away from another user’s memory', async () => {
@@ -316,6 +418,14 @@ describe('caller safety and route permissions', () => {
     expect(permissionForKbRoute('memory.settings')).toBe('kb:file:read')
     expect(permissionForKbRoute('memory.update')).toBe('kb:file:write')
     expect(permissionForKbRoute('memory.set-enabled')).toBe('kb:file:write')
+    expect(permissionForKbRoute('memory.save-settings')).toBe('kb:file:write')
     expect(permissionForKbRoute('memory.forget')).toBe('kb:file:delete')
+    // Promotion is a review action, not a personal-page write. The department
+    // administrator's role holds kb:review:decide but not kb:config:manage, so the
+    // narrower route gate is the review capability; the handler then checks scope.
+    expect(permissionForKbRoute('memory.shared')).toBe('kb:file:read')
+    expect(permissionForKbRoute('memory.promote')).toBe('kb:review:decide')
+    expect(permissionForKbRoute('memory.promotions')).toBe('kb:review:decide')
+    expect(permissionForKbRoute('memory.review-promotion')).toBe('kb:review:decide')
   })
 })

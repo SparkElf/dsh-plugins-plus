@@ -104,31 +104,42 @@ describe('房间会话的模型选择', () => {
   })
 })
 
-describe('房间消息只能由官方路径写进会话', () => {
-  it('插件不自己 append surface，避免抢在 system/message 之前', () => {
+describe('房间消息写进会话的路径', () => {
+  it('成员消息仍由官方 driver 写 surface，插件不抢在 system/message 之前', () => {
     // 官方在 turn 里按固定顺序写 surface：先 `system/message`（agent-loop:1061），
     // 再 `user/message`（agent-loop:1072）。日志的第一个 surface 节点必须是那个受保护的
     // system/message —— 存储读取器一旦发现 surface 非空而 protectedHead 未设，就整份拒绝
     // （session-format-v3-to-v4:599「system/message requires a protected first surface head」）。
     //
-    // 插件曾经自己 append 一遍，于是 user/message 成了第一个 surface 节点，房间点进去
-    // 一律报「历史加载失败」。`followup` 本来就承诺「把这条消息变成它自己 turn 的唯一
-    // ordinary message」，所以那次 append 既是多余的、也是有害的。
-    expect(HOST).not.toMatch(/\.append\([^)]*surfaceOp/u)
+    // 插件曾经对成员消息自己 append 一遍，于是 user/message 成了第一个 surface 节点，房间
+    // 点进去一律报「历史加载失败」。成员消息由 `followup` 交给 driver，插件不再碰 surface。
+    expect(HOST).toContain('agent.followup(')
     expect(HOST).not.toContain('DynamicSessionAppend')
   })
 
-  it('走官方两条通道，由 driver 写 surface', () => {
-    // `followup` 会唤醒 driver 跑 turn（该回复），`inject` 只把消息放进上下文
-    //（不唤醒、不回复）。两条都由官方 driver 在 turn 内按正确顺序写 surface。
-    expect(HOST).toContain('agent.followup(')
-    expect(HOST).toContain('agent.inject(')
+  it('外部镜像消息只在 system/message 已存在时直接 append', () => {
+    // 外部消息不能交给 driver（它没有 DataOps 账号，也不该触发回答），但 `inject` 只在
+    // turn 的下一步写 surface，空闲时到达的消息会永远看不见。因此镜像行直接进日志，且必须
+    // 先确认受保护的 system/message 已经存在。
+    expect(HOST).toMatch(/hasSurfaceHead[\s\S]{0,300}system\/message/u)
+    expect(HOST).toMatch(/session\.append\('user\/message'[\s\S]{0,120}surfaceOp: 'append'/u)
+    const deliver = HOST.slice(HOST.indexOf('const deliverToAgent'))
+    expect(deliver).toMatch(/if \(!wake && authorKind === 'external'\)[\s\S]{0,700}enqueueRoomLine\(runtime, prompt\)/u)
   })
 
   it('未被 @ 的消息仍然进入会话，只是不触发回复', () => {
     // 只有被 @ 的消息才进会话，那就不是群聊了 —— agent 必须能读到它周围说的话。
-    // 官方 `inject` 的契约正是「queue model-facing context … without waking the driver」。
-    expect(HOST).toMatch(/if \(wake\) agent\.followup\(prompt\)\s*\n\s*else agent\.inject\(prompt\)/u)
+    // 非唤醒路径直接写日志（不经过 driver，因此不产生回答），唤醒路径才走 followup。
+    expect(HOST).toMatch(/agent\.followup\(prompt\)/u)
+    expect(HOST).toMatch(/if \(!wake && authorKind === 'external'\)[\s\S]{0,700}enqueueRoomLine\(runtime, prompt\)/u)
+  })
+
+  it('非唤醒投递在 turn 运行中先排队，避免被折进当前 turn 触发回答', () => {
+    // `inject` 在 turn 进行中进入的是该 turn 的下一步，模型会把镜像消息当成正在回答的
+    // 问题，于是外部群消息会“自问自答”。排队到 turn/end 再注入，消息仍进会话，但永不
+    // 唤醒 driver。
+    expect(HOST).toMatch(/const flushRoomLines[\s\S]{0,300}if \(runtime\.busy\) return/u)
+    expect(HOST).toMatch(/event\.type === 'turn\/end'[\s\S]{0,600}flushRoomLines\(runtime\)/u)
   })
 
   it('投递收到的是本条消息，而不是回读会话的最后一条事件', () => {

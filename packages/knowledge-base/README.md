@@ -23,7 +23,7 @@ index tooling over a mounted directory. Runs standalone or against a DataOps bac
 - 摘要变更：`src/summaryIndex.ts` 提供 sha256 快照、确定性父目录链 dirty 和只重算 dirty 文档的
   入口；`src/summaryWriteback.ts` 已接到索引流程，把 changed/added/removed 文档的确定性摘要写回
   `kb_docs`/SQLite 并按需重写 `index/md/<docId>.INDEX.md`（LLM 摘要不降级，快照最后原子写入）。
-- 运行时工具：`memory_context` 实时返回订阅代理、内化分支和红线（`nonOverridable`）；
+- 运行时工具：`memory_context` 实时返回订阅代理、内化分支、调用者自己的当前个人记忆、本部门/全局已晋升的共享记忆和红线（`nonOverridable`）；
   `memory_guardian_run` 手动跑一次守护会话（需 `kb:config:manage`）。插件同时注册一条常驻
   系统提示指令，要求模型在依赖部门口径/流程/红线时先调用 `memory_context`。
 - 图谱写入：`kg_get/kg_add/kg_set/kg_del` 对 `format: 'graph-json'` 的图谱读写
@@ -37,6 +37,78 @@ index tooling over a mounted directory. Runs standalone or against a DataOps bac
 - 触发：普通会话空闲 30 分钟后调 `memory_guardian_send`；压缩时监听 `compaction/start` 发消息；每日 dream。没有插件队列/空闲 cron，消息投递本身就是队列。
 - 守护会话用标准模式（不新增 preset），由 `users/<uid>/guardian.json` 记录 sessionId，懒创建；它读 `memory-guardian` 技能，派 `memory-extract` / `memory-sop-evaluate` 子代理。
 - 写入工具：`memory_record`（仅守护会话）写五类记忆；`memory_promote_sop` 把有效 SOP 晋升为 `$DSH_HOME/skills/<slug>/SKILL.md` 并删除 SOP。
+- 运行时读取（0.6.2）：记忆开启时 `memory_context` 直接读调用者自己的 `MemoryStore` 当前条目（偏好/踩坑/事实/SOP/情景），与 bindings 按 id/内容去重；`sensitive`/`secret` 不进入模型上下文，只留在记忆页。
+- 暂停语义（0.6.3）：暂停时不注入个人条目、个人图谱和 personal internalized 副本；部门/全局订阅、共享记忆和红线（`nonOverridable`）仍生效。
+
+## 记忆设置（0.6.0）
+
+- 记忆页同时管理开关和整理间隔：`memoryEnabled` 与 `consolidationIntervalMinutes`
+  （默认 60，允许 15–1440 的整数分钟）。
+- 设置仍写在 `<usersRoot>/<userId>/settings.json`，0.6.0 写入 `version: 2`；旧版
+  `{version:1,memoryEnabled}` 或手写 `{memoryEnabled}` 继续可读，缺失/损坏的 interval
+  回退 60，不会改变用户已经明确选择的开关。
+- 保存走一次 tmp+rename 原子写：`memory.save-settings` 接受 `enabled` 和/或
+  `consolidationIntervalMinutes`，只保存间隔时保留开关。`memory.settings` 返回
+  `enabled`、`consolidationIntervalMinutes`、`intervalMin`、`intervalMax`、
+  `intervalDefault`。
+- 首次读取默认：只有 `/auth/me` 的 `permissions` 含配置项
+  `memoryDefaultEnabledPermission`（默认 `kb:config:manage`，DataOps 中仅超管/管理员）
+  的主体才默认 `memoryEnabled: true`；其他新用户仍为 paused。默认只在没有 settings 文件
+  时生效，用户显式关闭写入的 `false` 永远优先。KB 包本身不硬编码角色名；部署可把该配置
+  指向更严格的权限键，或设为空字符串关闭管理员默认。
+- guardian/tool/trigger 与页面共用同一个默认策略；页面请求把本次请求已经解析的权限投影
+  直接传给 store，避免重复调用 DataOps。
+- `consolidationIntervalMinutes` 本轮只做校验、持久化和展示。现有触发模型是
+  idle/compaction/dream，没有按该间隔运行的调度器；把 interval 接到 dream/外部调度属于
+  下一阶段，不在本轮偷偷加一个 cron。
+
+### 未完成项（2026-11-18）
+
+- **Guardian**：`memory_context` / `memory_guardian_send` / `memory_guardian_run` 代码路径
+  已存在；本轮补了 30s 的会话解析/投递上限（`GuardianTimeoutError`，code=unreachable），
+  避免守护会话卡住时普通会话工具调用无限等待。守护会话模型回合本身的耗时仍由 DSH agent
+  运行时决定，本轮未重新跑完整 AI guardian E2E。
+- **SOP→技能**：`memory_promote_sop` 只有守护会话工具入口；它把有效 SOP 写成
+  `$DSH_HOME/skills/<slug>/SKILL.md` 后删除 SOP。该路径与下节的「记忆晋升到部门/全局」
+  是两件事，本轮未给前者增加产品页入口。
+- **部门/全局晋升**：已由 0.6.1 的 `memory.promote` / `memory.promotions` /
+  `memory.review-promotion` / `memory.shared` 落地（见下节）；撤回/降级、跨部门迁移和
+  技能归属策略仍未做。
+
+## 记忆晋升与部门/全局可见性（0.6.1）
+
+- 产品 API：`memory.promote` 把调用者**自己的**一条普通隐私记忆（含 SOP）晋升到
+  `department:<code>` 或 `global`。
+- 权限：全局目标要求 `kb:config:manage` + 平台管理员；部门目标要求该部门在
+  `review.departments` 内（部门管理员即可，不需要 `kb:config:manage`）。DataOps 的
+  `canWrite` 仍是目标路径的最终权威，投影与后端不一致时只会更窄。
+- 审核：默认创建 `pending` 记录，由**另一位**审核人通过；提交人自批返回 403
+  `SELF_APPROVAL_FORBIDDEN`。管理员可用 `confirm: true` 走「显式确认」直接生效，审计
+  记为 `confirmed`，与审核通过区分。
+- 隐私：仅 `privacy: normal` 可晋升；`private`/`sensitive`/`secret` 直接拒绝
+  （`PRIVACY_NOT_PROMOTABLE`），不会被降级后共享。
+- 落盘：通过后写 `<scope>/记忆共享/<promotion-id>.md` 并登记
+  `<scope>/.graphs/shared-memory/graph.json`；部门/全局列表按现有 KB 读写权限过滤，
+  响应中不含 `sourceUserId`、session id 或个人来源标签。
+- 队列：`<actualRoot>/.memory/promotions.json`（v1），记录 actor、source memory、target
+  graph、审核人、时间与逐步 audit。
+- UI：记忆页显示每条的「待审核/已晋升/已拒绝」状态；有审核权限时显示晋升审核队列
+  （自批按钮禁用并说明）；「部门和全局记忆」为只读表，不出现个人记忆的查看/纠正/忘记操作。
+
+## 共享记忆运行时注入（0.6.3）
+
+- `memory_context` 读取本部门链（`department/<chain>`）和 `global` 的
+  `.graphs/shared-memory/graph.json`，把 `记忆共享/<id>.md` 作为 `mode: shared` 条目注入，
+  不需要 binding。其他部门 scope 不会加载，`canViewGraph` 再按部门可见性拒绝。
+- 只注入 `privacy: normal/private` 且 `reviewStatus` 不是 `draft` 的共享文档；`sensitive`/`secret` 不进入模型上下文。
+- 共享条目保持文档的 `authority`（晋升写 `advisory`），排序低于 redline/canonical；
+  预算先丢共享/情景条目，红线永不丢。与 bindings、个人记忆按 id + 标题/正文指纹去重。
+- 读取前分别对 `global` 和本部门 scope root 调一次 DataOps `canRead`，与
+  `memory.shared` 列表使用同一个权限门。共享图缺失/损坏按空处理，不影响个人与红线。
+- 暂停个人记忆时共享记忆仍注入；个人 `MemoryStore`、personal 图谱和 internalized 副本
+  不注入。
+- 兼容：个人记忆文件、`settings.json` v1/v2 和既有 `memory.list` 契约不变；晋升是复制，
+  原个人记忆保留。
 
 ## 两种部署形态
 

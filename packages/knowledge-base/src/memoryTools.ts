@@ -3,8 +3,9 @@
  *
  * `memory_context` is read-only. It resolves the caller's personal binding
  * projection through {@link resolveMemoryContext}: live proxies for subscribed
- * sources, the user's own branch for internalized sources, redlines marked
- * non-overridable, and a deterministic budget. It never writes.
+ * sources, the user's own branch for internalized sources, the current entries
+ * of the user's own `MemoryStore`, redlines marked non-overridable, and a
+ * deterministic budget. It never writes.
  *
  * `memory_guardian_run` is the manual trigger for the guardian pass. It is a
  * maintenance action, not a read: it refreshes `sourceVersion`/`sourceCommit`,
@@ -41,8 +42,22 @@ export interface MemoryToolHost {
   resolveCaller(): Promise<GraphViewer>
   /** Root of `<usersRoot>/<userId>/bindings`; supplied by plugin configuration. */
   usersRoot: string
+  /**
+   * Absolute root of the caller's own personal `MemoryStore`
+   * (`<actualRoot>/personal/<userId>/个人记忆图谱`). The Host builds it from the
+   * authenticated user id; omitting it keeps a bindings-only context.
+   */
+  personalMemoryRoot?(viewer: GraphViewer): string
   /** Every graph the caller may read. Implementations must not return a denied graph. */
   loadGraphs(viewer: GraphViewer): Promise<LoadedGraph[]>
+  /**
+   * Department/global shared-memory graphs the caller may read (`shared-memory`
+   * under the caller's own department chain and the global scope).
+   *
+   * This is a separate seam from {@link loadGraphs} so the guardian pass keeps its
+   * existing graph scope: shared memory is runtime context, not a graph to bind.
+   */
+  loadSharedGraphs?(viewer: GraphViewer): Promise<LoadedGraph[]>
   /** Whether the caller holds the memory-management capability (`kb:config:manage`). */
   canManage(viewer: GraphViewer): Promise<boolean> | boolean
   /** Whether personal memory is enabled for this caller; a paused user gets no personal entries. */
@@ -113,11 +128,16 @@ const run = async (operation: () => Promise<Record<string, any>>): Promise<Recor
 function createMemoryContextTool(host: MemoryToolHost): ToolDefinition {
   return defineTool({
     name: 'memory_context',
-    description: 'Read the caller\'s personal memory context. Returns live proxies for subscribed department/global '
-      + 'memory sources, the caller\'s own internalized branches (marked stale/revoked when they diverged), and redline '
-      + 'policy entries marked nonOverridable. Permission-denied graphs are omitted. Ordering is deterministic and a '
-      + 'character budget drops advisory internalized memory before canonical or redline entries; redlines are never '
-      + 'dropped. Read-only: this tool never writes bindings or documents.',
+    description: 'Read the caller\'s memory context. Returns the caller\'s own remembered preferences, pitfalls, '
+      + 'facts, methods and recent episodic memory from the memory store, approved department/global shared memory '
+      + 'published for the caller\'s department (privacy normal/private only), live proxies for subscribed '
+      + 'department/global memory sources, the caller\'s own internalized branches (marked stale/revoked when they '
+      + 'diverged), and redline policy entries marked nonOverridable. Permission-denied graphs are omitted and other '
+      + 'users\' memory or other departments\' shared memory is never read. Ordering is deterministic and a character '
+      + 'budget drops shared/advisory and personal history before canonical or redline entries; redlines are never '
+      + 'dropped. When personal memory is paused, personal entries and internalized copies are omitted but '
+      + 'department/global policy, shared memory and redlines still apply. Read-only: this tool never writes bindings '
+      + 'or documents.',
     parameters: {
       format: { type: 'string', description: 'markdown (default) or json.' },
       maxChars: {
@@ -130,17 +150,34 @@ function createMemoryContextTool(host: MemoryToolHost): ToolDefinition {
       const viewer = await host.resolveCaller()
       const enabled = host.isMemoryEnabled === undefined ? true : await host.isMemoryEnabled(viewer)
       const allGraphs = await host.loadGraphs(viewer)
-      // Pausing personal memory must not disable department/global policy: drop
-      // personal graphs and personal bindings, keep the rest.
+      // Shared memory is published by the department/global scope, not learned by
+      // the user; pausing personal memory does not remove it (design §22.2 keeps
+      // department/global policy while personal memory is off).
+      // A shared-memory read failure must not hide department/global redlines or
+      // the caller's own memory: fail soft to an empty shared set.
+      const sharedGraphs = host.loadSharedGraphs === undefined
+        ? []
+        : await host.loadSharedGraphs(viewer).catch(() => [])
+      // Pausing personal memory drops personal graphs, personal internalized
+      // branches and the personal store root. Department/global subscriptions and
+      // shared memory remain, so a redline still applies (design §22.2).
       const graphs = enabled
-        ? allGraphs
-        : allGraphs.filter(graph => !(graph.manifest.scope ?? '').startsWith('personal:'))
+        ? [...allGraphs, ...sharedGraphs]
+        : [
+            ...allGraphs.filter(graph => {
+              const scope = graph.manifest.scope ?? ''
+              return scope !== 'personal' && !scope.startsWith('personal:')
+            }),
+            ...sharedGraphs,
+          ]
+      const personalMemoryRoot = enabled ? host.personalMemoryRoot?.(viewer) : undefined
       const context = await resolveMemoryContext({
         viewer,
         usersRoot: host.usersRoot,
         userId: viewer.userId,
         graphs,
-        ...(enabled ? {} : { bindings: [] }),
+        ...(enabled ? {} : { paused: true }),
+        ...(personalMemoryRoot === undefined ? {} : { personalMemoryRoot }),
         ...(args.maxChars === undefined ? {} : { maxChars: args.maxChars }),
       })
       const format: 'markdown' | 'json' = args.format === 'json' ? 'json' : 'markdown'

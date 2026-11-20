@@ -82,6 +82,13 @@ export interface GuardianSessionHost {
   usersRoot: string
   /** Absolute session cwd; defaults to the host process cwd. */
   cwd?: string
+  /**
+   * Optional bound for session resolution and message delivery.
+   *
+   * Omitted keeps the previous unbounded behavior for embedders that already
+   * impose their own timeout; the plugin passes {@link DEFAULT_GUARDIAN_TIMEOUT_MS}.
+   */
+  timeoutMs?: number
   /** `ctx.agents.get(sessionId)`. */
   getAgent(sessionId: string): GuardianAgentRef | undefined
   /** `ctx.agentLoop.createAgent(ctx, { sessionId, meta: { cwd } })` with NO agentPreset. */
@@ -118,6 +125,45 @@ export interface GuardianSendResult {
   sessionId: string
   /** True when this call lazily created or recreated the session. */
   created: boolean
+}
+
+/**
+ * Default bound for guardian session resolution and message delivery.
+ *
+ * The guardian TURN itself is asynchronous (DSH's own inbox is the queue), so
+ * this cannot bound model latency. What it does bound is the plugin's wait for
+ * a standard-mode agent to be created/resumed or for `followup` to accept the
+ * message; without it a hung agent loop can block a normal session's tool call
+ * indefinitely.
+ */
+export const DEFAULT_GUARDIAN_TIMEOUT_MS = 30_000
+
+/** A guardian operation exceeded its bounded wait. */
+export class GuardianTimeoutError extends Error {
+  override readonly name = 'GuardianTimeoutError'
+  readonly code = 'unreachable'
+
+  constructor(message: string) {
+    super(message)
+  }
+}
+
+/** Bound one promise without cancelling the underlying operation. */
+function withGuardianTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number | undefined,
+  label: string,
+): Promise<T> {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return operation
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new GuardianTimeoutError(`${label} timed out after ${String(timeoutMs)}ms`))
+    }, timeoutMs)
+    operation.then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) },
+    )
+  })
 }
 
 /** Title is display-only but stable, so an operator can recognize the session. */
@@ -355,8 +401,19 @@ export async function sendToGuardian(
   userId: string,
   message: GuardianMessage,
 ): Promise<GuardianSendResult> {
-  const resolved = await resolveOrCreateGuardian(host, userId)
-  const delivery = await host.deliverText(resolved.agent, renderGuardianMessage(message))
+  // A hung agent loop must not hold a normal session's tool call open forever.
+  // The timeout releases the caller; the underlying resolution is left to
+  // finish (or be reused by the single-flight map) rather than killed.
+  const resolved = await withGuardianTimeout(
+    resolveOrCreateGuardian(host, userId),
+    host.timeoutMs,
+    'guardian session resolution',
+  )
+  const delivery = await withGuardianTimeout(
+    Promise.resolve(host.deliverText(resolved.agent, renderGuardianMessage(message))),
+    host.timeoutMs,
+    'guardian message delivery',
+  )
   const store = new GuardianSessionStore(host.usersRoot)
   await store.write({ ...resolved.state, updatedAt: new Date().toISOString() })
   return {

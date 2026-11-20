@@ -17,7 +17,7 @@
  *   `source.sessionId` only because the detail drawer needs it for 「查看原文」.
  *
  * Methods: `memory.list`, `memory.get`, `memory.update`, `memory.forget`,
- * `memory.settings`, `memory.set-enabled`.
+ * `memory.settings`, `memory.set-enabled`, `memory.save-settings`.
  *
  * @module @sparkelf/dsh-knowledge-base/memory-routes
  */
@@ -29,14 +29,30 @@ import {
   type ListedMemoryEntry,
   type MemoryEntryPatch,
 } from './memoryStore.ts'
-import { MemorySettingsStore } from './memorySettings.ts'
+import {
+  MEMORY_CONSOLIDATION_INTERVAL_DEFAULT,
+  MEMORY_CONSOLIDATION_INTERVAL_MAX,
+  MEMORY_CONSOLIDATION_INTERVAL_MIN,
+  MemorySettingsError,
+  MemorySettingsStore,
+  normalizeConsolidationInterval,
+  type MemorySettings,
+  type MemorySettingsPatch,
+  type MemorySettingsReadOptions,
+} from './memorySettings.ts'
 import {
   MemoryValidationError,
   isPrivacy,
-  type AnyMemoryEntry,
   type MemoryType,
   type Privacy,
 } from './memoryTypes.ts'
+import {
+  memoryEntryContent,
+  memoryEntrySourceLabel,
+  memoryEntrySourceTime,
+  memoryEntryTitle,
+  memoryEntryUpdatedAt,
+} from './memoryDisplay.ts'
 import { isSafeUserId } from './views.ts'
 
 /** The identity the route already resolved from the request. */
@@ -53,6 +69,12 @@ export interface MemoryRouteInput {
   caller: MemoryRouteCaller
   store: MemoryStore
   settings: MemorySettingsStore
+  /**
+   * First-read default for this caller, already resolved from the DataOps
+   * principal by the host. Omitted means the store's injected policy decides;
+   * `false` is a real value and must not be confused with "not supplied".
+   */
+  defaultEnabled?: boolean
   /** Manifest reconciliation after a write/delete; failure never undoes the memory write. */
   graphWriter: Pick<MemoryGraphWriter, 'syncAll'>
 }
@@ -115,93 +137,32 @@ const fail = (status: number, error: string, code?: string, extra?: Record<strin
   body: { error, ...(code === undefined ? {} : { code }), ...extra },
 })
 
-/** One short line for the table; whitespace collapsed and bounded. */
-function clipLine(value: string, max = 80): string {
-  const clean = value.replace(/\s+/gu, ' ').trim()
-  return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`
-}
-
-/** A technical token that should never be the first thing a reader sees in a row. */
-function looksTechnical(value: string): boolean {
-  if (/[\\/]|session-|kb_[a-z]|\.md\b|\bSOP\b|[a-z]+_[a-z]+/iu.test(value)) return true
-  // Long all-ASCII kebab/underscore tokens are internal identifiers, not titles.
-  return value.trim().length > 12 && /^[a-z0-9._-]+$/u.test(value.trim())
-}
-
-/** Short, non-technical fallback for entries written before displayTitle existed. */
-function fallbackTitle(entry: AnyMemoryEntry): string {
-  switch (entry.type) {
-    case 'preference':
-      return clipLine(looksTechnical(entry.value) ? entry.topic : entry.value, 20)
-    case 'pitfall':
-      return looksTechnical(entry.errorSignature) ? '踩坑记录' : clipLine(entry.errorSignature, 20)
-    case 'episodic': {
-      if (entry.tags?.includes('SOP评估')) return '方法评估'
-      if (entry.tags?.includes('SOP晋升')) return '方法晋升'
-      if (entry.tags?.includes('idle')) return '空闲触发'
-      if (entry.tags?.includes('compaction')) return '压缩触发'
-      if (entry.tags?.includes('dream')) return '记忆整理'
-      return '情景记录'
-    }
-    case 'fact':
-      return looksTechnical(entry.key) ? '事实记录' : clipLine(entry.key, 20)
-    case 'sop':
-      return clipLine(entry.title, 20)
+/** The settings shape the page reads; bounds travel with the value so the UI never guesses. */
+function settingsPayload(settings: MemorySettings): Record<string, unknown> {
+  return {
+    enabled: settings.memoryEnabled,
+    consolidationIntervalMinutes: settings.consolidationIntervalMinutes,
+    intervalMin: MEMORY_CONSOLIDATION_INTERVAL_MIN,
+    intervalMax: MEMORY_CONSOLIDATION_INTERVAL_MAX,
+    intervalDefault: MEMORY_CONSOLIDATION_INTERVAL_DEFAULT,
   }
 }
 
-/** The table's 「记忆」 column: a short user-facing title, never an internal id. */
-function entryTitle(entry: AnyMemoryEntry): string {
-  if (typeof entry.displayTitle === 'string' && entry.displayTitle.trim() !== '') {
-    return clipLine(entry.displayTitle, 24)
-  }
-  return fallbackTitle(entry)
+/** Options for a settings read that already knows the caller's first-read default. */
+function readOptions(defaultEnabled: boolean | undefined): MemorySettingsReadOptions {
+  return defaultEnabled === undefined ? {} : { defaultEnabled }
 }
-
-/** The detail drawer's editable content, in a type-appropriate shape. */
-function entryContent(entry: AnyMemoryEntry): string {
-  switch (entry.type) {
-    case 'preference':
-      return entry.value
-    case 'pitfall':
-      return entry.solution
-    case 'episodic':
-      return entry.summary
-    case 'fact':
-      return entry.statement
-    case 'sop':
-      return entry.steps.map((step, index) => `${String(index + 1)}. ${step}`).join('\n')
-  }
-}
-
-/**
- * Display source label. The snapshot written at record time wins; then the
- * scenario/app the guardian knew; only then the neutral label. A raw session id is
- * never used as the label.
- */
-function sourceLabelOf(entry: AnyMemoryEntry): string {
-  const label = entry.sourceLabel?.trim()
-  if (label !== undefined && label !== '') return label
-  const scenario = entry.scenario?.trim()
-  if (scenario !== undefined && scenario !== '') return scenario
-  const app = entry.app?.trim()
-  if (app !== undefined && app !== '') return app
-  return '历史会话'
-}
-
-const sourceTimeOf = (entry: AnyMemoryEntry): string => entry.sourceTime ?? entry.createdAt
-const updatedAtOf = (entry: AnyMemoryEntry): string => entry.updatedAt ?? entry.createdAt
 
 /** Whitelist the list row so an internal field can never leak by spread. */
 function listRow(entry: ListedMemoryEntry): MemoryListRow {
   return {
     id: entry.id,
     type: entry.type,
-    title: entryTitle(entry),
-    sourceLabel: sourceLabelOf(entry),
-    sourceTime: sourceTimeOf(entry),
+    title: memoryEntryTitle(entry),
+    sourceLabel: memoryEntrySourceLabel(entry),
+    sourceTime: memoryEntrySourceTime(entry),
     privacy: entry.privacy,
-    updatedAt: updatedAtOf(entry),
+    updatedAt: memoryEntryUpdatedAt(entry),
     path: entry.path,
   }
 }
@@ -209,11 +170,11 @@ function listRow(entry: ListedMemoryEntry): MemoryListRow {
 function entryPayload(entry: ListedMemoryEntry): MemoryEntryPayload {
   return {
     entry,
-    title: entryTitle(entry),
-    content: entryContent(entry),
+    title: memoryEntryTitle(entry),
+    content: memoryEntryContent(entry),
     source: {
-      label: sourceLabelOf(entry),
-      at: sourceTimeOf(entry),
+      label: memoryEntrySourceLabel(entry),
+      at: memoryEntrySourceTime(entry),
       ...(entry.sourceSeqs === undefined ? {} : { eventSeqs: entry.sourceSeqs }),
       ...(entry.sourceSession === undefined ? {} : { sessionId: entry.sourceSession }),
     },
@@ -315,6 +276,49 @@ function readUpdatePatch(
   return { patch }
 }
 
+/** Extract and validate the settings write, translating `enabled` to the stored field. */
+function readSettingsPatch(
+  body: Record<string, unknown>,
+  options: { requireEnabled: boolean },
+): { patch: MemorySettingsPatch } | { error: MemoryRouteResponse } {
+  if (Object.prototype.hasOwnProperty.call(body, 'userId')) {
+    return { error: fail(400, 'userId must not be supplied; the caller is resolved from the request', 'invalid') }
+  }
+  const unknown = Object.keys(body).filter(key => key !== 'enabled' && key !== 'consolidationIntervalMinutes')
+  if (unknown.length > 0) {
+    return { error: fail(400, `unsupported settings field(s): ${unknown.join(', ')}`, 'invalid') }
+  }
+  if (options.requireEnabled && body.enabled === undefined) {
+    return { error: fail(400, 'enabled must be a boolean', 'invalid') }
+  }
+  const patch: MemorySettingsPatch = {}
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') {
+      return { error: fail(400, 'enabled must be a boolean', 'invalid') }
+    }
+    patch.memoryEnabled = body.enabled
+  }
+  if (body.consolidationIntervalMinutes !== undefined) {
+    try {
+      patch.consolidationIntervalMinutes = normalizeConsolidationInterval(body.consolidationIntervalMinutes)
+    } catch (error) {
+      if (error instanceof MemorySettingsError) {
+        return {
+          error: fail(400, error.message, error.code, {
+            min: MEMORY_CONSOLIDATION_INTERVAL_MIN,
+            max: MEMORY_CONSOLIDATION_INTERVAL_MAX,
+          }),
+        }
+      }
+      throw error
+    }
+  }
+  if (patch.memoryEnabled === undefined && patch.consolidationIntervalMinutes === undefined) {
+    return { error: fail(400, 'at least one memory setting must be supplied', 'invalid') }
+  }
+  return { patch }
+}
+
 /** Reconcile the personal-memory graph; a derived failure must not undo the write. */
 async function syncGraph(graphWriter: Pick<MemoryGraphWriter, 'syncAll'>): Promise<string | undefined> {
   try {
@@ -327,6 +331,9 @@ async function syncGraph(graphWriter: Pick<MemoryGraphWriter, 'syncAll'>): Promi
 
 /** Map a store/validation failure to an actionable status; unknown errors escape. */
 function failureOf(error: unknown): MemoryRouteResponse {
+  if (error instanceof MemorySettingsError) {
+    return fail(400, error.message, error.code)
+  }
   if (error instanceof MemoryValidationError) {
     return fail(400, error.message, 'invalid-memory', { issues: error.issues })
   }
@@ -360,8 +367,11 @@ export async function handleMemoryRoute(input: MemoryRouteInput): Promise<Memory
   try {
     switch (method) {
       case 'memory.list': {
-        const [enabled, entries] = await Promise.all([settings.isEnabled(caller.userId), store.listEntries()])
-        return ok({ enabled, entries: entries.map(listRow) })
+        const [settingsState, entries] = await Promise.all([
+          settings.read(caller.userId, readOptions(input.defaultEnabled)),
+          store.listEntries(),
+        ])
+        return ok({ enabled: settingsState.memoryEnabled, entries: entries.map(listRow) })
       }
 
       case 'memory.get': {
@@ -399,14 +409,28 @@ export async function handleMemoryRoute(input: MemoryRouteInput): Promise<Memory
       }
 
       case 'memory.settings':
-        return ok({ enabled: await settings.isEnabled(caller.userId) })
+        return ok(settingsPayload(await settings.read(caller.userId, readOptions(input.defaultEnabled))))
 
       case 'memory.set-enabled': {
-        if (typeof body.enabled !== 'boolean') {
-          return fail(400, 'enabled must be a boolean', 'invalid')
-        }
-        const next = await settings.setEnabled(caller.userId, body.enabled)
-        return ok({ enabled: next.memoryEnabled })
+        const built = readSettingsPatch(body, { requireEnabled: true })
+        if ('error' in built) return built.error
+        const next = await settings.save(
+          caller.userId,
+          built.patch,
+          readOptions(input.defaultEnabled),
+        )
+        return ok(settingsPayload(next))
+      }
+
+      case 'memory.save-settings': {
+        const built = readSettingsPatch(body, { requireEnabled: false })
+        if ('error' in built) return built.error
+        const next = await settings.save(
+          caller.userId,
+          built.patch,
+          readOptions(input.defaultEnabled),
+        )
+        return ok(settingsPayload(next))
       }
 
       default:

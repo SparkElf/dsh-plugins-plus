@@ -6,6 +6,7 @@ import {
   GUARDIAN_SESSION_TITLE,
   GUARDIAN_SKILL_NAME,
   GuardianSessionStore,
+  GuardianTimeoutError,
   renderGuardianMessage,
   resolveOrCreateGuardian,
   sendToGuardian,
@@ -25,6 +26,9 @@ class FakeGuardianHost implements GuardianSessionHost {
   readonly titleCalls: string[] = []
   readonly titleLookups: string[] = []
   queued = false
+  timeoutMs: number | undefined
+  createHangs = false
+  deliverHangs = false
   resumeFails = false
   nextSessionId = 'session-guardian-1'
   findByTitleResult: string | undefined
@@ -39,6 +43,7 @@ class FakeGuardianHost implements GuardianSessionHost {
 
   async createAgent(input: CreateGuardianAgentInput): Promise<GuardianAgentRef> {
     this.created.push(input)
+    if (this.createHangs) return new Promise(() => {})
     const agent: GuardianAgentRef = { id: input.sessionId, status: 'idle' }
     this.agents.set(input.sessionId, agent)
     return agent
@@ -54,6 +59,7 @@ class FakeGuardianHost implements GuardianSessionHost {
 
   async deliverText(agent: GuardianAgentRef, text: string): Promise<{ delivered: boolean; queued: boolean }> {
     this.deliveries.push({ sessionId: agent.id, text })
+    if (this.deliverHangs) return new Promise(() => {})
     return { delivered: true, queued: this.queued }
   }
 
@@ -253,5 +259,23 @@ describe('resolveOrCreateGuardian / sendToGuardian', () => {
     expect(resolved.agent.id).toBe('session-live')
     expect(host.resumed).toHaveLength(0)
     expect(host.created).toHaveLength(0)
+  })
+
+  it('bounds a hung guardian creation with a structured timeout', async () => {
+    host.timeoutMs = 20
+    host.createHangs = true
+
+    await expect(sendToGuardian(host, 'u1', { reason: 'idle', sessionId: 'session-a' }))
+      .rejects.toBeInstanceOf(GuardianTimeoutError)
+  })
+
+  it('bounds a hung guardian delivery with a structured timeout', async () => {
+    host.timeoutMs = 20
+    host.agents.set('session-live', { id: 'session-live', status: 'idle' })
+    await new GuardianSessionStore(root).write(state('u1', 'session-live'))
+    host.deliverHangs = true
+
+    await expect(sendToGuardian(host, 'u1', { reason: 'manual' }))
+      .rejects.toMatchObject({ name: 'GuardianTimeoutError', code: 'unreachable' })
   })
 })

@@ -106,6 +106,14 @@ function baseProps(overrides: Partial<KnowledgeMemoryViewProps> = {}): Knowledge
     locale: 'zh-CN',
     enabled: false,
     settingsLoading: false,
+    consolidationIntervalMinutes: 60,
+    intervalMin: 15,
+    intervalMax: 1440,
+    intervalDraft: '60',
+    intervalBusy: false,
+    intervalSaved: false,
+    onIntervalDraftChange: () => undefined,
+    onSaveInterval: () => undefined,
     list: { status: 'ready', entries },
     query: '',
     typeFilter: '',
@@ -208,6 +216,21 @@ describe('memory table', () => {
     expect(empty).toContain('还没有记忆')
   })
 
+  it('renders the consolidation interval with the saved value and bounds', () => {
+    const html = render({ consolidationIntervalMinutes: 30, intervalDraft: '30' })
+    expect(html).toContain('data-testid="memory-interval"')
+    expect(html).toContain('整理间隔')
+    expect(html).toContain('15–1440')
+    expect(html).toContain('value="30"')
+    expect(html).toContain('保存')
+    expect(html).toContain('data-saved-minutes="30"')
+  })
+
+  it('shows an interval validation error', () => {
+    const html = render({ intervalError: '请输入 15–1440 之间的整数分钟。' })
+    expect(html).toContain('请输入 15–1440 之间的整数分钟。')
+  })
+
   it('shows loading and error states', () => {
     expect(render({ list: { status: 'loading', entries: [] } })).toContain('正在读取记忆')
     const failed = render({ list: { status: 'error', entries: [], error: 'offline' } })
@@ -239,6 +262,18 @@ describe('memory confirmations', () => {
     expect(request).toContain('setPendingEnabled(next)')
     expect(request).not.toContain('memory.set-enabled')
     expect(confirm).toContain("memoryRequest('memory.set-enabled'")
+  })
+
+  it('validates and persists the interval through one save-settings call', async () => {
+    const source = await readFile(new URL('../src/client/KnowledgeMemory.tsx', import.meta.url), 'utf8')
+    const save = source.slice(source.indexOf('const saveInterval'), source.indexOf('const startEdit'))
+    expect(save).toContain("t('memoryIntervalInvalid')")
+    expect(save).toContain("memoryRequest('memory.save-settings'")
+    expect(save).toContain('consolidationIntervalMinutes: parsed')
+    // The toggle path must not silently save a half-edited interval.
+    const confirm = source.slice(source.indexOf('const confirmToggle'), source.indexOf('const saveInterval'))
+    expect(confirm).toContain("memoryRequest('memory.set-enabled', { enabled: target })")
+    expect(confirm).not.toContain('consolidationIntervalMinutes:')
   })
 })
 
@@ -277,5 +312,116 @@ describe('panel integration source shape', () => {
     expect(source).toContain('rendered.kind === \'memory\' && (')
     expect(source).toContain('<KnowledgeMemory')
     expect(source).toContain("if (selection.kind === 'memory') return t('menu.memory')")
+  })
+})
+describe('memory promotion surface', () => {
+  const basePromotion = {
+    promotions: [{
+      id: 'mp-1',
+      memoryId: 'm-pitfall',
+      title: '文件写入路径错误',
+      type: 'pitfall',
+      status: 'pending' as const,
+      targetScope: 'department' as const,
+      departmentCode: 'dept-a',
+      requestedAt: iso(1),
+    }],
+    reviewQueue: [],
+    shared: [],
+    canPromoteGlobal: false,
+    canPromoteDepartments: ['dept-a'],
+    canReview: false,
+    busy: false,
+  }
+
+  const actions = {
+    onStart: () => undefined,
+    onCancel: () => undefined,
+    onScopeChange: () => undefined,
+    onConfirmChange: () => undefined,
+    onSubmit: () => undefined,
+    onReview: () => undefined,
+  }
+
+  it('shows the review status next to the memory without changing the six columns', () => {
+    const html = render({ promotion: basePromotion, promotionActions: actions })
+    const headers = [...html.matchAll(/<th(?:\s[^>]*)?>([\s\S]*?)<\/th>/g)].map(match => match[1])
+    expect(headers).toEqual(['记忆', '类型', '来源', '更新时间', '隐私', '操作'])
+    expect(html).toContain('待审核')
+    // Only the promotable (normal privacy) row offers the action.
+    expect(html).toContain('晋升')
+    expect(html).toMatch(/data-testid="memory-row"[\s\S]*?结论先行[\s\S]*?<\/tr>/u)
+    const privateRow = html.slice(html.indexOf('结论先行'), html.indexOf('文件写入路径错误'))
+    expect(privateRow).not.toContain('晋升')
+  })
+
+  it('hides the promote action from a member who cannot review', () => {
+    const html = render({ promotion: basePromotion, promotionActions: actions })
+    expect(html).not.toContain('memory-promotion-message')
+    const shared = render({
+      promotion: { ...basePromotion, canPromoteDepartments: [], canPromoteGlobal: false },
+      promotionActions: actions,
+    })
+    expect(shared).not.toContain('>晋升<')
+  })
+
+  it('renders the review queue with approve/reject, but disables self-approval', () => {
+    const html = render({
+      promotion: {
+        ...basePromotion,
+        canReview: true,
+        reviewQueue: [
+          {
+            promotion: {
+              id: 'mp-1', memoryId: 'm-pitfall', title: '文件写入路径错误', type: 'pitfall',
+              content: '写入前先确认目录存在。',
+              status: 'pending', targetScope: 'department', departmentCode: 'dept-a', selfApproval: true,
+            },
+            selfApproval: true,
+          },
+        ],
+      },
+      promotionActions: actions,
+    })
+    expect(html).toContain('data-testid="memory-review"')
+    expect(html).toContain('晋升审核')
+    expect(html).toContain('通过')
+    expect(html).toContain('拒绝')
+    expect(html).toContain('自己提交的晋升需要另一位管理员审核。')
+    // The reviewer sees what is being approved, not only a title.
+    expect(html).toContain('写入前先确认目录存在。')
+  })
+
+  it('renders the department/global list as read-only content', () => {
+    const html = render({
+      promotion: {
+        ...basePromotion,
+        shared: [{
+          id: 'mp-9', title: '指标口径排查', type: 'sop', content: '先查上游',
+          scope: 'global', promotedAt: iso(1), promotedBy: '管理员',
+        }],
+      },
+      promotionActions: actions,
+    })
+    expect(html).toContain('data-testid="memory-shared"')
+    expect(html).toContain('部门和全局记忆')
+    expect(html).toContain('指标口径排查')
+    // The shared section carries no row actions at all.
+    const sharedSection = html.slice(html.indexOf('data-testid="memory-shared"'))
+    expect(sharedSection).not.toContain('查看')
+    expect(sharedSection).not.toContain('忘记')
+  })
+
+  it('opens a target picker that distinguishes review from direct promotion', () => {
+    const html = render({
+      promotion: {
+        ...basePromotion,
+        target: { entry: entries[1]!, scope: 'department', confirm: false },
+      },
+      promotionActions: actions,
+    })
+    expect(html).toContain('晋升记忆')
+    expect(html).toContain('提交审核')
+    expect(html).toContain('直接生效（管理员确认）')
   })
 })

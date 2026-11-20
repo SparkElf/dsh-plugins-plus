@@ -112,17 +112,34 @@ export const authorNameOf = (member: RoomMember | undefined): string | undefined
 
 /** One message author that came from an external channel, as the bubble reads it. */
 export interface ExternalSenderView {
-  readonly kind: 'qqbot'
-  readonly openid: string
-  readonly nickname: string
+  readonly kind: 'qqbot' | 'wecom' | 'dingtalk'
+  readonly senderId: string
+  readonly senderName: string
+}
+
+/** Platforms whose forwarded authors this renderer knows how to label. */
+const EXTERNAL_KINDS: readonly ExternalSenderView['kind'][] = ['qqbot', 'wecom', 'dingtalk']
+
+/**
+ * The badge a forwarded author carries.
+ *
+ * Spelled out per platform rather than composed from the kind, because these are the words a
+ * reader sees; a new platform must choose its own label instead of inheriting `QQ`.
+ */
+const EXTERNAL_LABELS: Record<ExternalSenderView['kind'], string> = {
+  qqbot: '来自 QQ',
+  wecom: '来自企业微信',
+  dingtalk: '来自钉钉',
 }
 
 /**
  * The external sender a message carries, when it was forwarded from another system.
  *
  * The bridge writes `source.senderExternal`; a message without one is an ordinary room message and
- * is rendered exactly as before. A malformed value is ignored rather than guessed at, because a
- * wrong badge would attribute an external author to the workspace.
+ * is rendered exactly as before. Both the canonical fields (`senderId`/`senderName`) and QQ's
+ * historical `openid`/`nickname` are accepted, because older rooms already hold the latter. A
+ * malformed value is ignored rather than guessed at, because a wrong badge would attribute an
+ * external author to the workspace.
  * @param message - the message data the node carries.
  * @returns the sender, or undefined for a native room message.
  */
@@ -130,11 +147,13 @@ export const externalSenderOf = (message: MessageLike | undefined): ExternalSend
   const raw = message?.source?.senderExternal
   if (typeof raw !== 'object' || raw === null) return undefined
   const sender = raw as Record<string, unknown>
-  if (sender['kind'] !== 'qqbot') return undefined
-  const openid = typeof sender['openid'] === 'string' ? sender['openid'] : ''
-  const nickname = typeof sender['nickname'] === 'string' ? sender['nickname'].trim() : ''
-  if (openid === '' || nickname === '') return undefined
-  return { kind: 'qqbot', openid, nickname }
+  const kind = sender['kind']
+  if (typeof kind !== 'string' || !(EXTERNAL_KINDS as readonly string[]).includes(kind)) return undefined
+  const text = (value: unknown): string => typeof value === 'string' ? value.trim() : ''
+  const senderId = text(sender['senderId']) || text(sender['openid'])
+  const senderName = text(sender['senderName']) || text(sender['nickname'])
+  if (senderId === '' || senderName === '') return undefined
+  return { kind: kind as ExternalSenderView['kind'], senderId, senderName }
 }
 
 /** The official node view, as the registry hands it over. */
@@ -225,12 +244,12 @@ export const MessageSide = (props: MessageSideProps): ReactNode => {
     ? (
         <div
           className={styles['author']}
-          data-group-chat-author={external.openid}
+          data-group-chat-author={external.senderId}
           data-group-chat-external={external.kind}
         >
-          <Avatar name={external.nickname} size="sm" />
-          <span className={styles['authorName']}>{external.nickname}</span>
-          <span className={styles['externalBadge']}>来自 QQ</span>
+          <Avatar name={external.senderName} size="sm" />
+          <span className={styles['authorName']}>{external.senderName}</span>
+          <span className={styles['externalBadge']}>{EXTERNAL_LABELS[external.kind]}</span>
         </div>
       )
     : name === undefined || member === undefined

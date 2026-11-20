@@ -1,7 +1,7 @@
 {
   "name": "@sparkelf/dsh-officecli",
-  "version": "0.2.0",
-  "description": "DeepSeek Harness tool adapter for the official OfficeCLI binary.",
+  "version": "0.2.1",
+  "description": "DeepSeek Harness adapter for the official OfficeCLI binary, with nine bundled Office workflow skills and Wanxiang (GB/T 9704-2012 / brand) delivery rules.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -23,10 +23,26 @@
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE",
+    "LICENSE-APACHE-2.0",
+    "skills/word/SKILL.md",
+    "skills/excel/SKILL.md",
+    "skills/pptx/SKILL.md",
+    "skills/word-form/SKILL.md",
+    "skills/pitch-deck/SKILL.md",
+    "skills/academic-paper/SKILL.md",
+    "skills/data-dashboard/SKILL.md",
+    "skills/financial-model/SKILL.md",
+    "skills/morph-ppt/SKILL.md",
+    "skills/morph-ppt/reference/**/*",
+    "plugins/**/*",
+    "skills/word/reference/**/*",
+    "lib/office-kit-bridge.js",
+    "plugins/officecli-pdf/**"
   ],
   "scripts": {
-    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
+    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown && chmod -R a+rX lib",
     "prepack": "pnpm run build"
   },
   "engines": {
@@ -42,15 +58,17 @@
     "access": "public"
   },
   "dependencies": {
-    "@officecli/officecli": "1.0.147"
+    "@officecli/officecli": "1.0.162"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-tools": ">=0.1.7-rc.2"
+    "@deepseek-ai/dsh-tools": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-skill": ">=0.1.7-rc.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
-    "tsdown": "^0.22.2"
+    "tsdown": "^0.22.2",
+    "@deepseek-ai/dsh-skill": "0.1.7-rc.2"
   }
 }

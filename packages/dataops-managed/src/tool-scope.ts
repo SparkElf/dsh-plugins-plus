@@ -115,6 +115,12 @@ export const AI_TOOL_ACCESS = {
   dataops_collect_execute: { permission: 'data:resource:manage' },
   dataops_collect_resources: { permission: 'data:resource:read' },
   dataops_open_resource_tab: {},
+  // 用户目录查询按后端 system:user:read 披露：管理员/部门管理员持有该权限，普通成员没有。
+  // 真正的数据范围仍由 DataOps 的 AdminDataScopeService 在每次请求时收口。
+  dataops_user_lookup: { permission: 'system:user:read' },
+  // 建号与角色变更是中台管理动作，挂 admin.manage；adminOnly 把部门管理员排除在写操作之外。
+  dataops_user_create: { capability: 'admin.manage', adminOnly: true, defaultEnabled: true },
+  dataops_role_assign: { capability: 'admin.manage', adminOnly: true, defaultEnabled: true },
   dataops_resource_pending_list: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
   dataops_resource_grant_list: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },
   dataops_resource_grant_batch: { capability: 'resource.manage', adminOnly: true, defaultEnabled: true },

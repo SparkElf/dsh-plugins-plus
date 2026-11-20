@@ -146,9 +146,9 @@ describe('验收标准 ④：普通会话不受插件影响', () => {
     // wrap the pipeline: all three would apply to every Session in the process.
     expect(source).not.toMatch(/deriveMessages\s*=/u)
     expect(source).not.toMatch(/Session\.prototype/u)
-    // The room's messages travel through the agent's own inbox, which is per-agent and
-    // per-session, so a Session with no room source can never be reached by this plugin.
+    // The room's messages travel through the agent's own inbox and the room's own Session,
+    // both per-session, so a Session with no room source can never be reached by this plugin.
     expect(source).toContain('agent.followup(')
-    expect(source).toContain('agent.inject(')
+    expect(source).toContain("session.append('user/message'")
   })
 })

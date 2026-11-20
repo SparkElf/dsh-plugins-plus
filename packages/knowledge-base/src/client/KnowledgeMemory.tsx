@@ -66,6 +66,66 @@ export interface MemoryListSnapshot {
   error?: string
 }
 
+/** One promotion as the page shows it. */
+export interface MemoryPromotionView {
+  id: string
+  memoryId: string
+  title?: string
+  type?: string
+  /** Promoted body; the review row shows a bounded preview. */
+  content?: string
+  status: 'pending' | 'approved' | 'rejected'
+  targetScope: 'department' | 'global'
+  departmentCode?: string
+  requestedAt?: string
+  reviewedAt?: string
+  reviewNote?: string
+  selfApproval?: boolean
+}
+
+/** One queued promotion plus whether this reviewer submitted it. */
+export interface MemoryReviewItem {
+  promotion: MemoryPromotionView
+  selfApproval: boolean
+}
+
+/** One read-only department/global memory row. */
+export interface SharedMemoryView {
+  id: string
+  title: string
+  type?: string
+  content?: string
+  scope: 'department' | 'global'
+  departmentCode?: string
+  promotedAt?: string
+  promotedBy?: string
+}
+
+/** The promotion state the page renders; absent on a caller without review access. */
+export interface MemoryPromotionUiState {
+  promotions: MemoryPromotionView[]
+  reviewQueue: MemoryReviewItem[]
+  shared: SharedMemoryView[]
+  canPromoteGlobal: boolean
+  canPromoteDepartments: string[]
+  canReview: boolean
+  busy: boolean
+  error?: string
+  notice?: string
+  /** Open target picker, when the user asked to promote one memory. */
+  target?: { entry: MemoryEntryView; scope: 'department' | 'global'; confirm: boolean }
+}
+
+/** Callbacks the container owns for the promotion surface. */
+export interface MemoryPromotionActions {
+  onStart: (entry: MemoryEntryView) => void
+  onCancel: () => void
+  onScopeChange: (scope: 'department' | 'global') => void
+  onConfirmChange: (confirm: boolean) => void
+  onSubmit: () => void
+  onReview: (id: string, decision: 'approve' | 'reject') => void
+}
+
 /** Props for the pure memory renderer. */
 export interface KnowledgeMemoryViewProps {
   t: (key: string) => string
@@ -73,6 +133,19 @@ export interface KnowledgeMemoryViewProps {
   enabled: boolean
   settingsLoading: boolean
   settingsError?: string
+  /** Saved consolidation interval, in minutes. */
+  consolidationIntervalMinutes: number
+  /** Allowed interval bounds; reported by the host so the page never guesses. */
+  intervalMin: number
+  intervalMax: number
+  /** The number currently typed in the interval field. */
+  intervalDraft: string
+  intervalBusy: boolean
+  intervalError?: string
+  /** True after a successful save until the field changes again. */
+  intervalSaved: boolean
+  onIntervalDraftChange: (value: string) => void
+  onSaveInterval: () => void
   list: MemoryListSnapshot
   query: string
   typeFilter: string
@@ -107,6 +180,10 @@ export interface KnowledgeMemoryViewProps {
   onRetryList: () => void
   /** Open the source conversation; omitted hides 查看原文. */
   onOpenSource?: (entry: MemoryEntryView) => void
+  /** Promotion state; omitted hides the promotion surface entirely. */
+  promotion?: MemoryPromotionUiState
+  /** Promotion handlers; required only when `promotion` is supplied. */
+  promotionActions?: MemoryPromotionActions
 }
 
 /** Props for the stateful memory page. */
@@ -125,6 +202,11 @@ type MemoryRoute =
   | 'memory.forget'
   | 'memory.settings'
   | 'memory.set-enabled'
+  | 'memory.save-settings'
+  | 'memory.promote'
+  | 'memory.promotions'
+  | 'memory.review-promotion'
+  | 'memory.shared'
 
 /** POST one memory route and parse the answer without trusting it to be JSON. */
 async function memoryRequest<T extends Record<string, unknown>>(
@@ -143,6 +225,11 @@ async function memoryRequest<T extends Record<string, unknown>>(
 /** Turn an unknown failure into the one sentence the page can show. */
 function failureText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Read one numeric setting without trusting the response shape. */
+function numberField(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
 /** The type label key for one stored type. */
@@ -254,6 +341,28 @@ function matches(entry: MemoryEntryView, query: string, typeFilter: string): boo
     || (entry.content ?? '').toLowerCase().includes(needle)
 }
 
+/** The label key for one promotion status. */
+function promotionStatusKey(status: string | undefined): string {
+  if (status === 'pending') return 'memoryPromotionPending'
+  if (status === 'approved') return 'memoryPromotionApproved'
+  if (status === 'rejected') return 'memoryPromotionRejected'
+  return 'memoryPromotionNone'
+}
+
+/** A human target: the department name/code, or 全局. */
+function promotionTargetLabel(t: (key: string) => string, promotion: MemoryPromotionView): string {
+  return promotion.targetScope === 'global'
+    ? t('memoryPromotionTargetGlobal')
+    : (promotion.departmentCode ?? t('memoryPromotionTargetDepartment'))
+}
+
+/** Whether the page should offer the promote action at all. */
+function canPromote(entry: MemoryEntryView, promotion: MemoryPromotionUiState | undefined): boolean {
+  if (promotion === undefined) return false
+  if (entry.privacy !== 'normal') return false
+  return promotion.canPromoteGlobal || promotion.canPromoteDepartments.length > 0
+}
+
 /** Row actions shared by the table and the detail footer. */
 function rowActions(
   t: (key: string) => string,
@@ -271,6 +380,11 @@ function rowActions(
       <Button variant="ghost" size="sm" onClick={() => { props.onStartForget(entry) }}>
         {t('memoryActionForget')}
       </Button>
+      {props.promotionActions !== undefined && canPromote(entry, props.promotion) && (
+        <Button variant="ghost" size="sm" onClick={() => { props.promotionActions?.onStart(entry) }}>
+          {t('memoryActionPromote')}
+        </Button>
+      )}
     </span>
   )
 }
@@ -289,6 +403,8 @@ export function KnowledgeMemoryView(props: KnowledgeMemoryViewProps): ReactNode 
   const detail = props.detail
   const editing = props.editing
   const forgetTarget = props.forgetTarget
+  const promotion = props.promotion
+  const promotionByMemory = new Map((promotion?.promotions ?? []).map(item => [item.memoryId, item]))
 
   return (
     <div className={styles.page} data-testid="memory-page">
@@ -309,6 +425,45 @@ export function KnowledgeMemoryView(props: KnowledgeMemoryViewProps): ReactNode 
           />
         </div>
       </header>
+
+      <section
+        className={styles.intervalRow}
+        data-testid="memory-interval"
+        data-saved-minutes={props.consolidationIntervalMinutes}
+      >
+        <div className={styles.intervalCopy}>
+          <span className={styles.intervalLabel}>{t('memoryIntervalLabel')}</span>
+          <span className={styles.intervalHint}>{t('memoryIntervalHint')}</span>
+        </div>
+        <div className={styles.intervalControls}>
+          <Input
+            type="number"
+            className={styles.intervalInput}
+            min={props.intervalMin}
+            max={props.intervalMax}
+            step={1}
+            value={props.intervalDraft}
+            disabled={props.intervalBusy || props.settingsLoading}
+            aria-label={t('memoryIntervalLabel')}
+            onChange={(event: { target: { value: string } }) => { props.onIntervalDraftChange(event.target.value) }}
+          />
+          <span className={styles.intervalUnit}>{t('memoryIntervalMinutes')}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={props.intervalBusy || props.settingsLoading}
+            onClick={props.onSaveInterval}
+          >
+            {t('memorySaveInterval')}
+          </Button>
+          {props.intervalSaved && (
+            <span className={styles.intervalSaved} role="status">{t('memoryIntervalSaved')}</span>
+          )}
+        </div>
+        {props.intervalError !== undefined && (
+          <p className={styles.intervalError} role="alert">{props.intervalError}</p>
+        )}
+      </section>
 
       {props.settingsError !== undefined && (
         <div className={styles.noticeRow} role="alert">
@@ -341,6 +496,69 @@ export function KnowledgeMemoryView(props: KnowledgeMemoryViewProps): ReactNode 
           ))}
         </select>
       </div>
+
+      {promotion !== undefined && promotion.canReview && promotion.reviewQueue.length > 0 && (
+        <section className={styles.promotionSection} data-testid="memory-review">
+          <h3 className={styles.sectionTitle}>{t('memoryReviewTitle')}</h3>
+          <p className={styles.sectionHint}>{t('memoryReviewHint')}</p>
+          <div className={styles.tableWrap}>
+            <table className={styles.table} aria-label={t('memoryReviewTitle')}>
+              <thead>
+                <tr>
+                  <th>{t('memoryColumnMemory')}</th>
+                  <th>{t('memoryColumnType')}</th>
+                  <th>{t('memoryPromotionTarget')}</th>
+                  <th>{t('memoryPromotionRequested')}</th>
+                  <th className={styles.actionsHead}>{t('memoryColumnActions')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {promotion.reviewQueue.map(item => (
+                  <tr key={item.promotion.id} data-testid="memory-review-row">
+                    <td className={styles.memoryCell}>
+                      <span>{item.promotion.title ?? item.promotion.memoryId}</span>
+                      {item.promotion.content !== undefined && item.promotion.content !== '' && (
+                        <span className={styles.reviewContent}>{item.promotion.content}</span>
+                      )}
+                    </td>
+                    <td><span className={styles.typeChip}>{t(typeKey(item.promotion.type as string | undefined))}</span></td>
+                    <td>{promotionTargetLabel(t, item.promotion)}</td>
+                    <td>
+                      <span className={styles.sourceLabel}>{item.promotion.requestedAt === undefined
+                        ? '—'
+                        : relativeTime(t, item.promotion.requestedAt, props.locale)}</span>
+                    </td>
+                    <td className={styles.actionsCell}>
+                      <span className={styles.rowActions}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={promotion.busy || item.selfApproval}
+                          title={item.selfApproval ? t('memoryReviewSelfApproval') : undefined}
+                          onClick={() => { props.promotionActions?.onReview(item.promotion.id, 'approve') }}
+                        >
+                          {t('memoryReviewApprove')}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={promotion.busy}
+                          onClick={() => { props.promotionActions?.onReview(item.promotion.id, 'reject') }}
+                        >
+                          {t('memoryReviewReject')}
+                        </Button>
+                      </span>
+                      {item.selfApproval && (
+                        <span className={styles.selfApprovalHint}>{t('memoryReviewSelfApproval')}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {props.list.status === 'loading' && (
         <p className={styles.notice} data-testid="memory-loading">{t('memoryListLoading')}</p>
@@ -381,6 +599,15 @@ export function KnowledgeMemoryView(props: KnowledgeMemoryViewProps): ReactNode 
                     <button type="button" className={styles.memoryTitle} onClick={() => { props.onOpenDetail(entry) }}>
                       {entry.title}
                     </button>
+                    {promotionByMemory.get(entry.id) !== undefined && (
+                      <span
+                        className={styles.promotionChip}
+                        data-status={promotionByMemory.get(entry.id)?.status}
+                        title={promotionTargetLabel(t, promotionByMemory.get(entry.id)!)}
+                      >
+                        {t(promotionStatusKey(promotionByMemory.get(entry.id)?.status))}
+                      </span>
+                    )}
                   </td>
                   <td><span className={styles.typeChip}>{t(typeKey(entry.type))}</span></td>
                   <td>
@@ -400,6 +627,45 @@ export function KnowledgeMemoryView(props: KnowledgeMemoryViewProps): ReactNode 
             </tbody>
           </table>
         </div>
+      )}
+
+      {promotion !== undefined && (promotion.error !== undefined || promotion.notice !== undefined) && (
+        <p
+          className={promotion.error === undefined ? styles.promotionNotice : styles.error}
+          role={promotion.error === undefined ? 'status' : 'alert'}
+          data-testid="memory-promotion-message"
+        >
+          {promotion.error ?? promotion.notice}
+        </p>
+      )}
+
+      {promotion !== undefined && promotion.shared.length > 0 && (
+        <section className={styles.promotionSection} data-testid="memory-shared">
+          <h3 className={styles.sectionTitle}>{t('memorySharedTitle')}</h3>
+          <p className={styles.sectionHint}>{t('memorySharedHint')}</p>
+          <div className={styles.tableWrap}>
+            <table className={styles.table} aria-label={t('memorySharedTitle')}>
+              <thead>
+                <tr>
+                  <th>{t('memoryColumnMemory')}</th>
+                  <th>{t('memoryColumnType')}</th>
+                  <th>{t('memoryPromotionTarget')}</th>
+                  <th>{t('memoryColumnUpdated')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {promotion.shared.map(item => (
+                  <tr key={item.id} data-testid="memory-shared-row">
+                    <td className={styles.memoryCell}>{item.title}</td>
+                    <td><span className={styles.typeChip}>{t(typeKey(item.type))}</span></td>
+                    <td>{item.scope === 'global' ? t('memoryPromotionTargetGlobal') : (item.departmentCode ?? t('memoryPromotionTargetDepartment'))}</td>
+                    <td className={styles.timeCell}>{relativeTime(t, item.promotedAt, props.locale)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       )}
 
       <Modal
@@ -512,6 +778,64 @@ export function KnowledgeMemoryView(props: KnowledgeMemoryViewProps): ReactNode 
         <p>{t('memoryForgetBody')}</p>
         {props.forgetError !== undefined && <p className={styles.error} role="alert">{props.forgetError}</p>}
       </Modal>
+
+      <Modal
+        open={promotion?.target !== undefined}
+        onClose={props.promotionActions?.onCancel ?? (() => undefined)}
+        title={t('memoryPromoteTitle')}
+        closeLabel={t('memoryClose')}
+        footer={(
+          <div className={styles.footer}>
+            <Button variant="ghost" disabled={promotion?.busy === true} onClick={props.promotionActions?.onCancel}>
+              {t('cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              disabled={promotion?.busy === true}
+              onClick={props.promotionActions?.onSubmit}
+            >
+              {promotion?.target?.confirm === true ? t('memoryPromoteConfirmNow') : t('memoryPromoteSubmit')}
+            </Button>
+          </div>
+        )}
+      >
+        {promotion?.target !== undefined && (
+          <div className={styles.promotionForm}>
+            <p className={styles.promotionMemory}>{promotion.target.entry.title}</p>
+            <label className={styles.detailLabel} htmlFor="memory-promote-scope">{t('memoryPromoteTarget')}</label>
+            <select
+              id="memory-promote-scope"
+              className={styles.select}
+              value={promotion.target.scope}
+              onChange={(event: { target: { value: string } }) => {
+                props.promotionActions?.onScopeChange(event.target.value === 'global' ? 'global' : 'department')
+              }}
+            >
+              {promotion.canPromoteDepartments.length > 0 && (
+                <option value="department">
+                  {t('memoryPromotionTargetDepartment')} · {promotion.canPromoteDepartments[0]}
+                </option>
+              )}
+              {promotion.canPromoteGlobal && (
+                <option value="global">{t('memoryPromotionTargetGlobal')}</option>
+              )}
+            </select>
+            <label className={styles.promotionConfirm}>
+              <input
+                type="checkbox"
+                checked={promotion.target.confirm}
+                onChange={(event: { target: { checked: boolean } }) => {
+                  props.promotionActions?.onConfirmChange(event.target.checked)
+                }}
+              />
+              <span>{t('memoryPromoteConfirmLabel')}</span>
+            </label>
+            <p className={styles.sectionHint}>
+              {promotion.target.confirm ? t('memoryPromoteConfirmHint') : t('memoryPromoteReviewHint')}
+            </p>
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }
@@ -528,6 +852,13 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
   const [enabled, setEnabled] = useState(false)
   const [settingsLoading, setSettingsLoading] = useState(true)
   const [settingsError, setSettingsError] = useState<string | undefined>()
+  const [consolidationIntervalMinutes, setConsolidationIntervalMinutes] = useState(60)
+  const [intervalMin, setIntervalMin] = useState(15)
+  const [intervalMax, setIntervalMax] = useState(1440)
+  const [intervalDraft, setIntervalDraft] = useState('60')
+  const [intervalBusy, setIntervalBusy] = useState(false)
+  const [intervalError, setIntervalError] = useState<string | undefined>()
+  const [intervalSaved, setIntervalSaved] = useState(false)
   const [list, setList] = useState<MemoryListSnapshot>({ status: 'loading', entries: [] })
   const [query, setQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
@@ -542,6 +873,15 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
   const [forgetTarget, setForgetTarget] = useState<MemoryEntryView | undefined>()
   const [forgetBusy, setForgetBusy] = useState(false)
   const [forgetError, setForgetError] = useState<string | undefined>()
+  const [promotion, setPromotion] = useState<MemoryPromotionUiState>({
+    promotions: [],
+    reviewQueue: [],
+    shared: [],
+    canPromoteGlobal: false,
+    canPromoteDepartments: [],
+    canReview: false,
+    busy: false,
+  })
   const detailRequest = useRef(0)
 
   const loadSettings = useCallback(async (): Promise<void> => {
@@ -551,6 +891,15 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
       const body = await memoryRequest('memory.settings')
       if (body.error !== undefined) throw new Error(body.error)
       setEnabled(body.enabled === true)
+      const minutes = numberField(body.consolidationIntervalMinutes, 60)
+      const min = numberField(body.intervalMin, 15)
+      const max = numberField(body.intervalMax, 1440)
+      setConsolidationIntervalMinutes(minutes)
+      setIntervalMin(min)
+      setIntervalMax(max)
+      setIntervalDraft(String(minutes))
+      setIntervalError(undefined)
+      setIntervalSaved(false)
     } catch (error: unknown) {
       setSettingsError(failureText(error))
     } finally {
@@ -572,10 +921,57 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
     }
   }, [])
 
+  const loadPromotions = useCallback(async (): Promise<void> => {
+    try {
+      const body = await memoryRequest('memory.promotions', { view: 'review' })
+      // A caller without review permission gets a 403 body here; that is a normal
+      // page state (the row action and review section stay hidden), not an error.
+      if (body.error !== undefined) return
+      const promotions = Array.isArray(body.promotions)
+        ? (body.promotions as MemoryPromotionView[]).filter(item => typeof item?.id === 'string')
+        : []
+      const reviewQueue = Array.isArray(body.reviewQueue)
+        ? (body.reviewQueue as MemoryReviewItem[]).filter(item => typeof item?.promotion?.id === 'string')
+        : []
+      const canPromote = typeof body.canPromote === 'object' && body.canPromote !== null
+        ? body.canPromote as { global?: unknown; departments?: unknown }
+        : {}
+      const departments = Array.isArray(canPromote.departments)
+        ? canPromote.departments.filter((code): code is string => typeof code === 'string' && code !== '')
+        : []
+      setPromotion(current => ({
+        ...current,
+        promotions,
+        reviewQueue,
+        canPromoteGlobal: canPromote.global === true,
+        canPromoteDepartments: departments,
+        canReview: body.canReview === true,
+      }))
+    } catch {
+      // Promotion state is an enhancement over the personal page; a failed read must
+      // not turn the page into an error screen.
+    }
+  }, [])
+
+  const loadShared = useCallback(async (): Promise<void> => {
+    try {
+      const body = await memoryRequest('memory.shared')
+      if (body.error !== undefined) return
+      const entries = Array.isArray(body.entries)
+        ? (body.entries as SharedMemoryView[]).filter(item => typeof item?.id === 'string' && typeof item.title === 'string')
+        : []
+      setPromotion(current => ({ ...current, shared: entries }))
+    } catch {
+      // Same rule as loadPromotions: the shared section is optional.
+    }
+  }, [])
+
   useEffect(() => {
     void loadSettings()
     void loadList()
-  }, [loadList, loadSettings])
+    void loadPromotions()
+    void loadShared()
+  }, [loadList, loadPromotions, loadSettings, loadShared])
 
   const openDetail = useCallback((entry: MemoryEntryView): void => {
     const request = detailRequest.current + 1
@@ -613,6 +1009,10 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
       const body = await memoryRequest('memory.set-enabled', { enabled: target })
       if (body.error !== undefined) throw new Error(body.error)
       setEnabled(typeof body.enabled === 'boolean' ? body.enabled : target)
+      if (typeof body.consolidationIntervalMinutes === 'number') {
+        setConsolidationIntervalMinutes(body.consolidationIntervalMinutes)
+        setIntervalDraft(String(body.consolidationIntervalMinutes))
+      }
       setPendingEnabled(undefined)
     } catch (error: unknown) {
       setToggleError(failureText(error))
@@ -620,6 +1020,33 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
       setToggleBusy(false)
     }
   }, [pendingEnabled])
+
+  const saveInterval = useCallback(async (): Promise<void> => {
+    const parsed = Number(intervalDraft)
+    if (!Number.isInteger(parsed) || parsed < intervalMin || parsed > intervalMax) {
+      setIntervalError(t('memoryIntervalInvalid'))
+      setIntervalSaved(false)
+      return
+    }
+    setIntervalBusy(true)
+    setIntervalError(undefined)
+    setIntervalSaved(false)
+    try {
+      const body = await memoryRequest('memory.save-settings', {
+        consolidationIntervalMinutes: parsed,
+      })
+      if (body.error !== undefined) throw new Error(body.error)
+      if (typeof body.enabled === 'boolean') setEnabled(body.enabled)
+      const saved = numberField(body.consolidationIntervalMinutes, parsed)
+      setConsolidationIntervalMinutes(saved)
+      setIntervalDraft(String(saved))
+      setIntervalSaved(true)
+    } catch (error: unknown) {
+      setIntervalError(failureText(error))
+    } finally {
+      setIntervalBusy(false)
+    }
+  }, [intervalDraft, intervalMin, intervalMax, t])
 
   const startEdit = useCallback((entry: MemoryEntryView): void => {
     setDetail(undefined)
@@ -673,6 +1100,80 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
     }
   }, [forgetTarget])
 
+  const startPromotion = useCallback((entry: MemoryEntryView): void => {
+    setPromotion(current => ({
+      ...current,
+      error: undefined,
+      notice: undefined,
+      target: {
+        entry,
+        scope: current.canPromoteDepartments.length > 0 ? 'department' : 'global',
+        confirm: false,
+      },
+    }))
+  }, [])
+
+  const cancelPromotion = useCallback((): void => {
+    setPromotion(current => ({ ...current, target: undefined, error: undefined }))
+  }, [])
+
+  const changePromotionScope = useCallback((scope: 'department' | 'global'): void => {
+    setPromotion(current => current.target === undefined
+      ? current
+      : { ...current, target: { ...current.target, scope } })
+  }, [])
+
+  const changePromotionConfirm = useCallback((confirm: boolean): void => {
+    setPromotion(current => current.target === undefined
+      ? current
+      : { ...current, target: { ...current.target, confirm } })
+  }, [])
+
+  const submitPromotion = useCallback(async (): Promise<void> => {
+    const target = promotion.target
+    if (target === undefined) return
+    setPromotion(current => ({ ...current, busy: true, error: undefined, notice: undefined }))
+    try {
+      const body = await memoryRequest('memory.promote', {
+        id: target.entry.id,
+        targetScope: target.scope,
+        ...(target.scope === 'department' && promotion.canPromoteDepartments.length > 0
+          ? { departmentCode: promotion.canPromoteDepartments[0] }
+          : {}),
+        confirm: target.confirm,
+      })
+      if (body.error !== undefined) throw new Error(body.error)
+      const applied = body.applied === true
+      setPromotion(current => ({
+        ...current,
+        busy: false,
+        target: undefined,
+        error: undefined,
+        notice: applied ? t('memoryPromoteApplied') : t('memoryPromotePending'),
+      }))
+      await Promise.all([loadPromotions(), loadShared()])
+    } catch (error: unknown) {
+      setPromotion(current => ({ ...current, busy: false, error: failureText(error) }))
+    }
+  }, [loadPromotions, loadShared, promotion.canPromoteDepartments, promotion.target, t])
+
+  const reviewPromotion = useCallback(async (id: string, decision: 'approve' | 'reject'): Promise<void> => {
+    setPromotion(current => ({ ...current, busy: true, error: undefined, notice: undefined }))
+    try {
+      const body = await memoryRequest('memory.review-promotion', { id, decision })
+      if (body.error !== undefined) throw new Error(body.error)
+      setPromotion(current => ({
+        ...current,
+        busy: false,
+        error: undefined,
+        notice: decision === 'approve' ? t('memoryReviewApproved') : t('memoryReviewRejected'),
+      }))
+      await Promise.all([loadPromotions(), loadShared()])
+    } catch (error: unknown) {
+      setPromotion(current => ({ ...current, busy: false, error: failureText(error) }))
+    }
+  }, [loadPromotions, loadShared, t])
+
   return (
     <KnowledgeMemoryView
       t={t}
@@ -680,6 +1181,19 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
       enabled={enabled}
       settingsLoading={settingsLoading}
       {...(settingsError === undefined ? {} : { settingsError })}
+      consolidationIntervalMinutes={consolidationIntervalMinutes}
+      intervalMin={intervalMin}
+      intervalMax={intervalMax}
+      intervalDraft={intervalDraft}
+      intervalBusy={intervalBusy}
+      {...(intervalError === undefined ? {} : { intervalError })}
+      intervalSaved={intervalSaved}
+      onIntervalDraftChange={(value) => {
+        setIntervalDraft(value)
+        setIntervalError(undefined)
+        setIntervalSaved(false)
+      }}
+      onSaveInterval={() => { void saveInterval() }}
       list={list}
       query={query}
       typeFilter={typeFilter}
@@ -711,6 +1225,15 @@ export function KnowledgeMemory(props: KnowledgeMemoryProps): ReactNode {
       onRetrySettings={() => { void loadSettings() }}
       onRetryList={() => { void loadList() }}
       {...(onOpenSource === undefined ? {} : { onOpenSource })}
+      promotion={promotion}
+      promotionActions={{
+        onStart: startPromotion,
+        onCancel: cancelPromotion,
+        onScopeChange: changePromotionScope,
+        onConfirmChange: changePromotionConfirm,
+        onSubmit: () => { void submitPromotion() },
+        onReview: (id, decision) => { void reviewPromotion(id, decision) },
+      }}
     />
   )
 }

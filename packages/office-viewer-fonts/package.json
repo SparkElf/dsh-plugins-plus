@@ -1,7 +1,7 @@
 {
   "name": "@sparkelf/dsh-office-viewer-fonts",
-  "version": "0.1.8",
-  "description": "Office and Chinese government font assets for Better Sidebar Office Viewer and OfficeCLI workflow instructions.",
+  "version": "0.1.9",
+  "description": "Office and Chinese government font assets for Better Sidebar Office Viewer.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -32,14 +32,12 @@
     "lib/types/**/*.d.ts",
     "assets/fonts/*.ttf",
     "assets/fonts/README.md",
-    "skills/office-government-docs/SKILL.md",
-    "skills/office-government-docs/i18n/zh.json",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
+    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown && chmod -R a+rX lib",
     "prepack": "pnpm run build",
     "prepublishOnly": "node ../../scripts/prepublish-guard.mjs"
   },
@@ -57,12 +55,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-skill": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-host-webserver": ">=0.1.7-rc.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/dsh-skill": "0.1.7-rc.2",
     "@deepseek-ai/dsh-host-webserver": "0.1.7-rc.2",
     "tsdown": "^0.22.2"
   }

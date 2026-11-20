@@ -478,6 +478,56 @@ const browserSkillProvider = {
   },
 }
 
+/** The browser entry skill: chooses headless scraping or the local companion. */
+const BROWSER_GUIDE_SKILL_NAME = 'browser'
+const BROWSER_GUIDE_SKILL_FILE = new URL('../skills/browser/SKILL.md', import.meta.url)
+const BROWSER_GUIDE_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+const BROWSER_GUIDE_SKILL = {
+  name: BROWSER_GUIDE_SKILL_NAME,
+  description:
+    '浏览器自动化总入口。默认用工作区 Playwright headless 抓取网页/大屏；只有用户明确要求“本地浏览器/已登录 Chrome/companion”才使用 Browser Bridge。账号密码登录走凭据插件，不强制 Companion。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: BROWSER_GUIDE_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: BROWSER_GUIDE_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: BROWSER_GUIDE_SKILL_FILE,
+} as const
+
+const browserGuideSkillProvider = {
+  name: BROWSER_GUIDE_SKILL_NAME,
+  list: () => Promise.resolve([BROWSER_GUIDE_SKILL]),
+  async get() {
+    return { ...BROWSER_GUIDE_SKILL, content: await readFile(BROWSER_GUIDE_SKILL_FILE, 'utf8') }
+  },
+}
+
+/** The headless scraping skill the browser entry points at as the default mode. */
+const BROWSER_HEADLESS_SKILL_NAME = 'browser-headless'
+const BROWSER_HEADLESS_SKILL_FILE = new URL('../skills/browser-headless/SKILL.md', import.meta.url)
+const BROWSER_HEADLESS_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+
+const BROWSER_HEADLESS_SKILL = {
+  name: BROWSER_HEADLESS_SKILL_NAME,
+  description:
+    '用工作区 Playwright + Chromium 无头抓取网页/大屏数据。默认模式；支持账号密码登录（凭据插件注入）、表格/文本/截图/JSON 输出。需要用户已登录的本地浏览器时改用 browser-bridge-companion。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: BROWSER_HEADLESS_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: BROWSER_HEADLESS_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: BROWSER_HEADLESS_SKILL_FILE,
+} as const
+
+const browserHeadlessSkillProvider = {
+  name: BROWSER_HEADLESS_SKILL_NAME,
+  list: () => Promise.resolve([BROWSER_HEADLESS_SKILL]),
+  async get() {
+    return { ...BROWSER_HEADLESS_SKILL, content: await readFile(BROWSER_HEADLESS_SKILL_FILE, 'utf8') }
+  },
+}
+
 const PROVISIONING_SKILL_NAME = 'skill-provisioning'
 const PROVISIONING_SKILL_FILE = new URL('../skills/skill-provisioning/SKILL.md', import.meta.url)
 const PROVISIONING_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -548,6 +598,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.skills.registerProvider(() => prefectScriptSkillProvider)
   ctx.skills.registerProvider(() => provisioningSkillProvider)
   ctx.skills.registerProvider(() => browserSkillProvider)
+  // The workspace image carries browser playbooks as files under /workspace/skills, but the
+  // skill center only lists what a provider serves. Shipping both with the plugin makes them
+  // appear for every account instead of depending on the image layer.
+  ctx.skills.registerProvider(() => browserGuideSkillProvider)
+  ctx.skills.registerProvider(() => browserHeadlessSkillProvider)
 
   const ensureMcp = async (): Promise<void> => {
     if (mcpFiber !== undefined && mcpFiber.uid !== null) return

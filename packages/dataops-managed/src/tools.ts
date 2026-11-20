@@ -18,6 +18,8 @@
  * @module tools
  */
 
+import { randomBytes } from 'node:crypto'
+
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ReviewApi } from './review-api.ts'
@@ -79,6 +81,93 @@ const provisioningDepartmentCode = (tool: string, value: string | undefined): st
   const code = typeof value === 'string' ? value.trim() : ''
   if (code === '') throw new Error(tool + ': department_code is required')
   return code
+}
+
+/**
+ * Roles a tool-created account receives.
+ *
+ * This is the same minimal set the IM private-chat auto-provision path writes: an ordinary
+ * member, the basic data-security tier, and the admission role that lets the account open its
+ * AI workspace. None of them carries a business capability or a resource grant.
+ */
+const PROVISIONED_USER_ROLES = ['应用人员', '初级权限', 'AI 工作区成员'] as const
+
+/** The one role this tool set never assigns or removes; super-admin changes stay in the console. */
+const SUPER_ADMIN_ROLE = '超级管理员'
+
+/** The department a provisioned account lands in until an administrator assigns one. */
+const PROVISIONED_DEPARTMENT = 'unassigned'
+
+/** Trim one optional string argument; a non-string becomes the empty string. */
+const textArg = (value: unknown): string => typeof value === 'string' ? value.trim() : ''
+
+/** Digits only, used to compare phone numbers written with separators or a country code. */
+const phoneDigits = (value: string): string => value.replace(/\D+/gu, '')
+
+/** Case-insensitive exact match helper for usernames and emails. */
+const sameText = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase()
+
+/** The comparable form the backend's password policy uses for account tokens. */
+const comparable = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/gu, '')
+
+/**
+ * Generate an initial password the backend's strong-password policy accepts.
+ *
+ * The value never leaves this function's caller: it is sent to DataOps once, stored as a hash,
+ * and deliberately not returned, logged or audited. A tool-created account therefore cannot be
+ * signed into until an administrator sets a password in the user console, which is the intended
+ * credential hand-off for an AI-driven provisioning action.
+ * @param context - account fields the policy rejects when the password embeds them.
+ */
+const generatedInitialPassword = (context: { username: string; displayName: string; email: string }): string => {
+  const localPart = context.email.includes('@') ? context.email.split('@')[0] ?? '' : context.email
+  const tokens = [context.username, context.displayName, localPart]
+    .map(token => comparable(token))
+    .filter(token => token.length >= 3)
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = 'Aa1!' + randomBytes(32).toString('base64url')
+    const comparableCandidate = comparable(candidate)
+    if (tokens.every(token => !comparableCandidate.includes(token))) return candidate
+  }
+  // A 20-attempt collision is effectively impossible for random 32-byte material; keeping a
+  // deterministic class-complete fallback means creation never fails for a password-policy reason.
+  return 'Aa1!' + randomBytes(48).toString('hex') + 'Zz9!'
+}
+
+/** One user row projected to the fields the lookup contract promises, never password material. */
+const projectUserRow = (row: Record<string, unknown>): Record<string, Json> => {
+  const department = typeof row.department === 'object' && row.department !== null
+    ? row.department as Record<string, unknown>
+    : {}
+  const departmentCode = textArg(department.code)
+  const roles = Array.isArray(row.roles)
+    ? row.roles.flatMap((role) => {
+      if (typeof role !== 'object' || role === null) return []
+      const entry = role as Record<string, unknown>
+      const code = textArg(entry.code)
+      if (code === '') return []
+      return [{ code, name: textArg(entry.name) || code }]
+    })
+    : []
+  return {
+    id: textArg(row.id),
+    username: textArg(row.username),
+    displayName: textArg(row.displayName),
+    email: textArg(row.email),
+    mobile: textArg(row.phone) || null,
+    enabled: row.enabled === true,
+    departments: departmentCode === '' ? [] : [{ code: departmentCode, name: textArg(department.name) || departmentCode }],
+    roles,
+  }
+}
+
+/** Read one user row from a DataOps response body without trusting its shape. */
+const userRowOf = (body: unknown): Record<string, unknown> | undefined => {
+  if (typeof body !== 'object' || body === null) return undefined
+  const user = (body as { user?: unknown }).user
+  return typeof user === 'object' && user !== null && !Array.isArray(user)
+    ? user as Record<string, unknown>
+    : undefined
 }
 
 /**
@@ -798,6 +887,338 @@ export function buildAiManagementTools(
             requestId: payload.requestId,
             subscribers: collectHub.size(),
           }
+        },
+      }),
+    },
+    {
+      name: 'dataops_user_lookup',
+      definition: defineTool({
+        name: 'dataops_user_lookup',
+        description: 'Look up DataOps users by username, display name, email, mobile or WeCom userid. Administrator and department-administrator visibility apply; DataOps returns only the users inside the caller\'s existing data scope. Read-only and never returns password or credential material.',
+        parameters: {
+          username: { type: 'string', description: 'Exact login name (case-insensitive).' },
+          display_name: { type: 'string', description: 'Display-name keyword (case-insensitive contains).' },
+          email: { type: 'string', description: 'Exact email address (case-insensitive).' },
+          mobile: { type: 'string', description: 'Exact mobile number; separators and a country prefix are tolerated.' },
+          wecom_user_id: { type: 'string', description: 'Exact WeCom address-book userid.' },
+          department_code: { type: 'string', description: 'Restrict to one department code.' },
+          enabled_only: { type: 'boolean', description: 'Return enabled accounts only. Defaults to false.' },
+          limit: { type: 'number', description: 'Maximum rows (default 20, max 50).' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: {
+          username?: string
+          display_name?: string
+          email?: string
+          mobile?: string
+          wecom_user_id?: string
+          department_code?: string
+          enabled_only?: boolean
+          limit?: number
+        }) => {
+          const username = textArg(args.username)
+          const displayName = textArg(args.display_name)
+          const email = textArg(args.email)
+          const mobile = textArg(args.mobile)
+          const wecomUserId = textArg(args.wecom_user_id)
+          const departmentCode = textArg(args.department_code)
+          const enabledOnly = args.enabled_only === true
+          if (username === '' && displayName === '' && email === '' && mobile === '' && wecomUserId === '') {
+            throw new Error('dataops_user_lookup: provide at least one of username, display_name, email, mobile or wecom_user_id')
+          }
+          const limit = Math.max(1, Math.min(50, Math.round(args.limit ?? 20)))
+          const params = new URLSearchParams()
+          const search = username || displayName || email || mobile
+          if (search !== '') params.set('search', search)
+          if (wecomUserId !== '') params.set('wecomUserId', wecomUserId)
+          if (departmentCode !== '') params.set('departmentCode', departmentCode)
+          params.set('page', '1')
+          params.set('pageSize', '100')
+          const body = await call('/api/system/users?' + params.toString())
+          const rows = typeof body === 'object' && body !== null && Array.isArray((body as { items?: unknown }).items)
+            ? ((body as { items: unknown[] }).items).filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null)
+            : []
+          const queryDigits = phoneDigits(mobile)
+          const users = rows.filter((row) => {
+            if (username !== '' && !sameText(textArg(row.username), username)) return false
+            if (email !== '' && !sameText(textArg(row.email), email)) return false
+            if (displayName !== '' && !textArg(row.displayName).toLowerCase().includes(displayName.toLowerCase())) return false
+            if (mobile !== '') {
+              const storedDigits = phoneDigits(textArg(row.phone))
+              if (queryDigits === '' || storedDigits === '') return false
+              if (storedDigits !== queryDigits && !(queryDigits.length >= 7 && storedDigits.endsWith(queryDigits))) return false
+            }
+            if (enabledOnly && row.enabled !== true) return false
+            return true
+          })
+          return {
+            users: users.slice(0, limit).map(projectUserRow),
+            count: Math.min(users.length, limit),
+            scanned: rows.length,
+            filters: {
+              username: username || null,
+              displayName: displayName || null,
+              email: email || null,
+              mobile: mobile || null,
+              wecomUserId: wecomUserId || null,
+              departmentCode: departmentCode || null,
+              enabledOnly: enabledOnly === true,
+            },
+          } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_user_create',
+      definition: defineTool({
+        name: 'dataops_user_create',
+        description: 'Create an enabled ordinary DataOps account with the same minimal roles as IM auto-provisioning (应用人员/初级权限/AI 工作区成员), in 待分配部门 unless a department is named, and with ZERO data-resource grants. Requires confirm=true and a user approval for the real write; dry_run=true previews without writing. The initial password is random, never returned and never logged — an administrator must set the password in the user console before hand-off. Use dataops_user_lookup first.',
+        parameters: {
+          username: { type: 'string', required: true, description: 'Login name.' },
+          display_name: { type: 'string', required: true, description: 'Display name.' },
+          email: { type: 'string', required: true, description: 'Email address.' },
+          mobile: { type: 'string', description: 'Optional mobile number.' },
+          department_code: { type: 'string', description: 'Department code. Defaults to unassigned (待分配部门).' },
+          dry_run: { type: 'boolean', description: 'Preview the account that would be created without writing. Defaults to false.' },
+          confirm: { type: 'boolean', description: 'Must be true for a real create; the tool also asks the user for approval.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: {
+          username: string
+          display_name: string
+          email: string
+          mobile?: string
+          department_code?: string
+          dry_run?: boolean
+          confirm?: boolean
+        }, exec) => {
+          const username = textArg(args.username)
+          const displayName = textArg(args.display_name)
+          const email = textArg(args.email)
+          if (username === '' || displayName === '' || email === '') {
+            throw new Error('dataops_user_create: username, display_name and email are required')
+          }
+          const mobile = textArg(args.mobile)
+          const departmentCode = textArg(args.department_code) || PROVISIONED_DEPARTMENT
+          const roles = [...PROVISIONED_USER_ROLES]
+          const credential = {
+            mode: 'admin_reset_required',
+            message: '初始密码由工具随机生成且不回显；请在用户管理页为该账号设置密码后再交付。',
+          }
+          const preview = {
+            username,
+            displayName,
+            email,
+            mobile: mobile || null,
+            departmentCode,
+            enabled: true,
+            roles,
+            directResourceGrants: 0,
+            credential,
+          }
+          if (args.dry_run === true) {
+            return { dryRun: true, wouldCreate: preview } as unknown as Record<string, Json>
+          }
+          if (args.confirm !== true) {
+            throw new Error('dataops_user_create: confirm must be true for a real create (use dry_run=true to preview)')
+          }
+          await approve(
+            'dataops_user_create',
+            exec,
+            'Create DataOps user ' + username + ' with roles ' + roles.join(' / ') + ' and no resource grants.',
+          )
+          const body = await call('/api/system/users', {
+            method: 'POST',
+            body: JSON.stringify({
+              username,
+              displayName,
+              email,
+              ...(mobile === '' ? {} : { phone: mobile }),
+              departmentCode,
+              roleCodes: roles,
+              password: generatedInitialPassword({ username, displayName, email }),
+            }),
+          })
+          const row = userRowOf(body)
+          if (row === undefined) throw new Error('dataops_user_create: DataOps created the account but returned no user record')
+          const user = projectUserRow(row)
+          const actorUserId = readScope()?.userId ?? null
+          audit('dataops_user_create', exec, {
+            actorUserId,
+            userId: user.id,
+            username,
+            roles,
+            departmentCode,
+            directResourceGrants: 0,
+          })
+          return {
+            created: true,
+            user,
+            defaultRoles: roles,
+            directResourceGrants: 0,
+            credential,
+          } as unknown as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'dataops_role_assign',
+      definition: defineTool({
+        name: 'dataops_role_assign',
+        description: 'Add or remove roles on one or more DataOps users (role_codes replaces nothing: action=add merges, action=remove subtracts, and the backend keeps all other roles). Administrator only; DataOps enforces role hierarchy and data scope on every write. The 超级管理员 role can never be assigned or removed here. Requires confirm=true and a user approval for real writes; dry_run=true previews. Adds no resource grants.',
+        parameters: {
+          user_ids: {
+            type: 'array',
+            required: true,
+            description: 'DataOps user ids (UUID strings).',
+            items: { type: 'string' },
+          },
+          role_codes: {
+            type: 'array',
+            required: true,
+            description: 'Role codes to add or remove, for example 应用人员 / 初级权限.',
+            items: { type: 'string' },
+          },
+          action: { type: 'string', description: 'add (default) or remove.' },
+          dry_run: { type: 'boolean', description: 'Preview each user\'s before/after roles without writing. Defaults to false.' },
+          confirm: { type: 'boolean', description: 'Must be true for a real change; the tool also asks the user for approval.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: {
+          user_ids: string[]
+          role_codes: string[]
+          action?: string
+          dry_run?: boolean
+          confirm?: boolean
+        }, exec) => {
+          if (!Array.isArray(args.user_ids) || args.user_ids.length === 0) {
+            throw new Error('dataops_role_assign: user_ids must be a non-empty array')
+          }
+          const userIds = Array.from(new Set(args.user_ids.map(textArg).filter(id => id !== '')))
+          if (userIds.length === 0) throw new Error('dataops_role_assign: user_ids must contain non-empty DataOps user ids')
+          if (userIds.length > 50) throw new Error('dataops_role_assign: at most 50 users per call')
+          const requestedRoles = Array.from(new Set((args.role_codes ?? []).map(textArg).filter(code => code !== '')))
+          if (requestedRoles.length === 0) throw new Error('dataops_role_assign: role_codes must be a non-empty array')
+          if (requestedRoles.includes(SUPER_ADMIN_ROLE)) {
+            throw new Error('dataops_role_assign: 超级管理员 role cannot be assigned or removed through this tool; use the administrator console')
+          }
+          const action = args.action === undefined ? 'add' : textArg(args.action).toLowerCase()
+          if (action !== 'add' && action !== 'remove') throw new Error('dataops_role_assign: action must be add or remove')
+
+          const plans: Array<{
+            userId: string
+            username: string
+            ok: boolean
+            changed: boolean
+            beforeRoles: string[]
+            afterRoles: string[]
+            updatedAt?: string
+            error?: string
+          }> = []
+          for (const userId of userIds) {
+            try {
+              const body = await call('/api/system/users/' + encodeURIComponent(userId))
+              const row = userRowOf(body)
+              if (row === undefined) throw new Error('user record missing from the response')
+              const beforeRoles = Array.isArray(row.roles)
+                ? row.roles.flatMap((role) => {
+                  if (typeof role !== 'object' || role === null) return []
+                  const code = textArg((role as Record<string, unknown>).code)
+                  return code === '' ? [] : [code]
+                })
+                : []
+              if (beforeRoles.includes(SUPER_ADMIN_ROLE)) {
+                plans.push({ userId, username: textArg(row.username), ok: false, changed: false, beforeRoles, afterRoles: beforeRoles, error: 'target is a 超级管理员; super-admin changes stay in the administrator console' })
+                continue
+              }
+              const afterRoles = action === 'add'
+                ? Array.from(new Set([...beforeRoles, ...requestedRoles]))
+                : beforeRoles.filter(code => !requestedRoles.includes(code))
+              if (afterRoles.length === 0) {
+                plans.push({ userId, username: textArg(row.username), ok: false, changed: false, beforeRoles, afterRoles, error: 'the change would leave the user without any role' })
+                continue
+              }
+              const changed = afterRoles.length !== beforeRoles.length || afterRoles.some(code => !beforeRoles.includes(code))
+              plans.push({
+                userId,
+                username: textArg(row.username),
+                ok: true,
+                changed,
+                beforeRoles,
+                afterRoles,
+                updatedAt: textArg(row.updatedAt),
+              })
+            } catch (error) {
+              plans.push({
+                userId,
+                username: '',
+                ok: false,
+                changed: false,
+                beforeRoles: [],
+                afterRoles: [],
+                error: error instanceof Error ? error.message : String(error),
+              })
+            }
+          }
+
+          const changedPlans = plans.filter(plan => plan.ok && plan.changed)
+          const rejectedPlans = plans.filter(plan => !plan.ok).length
+          if (args.dry_run === true) {
+            return {
+              dryRun: true,
+              action,
+              roleCodes: requestedRoles,
+              results: plans,
+              changed: changedPlans.length,
+              failed: rejectedPlans,
+            } as unknown as Record<string, Json>
+          }
+          if (changedPlans.length === 0) {
+            return { action, roleCodes: requestedRoles, results: plans, changed: 0, failed: rejectedPlans } as unknown as Record<string, Json>
+          }
+          if (args.confirm !== true) {
+            throw new Error('dataops_role_assign: confirm must be true for a real change (use dry_run=true to preview)')
+          }
+          await approve(
+            'dataops_role_assign',
+            exec,
+            (action === 'add' ? 'Add' : 'Remove') + ' role(s) ' + requestedRoles.join(' / ') + ' for ' + String(changedPlans.length) + ' DataOps user(s).',
+          )
+          let failed = rejectedPlans
+          for (const plan of changedPlans) {
+            if (plan.updatedAt === undefined || plan.updatedAt === '') {
+              plan.ok = false
+              plan.error = 'user record has no updatedAt optimistic token; re-run the lookup'
+              failed += 1
+              continue
+            }
+            try {
+              await call('/api/system/users/' + encodeURIComponent(plan.userId), {
+                method: 'PATCH',
+                body: JSON.stringify({ updatedAt: plan.updatedAt, roleCodes: plan.afterRoles }),
+              })
+            } catch (error) {
+              plan.ok = false
+              plan.error = error instanceof Error ? error.message : String(error)
+              failed += 1
+            }
+          }
+          const actorUserId = readScope()?.userId ?? null
+          audit('dataops_role_assign', exec, {
+            actorUserId,
+            action,
+            roleCodes: requestedRoles,
+            userIds: changedPlans.map(plan => plan.userId),
+            changed: changedPlans.filter(plan => plan.ok).length,
+            failed,
+          })
+          return {
+            action,
+            roleCodes: requestedRoles,
+            results: plans,
+            changed: changedPlans.filter(plan => plan.ok).length,
+            failed,
+          } as unknown as Record<string, Json>
         },
       }),
     },
