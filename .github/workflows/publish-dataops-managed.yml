@@ -1,0 +1,32 @@
+name: publish-dataops-managed
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build package
+        run: pnpm --filter @sparkelf/dsh-dataops-managed build
+
+      - name: Publish with provenance
+        working-directory: packages/dataops-managed
+        run: npm publish --ignore-scripts --access public --provenance
