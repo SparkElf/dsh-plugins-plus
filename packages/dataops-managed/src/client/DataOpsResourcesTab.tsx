@@ -89,8 +89,10 @@ const normalizeEmbedBase = (configured: string, sameOrigin: boolean): { base: st
     const base = new URL(configured, window.location.origin)
     const page = window.location
     const isLoopback = base.hostname === '127.0.0.1' || base.hostname === 'localhost'
+    const isPrivate = /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2[0-9]|3[01])\.)/u.test(base.hostname)
     const underProxyPrefix = page.pathname !== '/' && !/^\/(?:index\.html)?$/u.test(page.pathname)
-    if (!sameOrigin && isLoopback && underProxyPrefix && base.origin !== page.origin) {
+    // 同一个部署换网后，host config 可能仍返回旧私网 IP；只要在 /dsh 代理下，就改写到当前门户 origin。
+    if (underProxyPrefix && base.origin !== page.origin && (isLoopback || isPrivate)) {
       return { base: page.origin, sameOrigin: true }
     }
     return { base: configured, sameOrigin }
