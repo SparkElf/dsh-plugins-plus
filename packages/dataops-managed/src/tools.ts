@@ -279,8 +279,8 @@ export function buildAiManagementTools(
   }
 
   /**
-   * Keep only the fields the DataOps execute DTO accepts. The plan tool returns
-   * `createSql`/`targetSchema`/`notes` beside `createTable`; if the model passes
+   * Keep only the fields the DataOps execute/validate DTOs accept. The validated plan
+   * carries `createSql`/`targetSchema`/`notes` beside `createTable`; if the model passes
    * the whole plan (or rebuilds it after a table-name edit), the backend's
    * `forbidNonWhitelisted` pipe rejects the call with a generic 400.
    */
@@ -322,6 +322,29 @@ export function buildAiManagementTools(
       columns,
     }
   }
+
+  /**
+   * Keep only `{sourceKey,targetColumn}` from a model-written mapping list.
+   *
+   * The validated plan carries sourceHeader/targetDataType/confidence beside the pair; the
+   * backend DTO drops them, but rejecting a malformed entry here names the offending index
+   * instead of letting the server answer a generic "no usable mapping".
+   */
+  const normalizeMappings = (
+    tool: string,
+    entries: readonly unknown[],
+  ): Array<{ sourceKey: string; targetColumn: string }> => entries.map((entry, index) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new Error(tool + ': mappings_json[' + index + '] must be an object')
+    }
+    const mapping = entry as Record<string, unknown>
+    const sourceKey = typeof mapping.sourceKey === 'string' ? mapping.sourceKey.trim() : ''
+    const targetColumn = typeof mapping.targetColumn === 'string' ? mapping.targetColumn.trim() : ''
+    if (!sourceKey || !targetColumn) {
+      throw new Error(tool + ': mappings_json[' + index + '] needs sourceKey and targetColumn')
+    }
+    return { sourceKey, targetColumn }
+  })
 
   return [
     {
@@ -706,10 +729,9 @@ export function buildAiManagementTools(
         description: 'Parse one spreadsheet attachment from the workspace and return DataOps\'s preview plus the importable database destinations. Read-only: it does not create a table and does not write rows. Use this first in the data-collection skill, then ask the user to choose the destination when more than one is returned.',
         parameters: {
           file_path: { type: 'string', required: true, description: 'Absolute or workspace-relative path to one .xlsx/.xls/.csv/.tsv file.' },
-          model_id: { type: 'number', description: 'Optional shared AI model id for the later plan call.' },
         },
         output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
-        execute: async (args: { file_path: string; model_id?: number }, exec) => {
+        execute: async (args: { file_path: string }, exec) => {
           const preview = await collectApi.preview(args.file_path)
           const dataSources = await collectApi.dataSources()
           audit('dataops_collect_preview', exec, {
@@ -726,38 +748,75 @@ export function buildAiManagementTools(
       }),
     },
     {
-      name: 'dataops_collect_plan',
+      name: 'dataops_collect_validate_plan',
       definition: defineTool({
-        name: 'dataops_collect_plan',
-        description: 'Generate a create-table plan or an existing-table field mapping for a parsed spreadsheet session. Read-only: DataOps only plans, it does not execute DDL or write rows. Call this after the user has chosen a data source; pass root_schema + root_table only when appending to an existing table.',
+        name: 'dataops_collect_validate_plan',
+        description: 'Validate and normalize the spreadsheet import plan the current conversation model wrote: a create-table plan or an existing-table field mapping. Read-only and model-free: DataOps checks identifiers, data types, source keys and target columns, then returns the normalized plan, CREATE TABLE SQL or mapping summary. It does not call any AI model and does not create tables or write rows. Call this after generating the plan and before presenting it to the user; use the returned plan for confirmation and execution.',
         parameters: {
           session_id: { type: 'string', required: true, description: 'Session id returned by dataops_collect_preview.' },
-          data_source_urn: { type: 'string', required: true, description: 'Destination URN from the preview result.' },
-          target_schema: { type: 'string', description: 'Existing-table schema; required when root_table is set.' },
-          target_table: { type: 'string', description: 'Existing table name; omit to create a new table.' },
-          model_id: { type: 'number', description: 'Optional shared AI model id.' },
+          data_source_urn: { type: 'string', description: 'Destination URN from the preview result. Required when appending to an existing table; omit only when validating a generic create-table plan.' },
+          target_schema: { type: 'string', description: 'Existing-table schema; required together with target_table.' },
+          target_table: { type: 'string', description: 'Existing table name; omit to validate a new create-table plan.' },
+          create_plan_json: { type: 'string', description: 'JSON object for CREATE_TABLE: {tableName,tableChineseName?,tableComment?,columns:[{sourceKey,name,chineseName,dataType,nullable?,comment?}]}.' },
+          mappings_json: { type: 'string', description: 'JSON array for EXISTING_TABLE: [{sourceKey,targetColumn}].' },
         },
         output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
-        execute: async (args: { session_id: string; data_source_urn: string; target_schema?: string; target_table?: string; model_id?: number }, exec) => {
-          const plan = await collectApi.plan({
+        execute: async (args: {
+          session_id: string
+          data_source_urn?: string
+          target_schema?: string
+          target_table?: string
+          create_plan_json?: string
+          mappings_json?: string
+        }, exec) => {
+          const tool = 'dataops_collect_validate_plan'
+          const createPlan = normalizeCreatePlan(
+            tool,
+            parseJsonObject(tool, 'create_plan_json', args.create_plan_json),
+          )
+          const mappings = normalizeMappings(tool, parseJsonArray(tool, 'mappings_json', args.mappings_json))
+          if (args.target_table !== undefined && args.target_table.trim() === '') {
+            throw new Error(tool + ': target_table must be a non-empty existing table name')
+          }
+          if (args.target_schema !== undefined && args.target_table === undefined) {
+            throw new Error(tool + ': target_schema requires target_table')
+          }
+          if (args.target_table !== undefined) {
+            if (!args.target_schema || args.target_schema.trim() === '') {
+              throw new Error(tool + ': target_schema is required when target_table is set')
+            }
+            if (createPlan !== undefined) {
+              throw new Error(tool + ': do not send create_plan_json when target_table is set')
+            }
+            if (mappings.length === 0) {
+              throw new Error(tool + ': mappings_json is required for EXISTING_TABLE')
+            }
+          } else {
+            if (createPlan === undefined) {
+              throw new Error(tool + ': create_plan_json is required for CREATE_TABLE')
+            }
+            if (mappings.length > 0) {
+              throw new Error(tool + ': do not send mappings_json for CREATE_TABLE')
+            }
+          }
+          const result = await collectApi.validatePlan({
             sessionId: args.session_id,
-            dataSourceUrn: args.data_source_urn,
-            ...(args.target_table
-              ? {
-                  targetTable: {
-                    schema: args.target_schema || '',
-                    table: args.target_table,
-                  },
-                }
+            ...(args.data_source_urn === undefined || args.data_source_urn.trim() === ''
+              ? {}
+              : { dataSourceUrn: args.data_source_urn }),
+            ...(args.target_schema && args.target_table
+              ? { targetTable: { schema: args.target_schema, table: args.target_table } }
               : {}),
-            ...(args.model_id === undefined ? {} : { modelId: args.model_id }),
+            ...(createPlan === undefined ? {} : { createPlan }),
+            ...(mappings.length === 0 ? {} : { mappings }),
           })
-          audit('dataops_collect_plan', exec, {
+          audit(tool, exec, {
             sessionId: args.session_id,
-            dataSourceUrn: args.data_source_urn,
-            targetTable: args.target_table ?? null,
+            dataSourceUrn: args.data_source_urn ?? null,
+            targetTable: args.target_table ?? createPlan?.tableName ?? null,
+            mode: args.target_table === undefined ? 'CREATE_TABLE' : 'EXISTING_TABLE',
           })
-          return plan as Record<string, Json>
+          return result as unknown as Record<string, Json>
         },
       }),
     },
@@ -765,18 +824,22 @@ export function buildAiManagementTools(
       name: 'dataops_collect_execute',
       definition: defineTool({
         name: 'dataops_collect_execute',
-        description: 'Execute one confirmed spreadsheet import: create a table (or write to an existing table), insert rows, and register the DataOps resource. This is the ONLY collection tool that mutates data. Call it only after the user explicitly confirms the read-only plan in natural language (e.g. 确认/开始吧); never call it while the plan is still being edited.',
+        description: 'Execute one confirmed spreadsheet import: create a table (or write to an existing table), insert rows, and register the DataOps resource. This is the ONLY collection tool that mutates data. Call it only after dataops_collect_validate_plan has normalized the plan and the user explicitly confirmed that plan in natural language (e.g. 确认/开始吧); never call it while the plan is still being edited and never call it with an unvalidated plan.',
         parameters: {
           session_id: { type: 'string', required: true, description: 'Session id from dataops_collect_preview.' },
           data_source_urn: { type: 'string', required: true, description: 'Destination URN.' },
-          mode: { type: 'string', required: true, description: 'CREATE_TABLE or EXISTING_TABLE.' },
+          mode: { type: 'string', required: true, description: 'CREATE_TABLE, EXISTING_TABLE or OVERWRITE_TABLE. OVERWRITE_TABLE truncates the target table first; require explicit user confirmation and confirm_overwrite=true.' },
           target_schema: { type: 'string', description: 'Target schema for EXISTING_TABLE.' },
           target_table: { type: 'string', description: 'Target table for EXISTING_TABLE.' },
-          create_plan_json: { type: 'string', description: 'Only plan.createTable (tableName/tableChineseName/tableComment/columns). Do not send createSql/targetSchema/notes; if the user edits the table name, call dataops_collect_plan again and pass its createTable.' },
-          mappings_json: { type: 'string', description: 'JSON array of {sourceKey,targetColumn} for EXISTING_TABLE.' },
+          create_plan_json: { type: 'string', description: 'Only plan.createTable (tableName/tableChineseName/tableComment/columns) from the plan returned by dataops_collect_validate_plan. Do not send createSql/targetSchema/notes; if the user edits the table name, regenerate the plan and call dataops_collect_validate_plan again before executing.' },
+          mappings_json: { type: 'string', description: 'JSON array of {sourceKey,targetColumn} for EXISTING_TABLE/OVERWRITE_TABLE.' },
+          confirm_overwrite: { type: 'boolean', description: 'Required true for OVERWRITE_TABLE after the user explicitly confirms that the target table will be truncated.' },
           resource_name: { type: 'string', description: 'Resource display name drafted by the plan and confirmed by the user.' },
           resource_description: { type: 'string', description: 'Optional resource description.' },
           resource_tags: { type: 'array', items: { type: 'string' }, description: 'Optional resource tags.' },
+          business_domain: { type: 'string', description: 'Business domain inferred by the conversation model from table name/comment/columns/terms, e.g. 财务域. Omit when unknown; DataOps will place it in 未分类.' },
+          domain_inference_source: { type: 'string', description: 'MODEL, USER, RULE or UNKNOWN. Defaults to MODEL when business_domain is provided.' },
+          domain_inference_confidence: { type: 'string', description: 'HIGH, MEDIUM or LOW. LOW is placed in 未分类.' },
           ai_visible: { type: 'boolean', description: 'Whether AI may retrieve this resource. Defaults to true.' },
           access_level: { type: 'string', description: 'PUBLIC, PROTECTED or PRIVATE. Defaults to PRIVATE.' },
         },
@@ -789,14 +852,21 @@ export function buildAiManagementTools(
           target_table?: string
           create_plan_json?: string
           mappings_json?: string
+          confirm_overwrite?: boolean
           resource_name?: string
           resource_description?: string
           resource_tags?: string[]
+          business_domain?: string
+          domain_inference_source?: string
+          domain_inference_confidence?: string
           ai_visible?: boolean
           access_level?: string
         }, exec) => {
-          if (args.mode !== 'CREATE_TABLE' && args.mode !== 'EXISTING_TABLE') {
-            throw new Error('dataops_collect_execute: mode must be CREATE_TABLE or EXISTING_TABLE')
+          if (args.mode !== 'CREATE_TABLE' && args.mode !== 'EXISTING_TABLE' && args.mode !== 'OVERWRITE_TABLE') {
+            throw new Error('dataops_collect_execute: mode must be CREATE_TABLE, EXISTING_TABLE or OVERWRITE_TABLE')
+          }
+          if (args.mode === 'OVERWRITE_TABLE' && args.confirm_overwrite !== true) {
+            throw new Error('dataops_collect_execute: OVERWRITE_TABLE requires confirm_overwrite=true after explicit user confirmation')
           }
           const createPlan = normalizeCreatePlan(
             'dataops_collect_execute',
@@ -818,9 +888,13 @@ export function buildAiManagementTools(
             ...(args.target_schema && args.target_table
               ? { targetTable: { schema: args.target_schema, table: args.target_table } }
               : {}),
+            ...(args.mode === 'OVERWRITE_TABLE' ? { confirmOverwrite: true } : {}),
             ...(args.resource_name === undefined ? {} : { resourceName: args.resource_name }),
             ...(args.resource_description === undefined ? {} : { resourceDescription: args.resource_description }),
             ...(args.resource_tags === undefined ? {} : { resourceTags: args.resource_tags }),
+            ...(args.business_domain === undefined ? {} : { businessDomain: args.business_domain }),
+            ...(args.domain_inference_source === undefined ? {} : { domainInferenceSource: args.domain_inference_source }),
+            ...(args.domain_inference_confidence === undefined ? {} : { domainInferenceConfidence: args.domain_inference_confidence }),
             ...(args.ai_visible === undefined ? {} : { aiVisible: args.ai_visible }),
             ...(args.access_level === undefined ? {} : { accessLevel: args.access_level }),
           }
@@ -831,6 +905,7 @@ export function buildAiManagementTools(
             mode: args.mode,
             resourceId: resource?.id ?? null,
             importedRows: result.importedRows ?? null,
+            businessDomain: args.business_domain ?? null,
           })
           return result as unknown as Record<string, Json>
         },
@@ -1458,6 +1533,118 @@ export function buildAiManagementTools(
           await resourceManagementApi.replaceGrants(args.resource_id, remaining as never)
           audit('dataops_resource_grant_revoke', exec, { resourceId: args.resource_id, removed })
           return { resourceId: args.resource_id, removed, remaining, count: remaining.length } as unknown as Record<string, Json>
+        },
+      }),
+    },
+
+    {
+      name: 'synonym_group_list',
+      definition: defineTool({
+        name: 'synonym_group_list',
+        description: 'List DataOps synonym groups: the canonical wording, its aliases and the catalog node it belongs to. Read-only. Super administrators only.',
+        parameters: {
+          catalog_node_id: { type: 'number', description: 'Only groups attached to this catalog node id.' },
+          keyword: { type: 'string', description: 'Substring of the canonical term, or an exact alias.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { catalog_node_id?: number; keyword?: string }) => {
+          const query = new URLSearchParams()
+          if (args.catalog_node_id !== undefined) query.set('catalogNodeId', String(args.catalog_node_id))
+          if (args.keyword !== undefined && args.keyword.trim() !== '') query.set('keyword', args.keyword.trim())
+          return await call('/api/ai/synonym-groups?' + query.toString()) as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'synonym_group_get',
+      definition: defineTool({
+        name: 'synonym_group_get',
+        description: 'Read one DataOps synonym group by id. Read-only. Super administrators only.',
+        parameters: {
+          group_id: { type: 'number', required: true, description: 'Synonym group id.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { group_id: number }) => {
+          if (!Number.isSafeInteger(args.group_id) || args.group_id <= 0) throw new Error('group_id must be a positive integer')
+          return await call('/api/ai/synonym-groups/' + args.group_id.toString()) as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'synonym_group_create',
+      definition: defineTool({
+        name: 'synonym_group_create',
+        description: 'Create one synonym group: a canonical wording plus up to 12 aliases. Aliases are unique across groups. Requires explicit user approval; DataOps rebuilds the search index after the write. Super administrators only.',
+        parameters: {
+          canonical: { type: 'string', required: true, description: 'The standard wording, e.g. 酒店.' },
+          aliases: { type: 'array', items: { type: 'string' }, description: 'Alternative wordings, e.g. 旅馆, 宾馆, hotel.' },
+          catalog_node_id: { type: 'number', description: 'Optional catalog node id the group belongs to.' },
+          description: { type: 'string', description: 'Optional description.' },
+          is_enabled: { type: 'boolean', description: 'Whether the group takes effect immediately (default true).' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { canonical: string; aliases?: string[]; catalog_node_id?: number; description?: string; is_enabled?: boolean }, exec) => {
+          if (typeof args.canonical !== 'string' || args.canonical.trim() === '') throw new Error('canonical is required')
+          await approve('synonym_group_create', exec, 'Create synonym group ' + args.canonical.trim())
+          const body = {
+            canonical: args.canonical.trim(),
+            aliases: args.aliases ?? [],
+            catalogNodeId: args.catalog_node_id ?? null,
+            description: args.description ?? null,
+            isEnabled: args.is_enabled ?? true,
+          }
+          const value = await call('/api/ai/synonym-groups', { method: 'POST', body: JSON.stringify(body) })
+          audit('synonym_group_create', exec, { canonical: body.canonical, aliasCount: body.aliases.length })
+          return value as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'synonym_group_update',
+      definition: defineTool({
+        name: 'synonym_group_update',
+        description: 'Update one synonym group: canonical wording, aliases, catalog node, description or enabled flag. Requires explicit user approval; DataOps rebuilds the documents that expanded the group. Super administrators only.',
+        parameters: {
+          group_id: { type: 'number', required: true, description: 'Synonym group id.' },
+          canonical: { type: 'string', description: 'New standard wording.' },
+          aliases: { type: 'array', items: { type: 'string' }, description: 'Full replacement alias list (max 12).' },
+          catalog_node_id: { type: 'number', description: 'New catalog node id.' },
+          description: { type: 'string', description: 'New description.' },
+          is_enabled: { type: 'boolean', description: 'Enable or disable the group.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { group_id: number; canonical?: string; aliases?: string[]; catalog_node_id?: number; description?: string; is_enabled?: boolean }, exec) => {
+          if (!Number.isSafeInteger(args.group_id) || args.group_id <= 0) throw new Error('group_id must be a positive integer')
+          await approve('synonym_group_update', exec, 'Update synonym group ' + args.group_id.toString())
+          const body: Record<string, unknown> = {}
+          if (args.canonical !== undefined) body.canonical = args.canonical
+          if (args.aliases !== undefined) body.aliases = args.aliases
+          if (args.catalog_node_id !== undefined) body.catalogNodeId = args.catalog_node_id
+          if (args.description !== undefined) body.description = args.description
+          if (args.is_enabled !== undefined) body.isEnabled = args.is_enabled
+          const value = await call('/api/ai/synonym-groups/' + args.group_id.toString(), { method: 'PATCH', body: JSON.stringify(body) })
+          audit('synonym_group_update', exec, { groupId: args.group_id })
+          return value as Record<string, Json>
+        },
+      }),
+    },
+    {
+      name: 'synonym_group_delete',
+      definition: defineTool({
+        name: 'synonym_group_delete',
+        description: 'Disable a synonym group (default) or permanently delete it with purge=true. Requires explicit user approval. Super administrators only.',
+        parameters: {
+          group_id: { type: 'number', required: true, description: 'Synonym group id.' },
+          purge: { type: 'boolean', description: 'Delete permanently instead of disabling.' },
+        },
+        output: { schema: OPEN_OBJECT_SCHEMA, render: renderJson },
+        execute: async (args: { group_id: number; purge?: boolean }, exec) => {
+          if (!Number.isSafeInteger(args.group_id) || args.group_id <= 0) throw new Error('group_id must be a positive integer')
+          const purge = args.purge === true
+          await approve('synonym_group_delete', exec, (purge ? 'Delete' : 'Disable') + ' synonym group ' + args.group_id.toString())
+          const value = await call('/api/ai/synonym-groups/' + args.group_id.toString() + (purge ? '?purge=true' : ''), { method: 'DELETE' })
+          audit('synonym_group_delete', exec, { groupId: args.group_id, purge })
+          return value as Record<string, Json>
         },
       }),
     },

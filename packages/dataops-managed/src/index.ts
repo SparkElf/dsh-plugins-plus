@@ -436,6 +436,27 @@ const governanceSkillProvider = {
     return { ...GOVERNANCE_SKILL, content: await readFile(GOVERNANCE_SKILL_FILE, 'utf8') }
   },
 }
+/** Synonym-governance skill: discovers and maintains synonym groups for resource search. */
+const SYNONYM_SKILL_NAME = 'dataops-synonym-governance'
+const SYNONYM_SKILL_FILE = new URL('../skills/dataops-synonym-governance/SKILL.md', import.meta.url)
+const SYNONYM_SKILL_ROOT = fileURLToPath(new URL('../skills/dataops-synonym-governance/', import.meta.url))
+const SYNONYM_SKILL = {
+  name: SYNONYM_SKILL_NAME,
+  description: '超管维护资源检索的同义词组：从数据目录自底向上抽词、判定等价、确认后写入。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: SYNONYM_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: SYNONYM_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: SYNONYM_SKILL_FILE,
+} as const
+const synonymSkillProvider = {
+  name: SYNONYM_SKILL_NAME,
+  list: () => Promise.resolve([SYNONYM_SKILL]),
+  async get() {
+    return { ...SYNONYM_SKILL, content: await readFile(SYNONYM_SKILL_FILE, 'utf8') }
+  },
+}
 /** Metadata optimizer skill: inventories metadata and proposes governance improvements. */
 const METADATA_OPTIMIZER_SKILL_NAME = 'dataops-metadata-optimizer'
 const METADATA_OPTIMIZER_SKILL_FILE = new URL('../skills/dataops-metadata-optimizer/SKILL.md', import.meta.url)
@@ -594,6 +615,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // triggers it, so the guidance must ship with the plugin rather than be pasted into a prompt.
   ctx.skills.registerProvider(() => collectSkillProvider)
   ctx.skills.registerProvider(() => governanceSkillProvider)
+  ctx.skills.registerProvider(() => synonymSkillProvider)
   ctx.skills.registerProvider(() => metadataOptimizerSkillProvider)
   ctx.skills.registerProvider(() => connectorSkillProvider)
   ctx.skills.registerProvider(() => prefectScriptSkillProvider)

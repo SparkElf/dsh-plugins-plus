@@ -1,8 +1,3 @@
----
-name: browser-bridge-companion
-description: 用户要在自己的本地 Chrome/Edge 里打开内网系统、登录、点页面、填表、截图或做网页自动化时使用。先调用 browser_bridge_status 探测 Companion；未连接时调用 browser_bridge_connect 主动连接，仍失败再让用户打开门户「浏览器桥接」一键配对或启动托盘。不要向用户索取配对码、密码或 Cookie。
----
-
 # 浏览器桥接 Companion
 
 用户说「打开这个网页」「登录内网系统」「帮我点一下」「填这个表」「截个图」并涉及**用户本地浏览器**时，按本技能执行。
