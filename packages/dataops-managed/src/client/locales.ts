@@ -156,6 +156,10 @@ export const en = {
   upgradeBusy: 'Upgrading workspace…',
   upgradeStarted: 'Upgrade started. Reload this page when the workspace reconnects.',
   upgradeFailed: 'The workspace upgrade could not be started. Try again.',
+  browserVersionTitle: 'Browser version is out of date',
+  browserVersionBody: 'This browser is version {version}; version {minimum} or newer is recommended for the local browser bridge. Download the fully offline bridge installer.',
+  browserVersionAction: 'Download browser package',
+  browserVersionLater: 'Later',
   upgradeRetry: 'Retry',
 } as const
 
@@ -320,5 +324,9 @@ export const zh: Record<ManagedDataOpsKey, string> = {
   upgradeBusy: '正在升级工作区…',
   upgradeStarted: '升级已开始。工作区重新连接后请刷新页面。',
   upgradeFailed: '工作区升级启动失败，请重试。',
+  browserVersionTitle: '浏览器版本过低',
+  browserVersionBody: '当前浏览器版本 {version}，建议升级到 {minimum} 或更高版本后使用浏览器桥接。可下载完全离线的桥接安装包。',
+  browserVersionAction: '下载浏览器安装包',
+  browserVersionLater: '稍后',
   upgradeRetry: '重试',
 }

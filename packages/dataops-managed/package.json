@@ -47,7 +47,8 @@
     "README.md",
     "LICENSE",
     "skills/**/SKILL.md",
-    "skills/browser/references/**/*"
+    "skills/browser/references/**/*",
+    "skills/**/i18n/*.json"
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",

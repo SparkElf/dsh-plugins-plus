@@ -365,8 +365,8 @@ const querySkillProvider = {
 const COLLECT_SKILL_NAME = 'dataops-collect'
 /** Location of the collection skill document inside the published package. */
 const COLLECT_SKILL_FILE = new URL('../skills/dataops-collect/SKILL.md', import.meta.url)
-/** Package root, which the skill loads its relative resources against. */
-const COLLECT_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+/** Skill directory, which the skill loads its relative `references/*.md` against. */
+const COLLECT_SKILL_ROOT = fileURLToPath(new URL('../skills/dataops-collect/', import.meta.url))
 
 /**
  * Describe the collection skill to the catalog without reading it.
@@ -415,6 +415,49 @@ const CONNECTOR_SKILL = {
  */
 let connectorSkillAllowed: () => boolean = () => false
 
+/** Admin data-governance skill: imports resources, writes metadata, and reads full platform metadata. */
+const GOVERNANCE_SKILL_NAME = 'dataops-governance'
+const GOVERNANCE_SKILL_FILE = new URL('../skills/dataops-governance/SKILL.md', import.meta.url)
+const GOVERNANCE_SKILL_ROOT = fileURLToPath(new URL('../skills/dataops-governance/', import.meta.url))
+const GOVERNANCE_SKILL = {
+  name: GOVERNANCE_SKILL_NAME,
+  description: '管理员/超管导入资源、维护资源/列/指标/血缘与可见性、查询全量平台元数据时使用。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: GOVERNANCE_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: GOVERNANCE_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: GOVERNANCE_SKILL_FILE,
+} as const
+const governanceSkillProvider = {
+  name: GOVERNANCE_SKILL_NAME,
+  list: () => Promise.resolve([GOVERNANCE_SKILL]),
+  async get() {
+    return { ...GOVERNANCE_SKILL, content: await readFile(GOVERNANCE_SKILL_FILE, 'utf8') }
+  },
+}
+/** Metadata optimizer skill: inventories metadata and proposes governance improvements. */
+const METADATA_OPTIMIZER_SKILL_NAME = 'dataops-metadata-optimizer'
+const METADATA_OPTIMIZER_SKILL_FILE = new URL('../skills/dataops-metadata-optimizer/SKILL.md', import.meta.url)
+const METADATA_OPTIMIZER_SKILL_ROOT = fileURLToPath(new URL('../skills/dataops-metadata-optimizer/', import.meta.url))
+const METADATA_OPTIMIZER_SKILL = {
+  name: METADATA_OPTIMIZER_SKILL_NAME,
+  description: '盘点资源/列/指标/血缘，识别命名、口径、冗余与缺失问题，生成治理提案并预览影响。',
+  invocation: { modelInvocable: true, userInvocable: true },
+  provider: METADATA_OPTIMIZER_SKILL_NAME,
+  source: 'bundled',
+  resourceBase: { kind: 'directory', path: METADATA_OPTIMIZER_SKILL_ROOT },
+  rank: BUNDLED_SKILL_RANK,
+  locator: METADATA_OPTIMIZER_SKILL_FILE,
+} as const
+const metadataOptimizerSkillProvider = {
+  name: METADATA_OPTIMIZER_SKILL_NAME,
+  list: () => Promise.resolve([METADATA_OPTIMIZER_SKILL]),
+  async get() {
+    return { ...METADATA_OPTIMIZER_SKILL, content: await readFile(METADATA_OPTIMIZER_SKILL_FILE, 'utf8') }
+  },
+}
+
 const connectorSkillProvider = {
   name: CONNECTOR_SKILL_NAME,
   list: () => Promise.resolve(connectorSkillAllowed() ? [CONNECTOR_SKILL] : []),
@@ -453,15 +496,21 @@ const prefectScriptSkillProvider = {
   },
 }
 
-/** The skill that teaches the model how to use the local browser companion. */
-const BROWSER_SKILL_NAME = 'browser-bridge-companion'
-const BROWSER_SKILL_FILE = new URL('../skills/browser-bridge-companion/SKILL.md', import.meta.url)
-const BROWSER_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
+/**
+ * The browser entry skill: one catalog entry that routes headless scraping, the
+ * local companion, and legacy Chrome-install troubleshooting through its
+ * `references/` documents. The old `browser-headless` and
+ * `browser-bridge-companion` entries were merged into it so the skill center
+ * exposes one browser skill instead of three overlapping ones.
+ */
+const BROWSER_SKILL_NAME = 'browser'
+const BROWSER_SKILL_FILE = new URL('../skills/browser/SKILL.md', import.meta.url)
+const BROWSER_SKILL_ROOT = fileURLToPath(new URL('../skills/browser/', import.meta.url))
 
 const BROWSER_SKILL = {
   name: BROWSER_SKILL_NAME,
   description:
-    '用户要在自己的本地 Chrome/Edge 里打开内网系统、登录、点页面、填表、截图或做网页自动化时使用。先完成 8 位配对码配对、确认 Companion 在线且连接器显示已连接，再调用 browser_* 工具；登录/验证码必须让用户接管，不要索取密码，不要导出 Cookie。',
+    '浏览器自动化总入口。抓取网页/大屏/表格、登录后取数、或用用户本地 Chrome/Edge 操作内网系统时使用。默认工作区 Playwright headless；只有用户明确要求本地浏览器、已登录 Chrome 或 Companion 才走 Browser Bridge。包含 headless、Companion 桥接与旧 Chrome 安装排查三套按需参考。',
   invocation: { modelInvocable: true, userInvocable: true },
   provider: BROWSER_SKILL_NAME,
   source: 'bundled',
@@ -475,56 +524,6 @@ const browserSkillProvider = {
   list: () => Promise.resolve([BROWSER_SKILL]),
   async get() {
     return { ...BROWSER_SKILL, content: await readFile(BROWSER_SKILL_FILE, 'utf8') }
-  },
-}
-
-/** The browser entry skill: chooses headless scraping or the local companion. */
-const BROWSER_GUIDE_SKILL_NAME = 'browser'
-const BROWSER_GUIDE_SKILL_FILE = new URL('../skills/browser/SKILL.md', import.meta.url)
-const BROWSER_GUIDE_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
-
-const BROWSER_GUIDE_SKILL = {
-  name: BROWSER_GUIDE_SKILL_NAME,
-  description:
-    '浏览器自动化总入口。默认用工作区 Playwright headless 抓取网页/大屏；只有用户明确要求“本地浏览器/已登录 Chrome/companion”才使用 Browser Bridge。账号密码登录走凭据插件，不强制 Companion。',
-  invocation: { modelInvocable: true, userInvocable: true },
-  provider: BROWSER_GUIDE_SKILL_NAME,
-  source: 'bundled',
-  resourceBase: { kind: 'directory', path: BROWSER_GUIDE_SKILL_ROOT },
-  rank: BUNDLED_SKILL_RANK,
-  locator: BROWSER_GUIDE_SKILL_FILE,
-} as const
-
-const browserGuideSkillProvider = {
-  name: BROWSER_GUIDE_SKILL_NAME,
-  list: () => Promise.resolve([BROWSER_GUIDE_SKILL]),
-  async get() {
-    return { ...BROWSER_GUIDE_SKILL, content: await readFile(BROWSER_GUIDE_SKILL_FILE, 'utf8') }
-  },
-}
-
-/** The headless scraping skill the browser entry points at as the default mode. */
-const BROWSER_HEADLESS_SKILL_NAME = 'browser-headless'
-const BROWSER_HEADLESS_SKILL_FILE = new URL('../skills/browser-headless/SKILL.md', import.meta.url)
-const BROWSER_HEADLESS_SKILL_ROOT = fileURLToPath(new URL('../', import.meta.url))
-
-const BROWSER_HEADLESS_SKILL = {
-  name: BROWSER_HEADLESS_SKILL_NAME,
-  description:
-    '用工作区 Playwright + Chromium 无头抓取网页/大屏数据。默认模式；支持账号密码登录（凭据插件注入）、表格/文本/截图/JSON 输出。需要用户已登录的本地浏览器时改用 browser-bridge-companion。',
-  invocation: { modelInvocable: true, userInvocable: true },
-  provider: BROWSER_HEADLESS_SKILL_NAME,
-  source: 'bundled',
-  resourceBase: { kind: 'directory', path: BROWSER_HEADLESS_SKILL_ROOT },
-  rank: BUNDLED_SKILL_RANK,
-  locator: BROWSER_HEADLESS_SKILL_FILE,
-} as const
-
-const browserHeadlessSkillProvider = {
-  name: BROWSER_HEADLESS_SKILL_NAME,
-  list: () => Promise.resolve([BROWSER_HEADLESS_SKILL]),
-  async get() {
-    return { ...BROWSER_HEADLESS_SKILL, content: await readFile(BROWSER_HEADLESS_SKILL_FILE, 'utf8') }
   },
 }
 
@@ -594,15 +593,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // The collection skill is the product's main entry: a normal conversation request is what
   // triggers it, so the guidance must ship with the plugin rather than be pasted into a prompt.
   ctx.skills.registerProvider(() => collectSkillProvider)
+  ctx.skills.registerProvider(() => governanceSkillProvider)
+  ctx.skills.registerProvider(() => metadataOptimizerSkillProvider)
   ctx.skills.registerProvider(() => connectorSkillProvider)
   ctx.skills.registerProvider(() => prefectScriptSkillProvider)
   ctx.skills.registerProvider(() => provisioningSkillProvider)
+  // One browser entry: headless, companion, and legacy install details live as
+  // references under the skill directory, so the skill center lists one skill and
+  // the model loads only the playbook it needs.
   ctx.skills.registerProvider(() => browserSkillProvider)
-  // The workspace image carries browser playbooks as files under /workspace/skills, but the
-  // skill center only lists what a provider serves. Shipping both with the plugin makes them
-  // appear for every account instead of depending on the image layer.
-  ctx.skills.registerProvider(() => browserGuideSkillProvider)
-  ctx.skills.registerProvider(() => browserHeadlessSkillProvider)
 
   const ensureMcp = async (): Promise<void> => {
     if (mcpFiber !== undefined && mcpFiber.uid !== null) return
