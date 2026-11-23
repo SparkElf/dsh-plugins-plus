@@ -185,6 +185,14 @@ const tool = (
 })
 
 export const apply = (ctx: Context) => {
+  // A bare DSH profile has no DataOps Task Center. Treat that as "feature off"
+  // rather than a failed plugin: the row stays active, mounts nothing, and the
+  // rest of the profile boots without an activation warning.
+  if (!process.env.DATAOPS_AI_WORKSPACE_BACKEND_BASE_URL?.trim()) {
+    const logger = (ctx as unknown as { logger?: { info?: (message: string) => void } }).logger
+    logger?.info?.('task-bus: DataOps Task Center is not configured; the connector stays disabled')
+    return
+  }
   const host = ctx as unknown as TaskBusHost
   const client = createTaskCenterClient(host)
 
