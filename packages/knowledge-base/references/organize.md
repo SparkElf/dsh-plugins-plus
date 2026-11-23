@@ -1,8 +1,3 @@
----
-name: kb-organize
-description: 整理知识库、归档文档、生成索引、按内容分类归类时使用。适用于「整理一下知识库」「帮我归档」「把这些文档分类归并」「生成目录索引」「建个知识体系」等请求：先读整理偏好，再逐篇读内容理解，按主题建分层文件夹并移动文档，最后为每层写一份层索引 md。缺 md 文本副本的文档会先补索引。
----
-
 # 知识库整理 — 分层归类与层索引
 
 把一个知识库目录从「一堆平铺的文件」整理成「按主题分层的文件夹 + 每层一份索引 md」。核心是三件事：**读懂每篇文档在讲什么**、**按内容而不是文件名分层**、**每层留一份能被人和模型直接用的索引**。
@@ -353,13 +348,6 @@ curl -sS -X POST http://127.0.0.1:3080/knowledge-base/api/read \
 - **大库分批。** 超过 50 篇时按类目分批处理，每批结束汇报进度，不要静默跑很久
 - **整理前先确认范围。** 「整理知识库」可能指整个库，也可能只指某个目录。范围不明时先 `list` 根层，把看到的结构给用户，让他指定范围
 
-## 九、本技能的安装方式（维护者读）
+## 九、本参考的安装位置（维护者读）
 
-这份技能住在 `packages/knowledge-base/skills/kb-organize/`，通过 **工作区根 `~/.agents/skills/kb-organize` 的软链接**被技能中心发现。走这条路径的原因：本仓库的 `knowledge-base` 技能是在 `src/index.ts` 里以 **code-registered provider** 注册的，而技能中心只扫描固定的几类根目录（工作区根 `.agents/skills`、`$DSH_HOME/skills` 等），不会扫描包内的 `skills/` 子目录。
-
-若要让这个技能**随 npm 包一起发布**（而不是只在本机工作区可见），需要两处改动，缺一不可：
-
-1. `packages/knowledge-base/package.json` 的 `files` 数组加入 `"skills/**"`（当前只列了 `lib/**`、`cordis.patch.yml`、`README.md`、`LICENSE`，技能文件不会进包）；
-2. `packages/knowledge-base/src/index.ts` 增加**第二个** skill provider（现有 `knowledgeBaseSkillProvider()` 只注册 `knowledge-base` 一个），并在 `apply()` 的 `inject(['skills'], …)` 回调里与现有 provider 一起注册。
-
-在此之前，新机器上要么手动建软链接，要么跑 `scripts/sync-harness-skills.sh`。**不要为此去改 profile 的 `cordis.patch.yml`**：`dsh-plus` 的能力引导会整文件覆盖它。
+本文件是 `knowledge-base` 技能的整理流程参考，随 `@sparkelf/dsh-knowledge-base` 包发布：`knowledgeBaseSkillProvider()` 注册 `knowledge-base` 主技能，主技能用 `references/organize.md` 链接到这里。不要再单独创建 `kb-organize` 技能或软链接，也不要在 profile 的 `cordis.patch.yml` 里手工挂载。

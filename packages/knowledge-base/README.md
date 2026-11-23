@@ -35,7 +35,7 @@ index tooling over a mounted directory. Runs standalone or against a DataOps bac
 - 五类记忆：`preference` 偏好、`pitfall` 踩坑、`episodic` 情景、`fact` 事实、`sop` 技能草稿；隐私维度 `normal/private/sensitive/secret`，`secret` 只存 `credentialRef`，不存明文。
 - 存储：`个人记忆图谱/记忆日志/YYYY-MM-DD.md`、`偏好.md`、`踩坑.md`、`事实.md`、`SOP/<slug>.md`；写入同时更新 `.graphs/personal-memory/graph.json`，图谱页可见。
 - 触发：普通会话空闲 30 分钟后调 `memory_guardian_send`；压缩时监听 `compaction/start` 发消息；每日 dream。没有插件队列/空闲 cron，消息投递本身就是队列。
-- 守护会话用标准模式（不新增 preset），由 `users/<uid>/guardian.json` 记录 sessionId，懒创建；它读 `memory-guardian` 技能，派 `memory-extract` / `memory-sop-evaluate` 子代理。
+- 守护会话用标准模式（不新增 preset），由 `users/<uid>/guardian.json` 记录 sessionId，懒创建；它读 `memory` 技能并加载 `references/guardian.md`，子代理分别加载 `references/extract.md` / `references/sop-evaluate.md`。
 - 写入工具：`memory_record`（仅守护会话）写五类记忆；`memory_promote_sop` 把有效 SOP 晋升为 `$DSH_HOME/skills/<slug>/SKILL.md` 并删除 SOP。
 - 运行时读取（0.6.2）：记忆开启时 `memory_context` 直接读调用者自己的 `MemoryStore` 当前条目（偏好/踩坑/事实/SOP/情景），与 bindings 按 id/内容去重；`sensitive`/`secret` 不进入模型上下文，只留在记忆页。
 - 暂停语义（0.6.3）：暂停时不注入个人条目、个人图谱和 personal internalized 副本；部门/全局订阅、共享记忆和红线（`nonOverridable`）仍生效。
@@ -246,13 +246,13 @@ kb://doc/<docId>/chunk/<key>
 ### 目录索引（INDEX.md）与 `kb_outline`
 
 每篇文档建立 FTS 索引时会同步生成一份**导航结构**：目录（章/节/条）和章节行，
-但**默认不生成摘要**。摘要是在用户明确要求时，由 agent 执行 `kb-summarize` 技能阅读原文后
+但**默认不生成摘要**。摘要是在用户明确要求时，由 agent 按 `knowledge-base` 技能的 `references/summarize.md` 阅读原文后
 调用 `kb_outline_save` 写入的。
 
 - 文件：`<indexDir>/md/<docId>.INDEX.md`（默认 `/nas/kb/index/md/<docId>.INDEX.md`），
   与 `kb-index.sqlite` 同级，**不写入源文件目录**，也不进入任何用户的可见视图。
 - 上传/抽取后：`kb_docs.summary` 为空，`kb_outline` 返回 `summaryStatus: "missing"` +
-  `hint: "调用 kb-summarize 技能生成摘要"`；目录和 `kb_sections` 已可用。
+  `hint` 指向摘要流程（`references/summarize.md`）；目录和 `kb_sections` 已可用。
 - 显式生成：`kb_outline` 拿 `toc`/`sectionId`/`chunkIds` → 逐章 `kb_chunk_get` 读原文 →
   agent 生成 doc/section summary + keyFacts → `kb_outline_save` 校验并落库。
 - 校验：摘要与 keyFacts 中的数字、比例、金额、条款号、责任主体必须能在对应 source chunks
@@ -271,8 +271,8 @@ kb://doc/<docId>/chunk/<key>
 `sectionId/sectionPath/sectionSummary/docSummary`；摘要类结果永远不带 `citation`，只用于导航。
 引用仍只能使用原文 chunk 的 `kb://doc/<docId>/chunk/<key>` token。
 
-`kb-summarize` 作为第二个 bundled skill 注册在同一个 skill provider 下；`list()` 同时返回
-`knowledge-base` 与 `kb-summarize` 两个 candidate。
+`knowledge-base` 主技能用 `references/{organize,summarize,vectorize,graph}.md` 承载专项流程；
+`list()` 同时返回 `knowledge-base` 与 `memory` 两个 candidate。
 
 ### 分块与 bbox 契约
 

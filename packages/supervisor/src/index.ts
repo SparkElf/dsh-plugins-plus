@@ -38,7 +38,17 @@ export function apply(ctx: Context): void {
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: SUPERVISOR_RECOVERY_PATH,
-    handler: async (request, response) => {
+    // The out-of-process Supervisor runs on this host and posts here without a browser
+    // cookie. 0.2.3 made `required` the default route policy, so the route must admit
+    // the loopback caller itself; the guard below refuses every non-loopback socket.
+    auth: 'anonymous',
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      const remote = request.socket?.remoteAddress
+      if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+        response.writeHead(403)
+        response.end('forbidden')
+        return
+      }
       try {
         const input = await readRequest(request)
         if (input.operation === 'capture') {
@@ -78,5 +88,5 @@ export function apply(ctx: Context): void {
         json(response, 500, { error: error instanceof Error ? error.message : String(error) })
       }
     },
-  }), 'plus-supervisor-recovery.route')
+  } as never), 'plus-supervisor-recovery.route')
 }

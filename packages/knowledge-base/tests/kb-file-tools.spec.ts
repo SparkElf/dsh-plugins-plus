@@ -485,7 +485,7 @@ describe('kb_outline', () => {
       summary: '',
       summaryKind: 'none' as const,
       summaryStatus: 'missing' as const,
-      hint: '调用 kb-summarize 技能生成摘要',
+      hint: '按 knowledge-base 技能的摘要流程生成摘要',
       sourceChunkIds: [],
       sections: outline.sections.map(section => ({ ...section, summary: '', keyFacts: [] })),
     }
@@ -497,7 +497,7 @@ describe('kb_outline', () => {
       summary: '',
       summaryKind: 'none',
       summaryStatus: 'missing',
-      hint: '调用 kb-summarize 技能生成摘要',
+      hint: '按 knowledge-base 技能的摘要流程生成摘要',
     })
   })
 

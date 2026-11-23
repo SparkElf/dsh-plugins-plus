@@ -104,6 +104,12 @@ export const AI_TOOL_ACCESS = {
   review_notifications_list: {},
   review_notifications_read: {},
   dataops_api_docs: { superAdminOnly: true },
+  // 同义词组维护：全库生效，只对超管披露；真正的写权限由 DataOps AuthGuard 再判一次。
+  synonym_group_list: { superAdminOnly: true },
+  synonym_group_get: { superAdminOnly: true },
+  synonym_group_create: { superAdminOnly: true },
+  synonym_group_update: { superAdminOnly: true },
+  synonym_group_delete: { superAdminOnly: true },
   // 后端 MCP 工作流工具：只向超管披露；模型侧名称是 mcp__<serverName>__<name>，
   // 由 declaredMcpToolName 映射回本表后参与会话级披露。
   workflow_query: { superAdminOnly: true },
@@ -111,7 +117,7 @@ export const AI_TOOL_ACCESS = {
   workflow_deployment: { superAdminOnly: true },
   workflow_run_control: { superAdminOnly: true },
   dataops_collect_preview: { permission: 'data:resource:manage' },
-  dataops_collect_plan: { permission: 'data:resource:manage' },
+  dataops_collect_validate_plan: { permission: 'data:resource:manage' },
   dataops_collect_execute: { permission: 'data:resource:manage' },
   dataops_collect_resources: { permission: 'data:resource:read' },
   dataops_open_resource_tab: {},

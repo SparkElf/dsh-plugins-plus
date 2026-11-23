@@ -1,6 +1,6 @@
 {
   "name": "@sparkelf/dsh-officecli",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "DeepSeek Harness adapter for the official OfficeCLI binary, with nine bundled Office workflow skills and Wanxiang (GB/T 9704-2012 / brand) delivery rules.",
   "type": "module",
   "main": "./lib/index.js",

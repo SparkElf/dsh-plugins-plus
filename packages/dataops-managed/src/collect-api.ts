@@ -1,10 +1,11 @@
 /**
  * DataOps spreadsheet-import transport for the collection skill.
  *
- * The host reads a workspace attachment, uploads it as multipart, asks DataOps for a
- * create-table or existing-table plan, and only executes when the model calls the
- * execute tool after the user's plan confirmation. Nothing here creates a table on
- * preview/plan; execution is the single mutating call.
+ * The host reads a workspace attachment, uploads it as multipart, and validates the
+ * create-table or existing-table plan the current conversation model wrote. DataOps only
+ * normalizes that plan and returns SQL/mapping summaries; it never selects or calls a shared
+ * model. Execution is the single mutating call and stays behind the user's explicit
+ * confirmation.
  *
  * @module collect-api
  */
@@ -42,10 +43,10 @@ export interface CollectPreview {
   [key: string]: unknown
 }
 
-/** A create-table or field-mapping plan plus its session context. */
-export interface CollectPlanResult {
+/** The deterministic validation result: the normalized plan and its session context. */
+export interface CollectValidatePlanResult {
+  success?: boolean
   session?: Record<string, unknown>
-  model?: Record<string, unknown>
   plan?: Record<string, unknown>
   [key: string]: unknown
 }
@@ -152,17 +153,25 @@ export class CollectApi {
     return Array.isArray(body.dataSources) ? body.dataSources : []
   }
 
-  async plan(payload: {
+  /**
+   * Validate and normalize a plan written by the current conversation model.
+   *
+   * Read-only and model-free: the backend runs the same deterministic sanitizers as
+   * `/plan` and `/execute`, then returns the normalized plan, CREATE TABLE SQL or mapping
+   * summary. It never resolves a shared `AiModelConfig` or calls a provider.
+   */
+  async validatePlan(payload: {
     sessionId: string
     dataSourceUrn?: string
     targetTable?: { schema: string; table: string }
-    modelId?: number
-  }): Promise<CollectPlanResult> {
-    const result = await this.reviewApi.request('/api/resources/spreadsheet-import/plan', {
+    createPlan?: Record<string, unknown>
+    mappings?: unknown[]
+  }): Promise<CollectValidatePlanResult> {
+    const result = await this.reviewApi.request('/api/resources/spreadsheet-import/validate-plan', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
-    return unwrap<CollectPlanResult>(result, 'spreadsheet plan')
+    return unwrap<CollectValidatePlanResult>(result, 'spreadsheet plan validation')
   }
 
   async execute(payload: Record<string, unknown>): Promise<CollectExecuteResult> {

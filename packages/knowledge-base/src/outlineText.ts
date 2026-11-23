@@ -880,11 +880,11 @@ export function renderOutlineMarkdown(input: RenderOutlineInput): string {
   lines.push(`> 引用请使用原文 chunk 的 \`kb://doc/${String(input.docId)}/chunk/<chunkKey>\` token（由 \`kb_search\` / \`kb_chunk_get\` 返回）。`)
   lines.push(`> 源文件：\`${input.sourcePath}\``, '')
   if (summaryKind === 'none') {
-    lines.push('> 生成摘要：调用 `kb-summarize` 技能阅读原文后，用 `kb_outline_save` 落库。', '')
+    lines.push('> 生成摘要：按 knowledge-base 技能的 `references/summarize.md` 阅读原文后，用 `kb_outline_save` 落库。', '')
   }
   lines.push('## 文档摘要', '')
   if (input.summary !== '') lines.push(input.summary)
-  else if (summaryKind === 'none') lines.push('（尚未生成摘要：调用 kb-summarize 技能生成摘要）')
+  else if (summaryKind === 'none') lines.push('（尚未生成摘要：按 knowledge-base 技能的摘要流程生成）')
   else lines.push('（无正文）')
   lines.push('')
   lines.push(`来源 chunk：${input.summarySourceChunkIds.length === 0 ? '（无）' : input.summarySourceChunkIds.join(', ')}`, '')

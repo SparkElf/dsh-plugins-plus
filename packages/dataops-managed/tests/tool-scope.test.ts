@@ -48,6 +48,38 @@ const WORKFLOW_TOOLS = [
   'workflow_run_control',
 ] as const satisfies readonly AiToolName[]
 
+const COLLECT_TOOLS = [
+  'dataops_collect_preview',
+  'dataops_collect_validate_plan',
+  'dataops_collect_execute',
+  'dataops_collect_resources',
+] as const satisfies readonly AiToolName[]
+
+const STAFF = {
+  userId: 'staff',
+  roleCodes: ['应用人员'],
+  permissions: ['data:resource:manage', 'data:resource:read'],
+}
+
+describe('collection tools are resource-management gated', () => {
+  it('declares preview/validate/execute and no model-backed plan tool', () => {
+    for (const name of COLLECT_TOOLS) {
+      expect(AI_TOOL_NAMES).toContain(name)
+      expect(isToolVisible(name, STAFF)).toBe(true)
+    }
+    // Plan generation moved to the current conversation model; a shared-model plan tool must
+    // not linger in the disclosure table.
+    expect(AI_TOOL_NAMES).not.toContain('dataops_collect_plan')
+    expect(AI_TOOL_ACCESS.dataops_collect_validate_plan).toEqual({ permission: 'data:resource:manage' })
+  })
+
+  it('hides the mutating collect tools from a scope without the resource permission', () => {
+    for (const name of COLLECT_TOOLS) {
+      expect(isToolVisible(name, MEMBER)).toBe(false)
+    }
+  })
+})
+
 describe('automation workflow tools are super-administrator only', () => {
   it('declares each tool in the access table and the derived inventory', () => {
     for (const name of WORKFLOW_TOOLS) {

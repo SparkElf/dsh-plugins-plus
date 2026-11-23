@@ -170,7 +170,7 @@ function withGuardianTimeout<T>(
 export const GUARDIAN_SESSION_TITLE = '记忆守护会话'
 
 /** Skill the guardian must load before doing anything else. */
-export const GUARDIAN_SKILL_NAME = 'memory-guardian'
+export const GUARDIAN_SKILL_NAME = 'memory'
 
 /**
  * The preset first message. It intentionally stays product-level: read the
@@ -179,7 +179,7 @@ export const GUARDIAN_SKILL_NAME = 'memory-guardian'
 export function guardianSeedText(): string {
   return [
     '你是记忆守护会话：唯一负责个人记忆提取、合并、纠偏、遗忘和 SOP 维护的会话。',
-    `第一步：阅读 ${GUARDIAN_SKILL_NAME} 技能，之后严格按该技能工作。`,
+    `第一步：阅读 ${GUARDIAN_SKILL_NAME} 技能，再按其中的指引读取 references/guardian.md，之后严格按该准则工作。`,
     '启动检查：确认个人记忆状态与待处理队列；确认每日 dream 任务存在，不存在则创建。',
     '之后只处理收到的 idle / compaction / dream 消息；串行处理，不为单条消息新建会话。',
   ].join('\n')

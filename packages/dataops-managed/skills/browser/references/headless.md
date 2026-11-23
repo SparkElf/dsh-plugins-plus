@@ -1,8 +1,3 @@
----
-name: browser-headless
-description: 用工作区 Playwright + Chromium 无头抓取网页/大屏数据。默认模式；支持账号密码登录（凭据插件注入）、表格/文本/截图/JSON 输出。需要用户已登录的本地浏览器时改用 browser-bridge-companion。
----
-
 # Browser Headless
 
 ## 前置

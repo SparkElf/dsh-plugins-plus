@@ -9,6 +9,7 @@
  * service and MCP client that fail, and assert the routes still came up.
  */
 
+import { readFile } from 'node:fs/promises'
 import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/index.ts'
 import type { Config } from '../src/index.ts'
@@ -140,7 +141,7 @@ describe('apply', () => {
     await apply(context as never, CONFIG)
 
     expect((registered as Array<{ name: string }>).map((item) => item.name).sort())
-      .toEqual(['api-connector-authoring', 'browser', 'browser-bridge-companion', 'browser-headless', 'dataops-collect', 'dataops-query', 'prefect-script-authoring', 'skill-provisioning'])
+      .toEqual(['api-connector-authoring', 'browser', 'dataops-collect', 'dataops-query', 'prefect-script-authoring', 'skill-provisioning'])
     const provider = (registered as Array<{ name: string }>).find((item) => item.name === 'dataops-query') as unknown as {
       name: string
       list: () => Promise<{ name: string; locator: URL }[]>
@@ -191,9 +192,10 @@ describe('apply', () => {
     await expect(provisioning!.get()).rejects.toThrow(/not available/)
   })
 
-  it('serves the browser and browser-headless playbooks to every account', async () => {
+  it('serves one browser skill whose references carry the mode playbooks', async () => {
     // The workspace image also carries copies under /workspace/skills, but the skill center
-    // lists providers only; without these entries an ordinary account sees just the companion.
+    // lists providers only. One `browser` entry must route headless, companion, and the
+    // legacy Chrome-install playbook through explicit relative reference links.
     const registered: Array<{
       name: string
       list: () => Promise<Array<{ name: string; source: string; resourceBase: { kind: string; path: string } }>>
@@ -205,16 +207,19 @@ describe('apply', () => {
 
     await apply(context as never, CONFIG)
 
-    for (const [name, marker] of [['browser', '浏览器自动化总入口'], ['browser-headless', '无头抓取']] as const) {
-      const provider = registered.find((item) => item.name === name)
-      expect(provider).toBeDefined()
-      const listed = await provider!.list()
-      expect(listed).toHaveLength(1)
-      expect(listed[0]).toMatchObject({ name, source: 'bundled', resourceBase: { kind: 'directory' } })
-      const skill = await provider!.get()
-      expect(skill.name).toBe(name)
-      expect(skill.content).toContain(`name: ${name}`)
-      expect(skill.content).toContain(marker)
+    const provider = registered.find((item) => item.name === 'browser')
+    expect(provider).toBeDefined()
+    const listed = await provider!.list()
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ name: 'browser', source: 'bundled', resourceBase: { kind: 'directory' } })
+    expect(listed[0]?.resourceBase.path.endsWith('/skills/browser/')).toBe(true)
+    const skill = await provider!.get()
+    expect(skill.name).toBe('browser')
+    expect(skill.content).toContain('name: browser')
+    for (const reference of ['references/headless.md', 'references/bridge.md', 'references/chrome-install.md']) {
+      expect(skill.content).toContain(reference)
+      const referencePath = new URL(reference, `file://${listed[0]!.resourceBase.path}`)
+      expect(await readFile(referencePath, 'utf8')).not.toBe('')
     }
   })
 })

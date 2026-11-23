@@ -536,7 +536,6 @@ async function launch(ctx: Context, options: OfficeKitBridgeOptions): Promise<Of
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
     delete (globalThis as GlobalWithBridge)[STARTED]
   }
-  ctx.effect(() => async () => { await close() })
   return { url: config.url, port: config.port, configPath, workspaceRoots, close }
 }
 
@@ -545,7 +544,22 @@ export const name = 'office-kit-bridge'
 export const inject: string[] = []
 
 export function apply(ctx: Context, options: OfficeKitBridgeOptions = {}): void {
-  void startOfficeKitBridge(ctx, options).catch((cause: unknown) => {
+  // The disposer is registered synchronously, while Cordis still considers this
+  // plugin's context active. Registering it after the listener binds raced the
+  // activation lifecycle on 0.2.3 and surfaced as a fatal inactive-context error.
+  let disposed = false
+  let close: (() => Promise<void>) | undefined
+  ctx.effect(() => async () => {
+    disposed = true
+    await close?.()
+  })
+  void startOfficeKitBridge(ctx, options).then((bridge) => {
+    if (disposed) {
+      void bridge.close()
+      return
+    }
+    close = bridge.close
+  }).catch((cause: unknown) => {
     ctx.logger.warn(cause instanceof Error ? cause : new Error(String(cause)))
   })
 }

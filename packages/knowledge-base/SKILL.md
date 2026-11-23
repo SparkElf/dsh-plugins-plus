@@ -1,6 +1,6 @@
 ---
 name: knowledge-base
-description: "Read and change the shared knowledge base: browse, search, create, upload, rename, move and delete documents in the 全局 / 部门 / 个人 trees. Use whenever the user asks about a document in the knowledge base, wants to add a file to it, or asks what the team has documented."
+description: "知识库统一入口：检索、浏览、新建、上传、改名、移动、删除全局 / 部门 / 个人文档；需要整理归档、生成文档摘要、定向向量化或读写知识图谱时，按需加载 references 中的对应流程。Use whenever the user asks about a document in the knowledge base, wants to add or organize files, or asks to summarize, vectorize, or graph the team's documentation."
 ---
 
 # 知识库 — 增删改查
@@ -15,13 +15,29 @@ description: "Read and change the shared knowledge base: browse, search, create,
 
 **新建文档前先想清楚它属于哪一层。** 放错层的后果是可见范围错了，而移动文档需要写权限——用户可能没有那个权限去纠正。
 
+## 何时用
+
+- 用户问知识库里的某份文档、制度、条款、数据，或要求给出处（先检索，引用只用 `citation` token）；
+- 用户要新建、上传、改名、移动、删除文档，或问某个文件/目录在哪一层；
+- 用户要整理归档、生成文档摘要、定向向量化，或读写知识图谱（按下面的参考进入专项流程）；
+- 用户问权限边界、为什么看不到某个文件，或要求把文档放到另一个可见范围。
+
+## 按需加载
+
+主文件负责日常检索、增删改查与权限。专项流程只在需要时读取对应参考，不要一次全读：
+
+- **整理 / 归档 / 层索引**：[references/organize.md](references/organize.md)
+- **显式生成文档摘要**：[references/summarize.md](references/summarize.md)
+- **定向建立/补齐向量索引**：[references/vectorize.md](references/vectorize.md)
+- **知识图谱主题卡与关系文档**：[references/graph.md](references/graph.md)
+
 ## 一、查（Agentic RAG：先检索，再验证，最后引用）
 
 知识库检索不是“背答案”，也不是一上来 `cat` 大文件。按下面的顺序工作：
 
 1. **先判断问题形态，再选入口**：
    - **精确事实/单点条款**：直接从 `kb_search(query, topK=10)` 开始。FTS5 + BM25 是主召回与排序路径，支持中文/英文，先按调用者身份和可见范围过滤。不要先查“知识库状态/索引状态”，没有 `kb_status` 工具；状态只由 UI 使用。
-   - **广泛/比较/区别/全面/是否类问题**（“有什么区别”“全面梳理”“是否允许”“分别有哪些”）：先用 `kb_outline(docId | citationToken)` 拿目录（章/节/条）和已有摘要；如果 `summaryStatus` 是 `missing`，按需显式执行 `kb-summarize` 技能生成摘要，再 `kb_search` / `kb_chunk_get` 读相关章节原文。用户点名了文档或给了 `kb://` token 时直接 `kb_outline`；不知道 docId 时先 `kb_search` 找到文档，再 `kb_outline` 展开，避免只看命中 chunk 就下结论。
+   - **广泛/比较/区别/全面/是否类问题**（“有什么区别”“全面梳理”“是否允许”“分别有哪些”）：先用 `kb_outline(docId | citationToken)` 拿目录（章/节/条）和已有摘要；如果 `summaryStatus` 是 `missing`，按需读取 [references/summarize.md](references/summarize.md) 生成摘要，再 `kb_search` / `kb_chunk_get` 读相关章节原文。用户点名了文档或给了 `kb://` token 时直接 `kb_outline`；不知道 docId 时先 `kb_search` 找到文档，再 `kb_outline` 展开，避免只看命中 chunk 就下结论。
    - **摘要只是导航，不是引用**：`kb_outline` 的 `summary`、`kb_search` 的 `sectionSummary` / `docSummary` / `relatedSections` 可能是旧 extractive 或显式生成的 llm 摘要，但**都不是引用来源**；引用必须使用原文 chunk 的 `citation` token。
 2. **比较、门槛、比例、金额、日期类问题必须先发 2 个 query 变体，再合并结果**（不要只发一条长句）：
    - 变体 A（精确术语）：把问题里的制度术语直接拼起来，例如“普通决议 特别决议 三分之二 过半数”“董事会 表决 通过 比例”。
@@ -62,16 +78,16 @@ kb_outline(citation="kb://doc/49/chunk/e63b7f9eda2d86cb")
 
 - `toc`：章/节/条目录，含 `sectionId`、`title`、`level`、`chunkIds`。
 - `sections`：每节摘要 + `keyFacts`（门槛/比例/主体/例外）+ `sourceChunkIds`；**不返回整章全文**。
-- `summaryKind`：`none`（尚未生成）/ `extractive`（0.1.9 旧抽取式）/ `llm`（`kb-summarize` 生成）。
-- `summaryStatus`：`missing` 时摘要为空，返回 `hint: "调用 kb-summarize 技能生成摘要"`；`ready` 才可用摘要导航。
+- `summaryKind`：`none`（尚未生成）/ `extractive`（0.1.9 旧抽取式）/ `llm`（按 [references/summarize.md](references/summarize.md) 生成）。
+- `summaryStatus`：`missing` 时摘要为空，`hint` 指向摘要流程（见 [references/summarize.md](references/summarize.md)）；`ready` 才可用摘要导航。
 - `indexPath`：`/nas/kb/index/md/<docId>.INDEX.md`，内容与返回值一致，可按需 `read`。
-- **上传/抽取不会自动生成摘要**。索引只自动建立目录/章节结构；摘要由 `kb-summarize` 技能显式读取原文后生成，并用 `kb_outline_save` 落库。旧 extractive 摘要会保留，显式保存后覆盖为 `llm`。
+- **上传/抽取不会自动生成摘要**。索引只自动建立目录/章节结构；摘要由摘要流程显式读取原文后生成，并用 `kb_outline_save` 落库。旧 extractive 摘要会保留，显式保存后覆盖为 `llm`。
 - 源文件 hash 变化会让旧 llm 摘要失效并在下次同步时清空，需要重新执行技能；chunk id 不变时已有 citation token 继续有效。
 - 摘要只用于定位章节；回答里的每个数字、主体、例外仍须回到原文 chunk 核对，引用只用原文 token。
 
-#### 显式生成/更新摘要：kb-summarize
+#### 显式生成/更新摘要
 
-当用户明确要求摘要，或 `kb_outline` 返回 `summaryStatus: "missing"` 且问题需要整体理解时，执行 `kb-summarize` 技能（见其 SKILL.md）。流程是：
+当用户明确要求摘要，或 `kb_outline` 返回 `summaryStatus: "missing"` 且问题需要整体理解时，按 [references/summarize.md](references/summarize.md) 执行。流程是：
 
 1. `kb_outline(docId)` 拿 `toc` / `sections` / `chunkIds`；
 2. 逐章 `kb_chunk_get(docId, chunkId)` 读原文；
@@ -115,7 +131,7 @@ cat /workspace/kb/global/规范.md
 - FTS5 trigram 对 1–2 个汉字可能没有命中，此时按策略用 `rg`。
 - 解析是异步的：上传后立刻搜可能还没有 `.md` 副本；看进度面板的“解析→分块→写索引→完成/失败”。
 - 索引在 companion 的 `/nas/kb/index`，不在 agent view；**不要尝试直接读索引文件**，它是实现细节。唯一例外是 `kb_outline` 返回的 `indexPath`（`/nas/kb/index/md/<docId>.INDEX.md`），它是给 agent 读的导航副本；不要把它当原文引用。
-- 刚上传/刚解析的文档只有目录结构，`summaryStatus` 为 `missing`；需要摘要时显式执行 `kb-summarize`，不要期待 `kb_outline` 自动补摘要。
+- 刚上传/刚解析的文档只有目录结构，`summaryStatus` 为 `missing`；需要摘要时按 [references/summarize.md](references/summarize.md) 显式执行，不要期待 `kb_outline` 自动补摘要。
 
 ## 二、增（新建与上传）
 
