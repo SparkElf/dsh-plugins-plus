@@ -46,7 +46,9 @@
     "万相AI使用教程.html",
     "i18n/*.json",
     "skills/**/SKILL.md",
-    "skills/**/i18n/*.json"
+    "skills/**/i18n/*.json",
+    "skills/**/references/**/*",
+    "references/**/*"
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",

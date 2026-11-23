@@ -14,9 +14,8 @@ import {
 import { extractGroundingTokens, planOutlineSave } from '../src/outlineGuard.ts'
 import {
   Config,
-  KB_SUMMARIZE_SKILL_NAME,
-  KB_VECTORIZE_SKILL_NAME,
   KNOWLEDGE_SKILL_NAME,
+  MEMORY_SKILL_NAME,
   knowledgeBaseSkillProvider,
 } from '../src/index.ts'
 
@@ -101,7 +100,7 @@ describe('explicit model-written summaries', () => {
     const markdown = await readFile(outlineFilePath(indexPath, docId), 'utf8')
     expect(markdown).toContain('## 目录')
     expect(markdown).toContain('尚未生成摘要')
-    expect(markdown).toContain('kb-summarize')
+    expect(markdown).toContain('references/summarize.md')
 
     const hit = await searchIndex({ indexPath, query: '三分之二', topK: 5, caller, canRead })
     const board = hit.hits.find(candidate => candidate.path === 'global/board.md')
@@ -342,26 +341,36 @@ describe('ensureDocumentOutline summary status', () => {
 })
 
 
-describe('kb-summarize skill registration', () => {
-  it('lists both bundled candidates and reads each SKILL.md', async () => {
+describe('merged knowledge-base and memory skill registration', () => {
+  it('lists one entry per family and routes to explicit reference files', async () => {
     const provider = knowledgeBaseSkillProvider()
     const candidates = await provider.list({})
     expect(candidates.map(candidate => candidate.name).sort()).toEqual([
-      KB_SUMMARIZE_SKILL_NAME, KB_VECTORIZE_SKILL_NAME, KNOWLEDGE_SKILL_NAME,
-      'memory-guardian', 'memory-extract', 'memory-sop-evaluate', 'knowledge-graph',
+      KNOWLEDGE_SKILL_NAME, MEMORY_SKILL_NAME,
     ].sort())
-    const summarize = candidates.find(candidate => candidate.name === KB_SUMMARIZE_SKILL_NAME)
-    expect(summarize).toMatchObject({ source: 'bundled', provider: 'dsh-knowledge-base' })
-    const loaded = await provider.get(summarize!, {})
-    expect(loaded?.name).toBe(KB_SUMMARIZE_SKILL_NAME)
-    expect(loaded?.content).toContain('kb_outline_save')
-    expect(loaded?.content).toContain('kb_chunk_get')
-    expect(loaded?.content).toContain('引用')
-    const vectorize = await provider.get(candidates.find(candidate => candidate.name === KB_VECTORIZE_SKILL_NAME)!, {})
-    expect(vectorize?.content).toContain('kb_vectorize')
-    expect(vectorize?.content).toContain('dryRun')
+
     const general = await provider.get(candidates.find(candidate => candidate.name === KNOWLEDGE_SKILL_NAME)!, {})
-    expect(general?.content).toContain('kb-summarize')
+    expect(general).toMatchObject({ source: 'bundled', provider: 'dsh-knowledge-base' })
+    for (const reference of ['references/organize.md', 'references/summarize.md', 'references/vectorize.md', 'references/graph.md']) {
+      expect(general?.content).toContain(reference)
+      const text = await readFile(new URL(reference, `file://${general!.resourceBase.path}/`), 'utf8')
+      expect(text.length).toBeGreaterThan(100)
+    }
+    const summarize = await readFile(new URL('references/summarize.md', `file://${general!.resourceBase.path}/`), 'utf8')
+    expect(summarize).toContain('kb_outline_save')
+    expect(summarize).toContain('kb_chunk_get')
+    expect(summarize).toContain('引用')
+    const vectorize = await readFile(new URL('references/vectorize.md', `file://${general!.resourceBase.path}/`), 'utf8')
+    expect(vectorize).toContain('kb_vectorize')
+    expect(vectorize).toContain('dryRun')
+
+    const memory = await provider.get(candidates.find(candidate => candidate.name === MEMORY_SKILL_NAME)!, {})
+    expect(memory?.name).toBe(MEMORY_SKILL_NAME)
+    for (const reference of ['references/guardian.md', 'references/extract.md', 'references/sop-evaluate.md']) {
+      expect(memory?.content).toContain(reference)
+      const text = await readFile(new URL(reference, `file://${memory!.resourceBase.path}/`), 'utf8')
+      expect(text.length).toBeGreaterThan(100)
+    }
   })
 })
 

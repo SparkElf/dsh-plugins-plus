@@ -119,7 +119,7 @@ export interface KnowledgeOutline {
   summary: string
   /** How the current summary was produced. */
   summaryKind?: OutlineSummaryKind
-  /** `missing` until `kb-summarize` saves a model-authored summary. */
+  /** `missing` until the knowledge-base summarize flow saves a model-authored summary. */
   summaryStatus?: 'ready' | 'missing'
   /** Actionable next step when the summary is missing. */
   hint?: string
@@ -822,7 +822,7 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
       + 'Accepts `docId` or a full `kb://doc/<docId>/chunk/<key>` citation token (the chunk part is ignored). '
       + 'Returns `summaryKind` (none/extractive/llm), `summaryStatus` (missing/ready) and `indexPath`. '
       + '`summaryStatus: "missing"` means upload/extraction created only the TOC and section structure; it is NOT an old index and this tool never auto-generates a summary. '
-      + 'When a summary is needed, run the `kb-summarize` skill to read the original chunks and persist it with `kb_outline_save`. '
+      + 'When a summary is needed, follow the knowledge-base skill reference `references/summarize.md` to read the original chunks and persist it with `kb_outline_save`. '
       + 'It returns no chapter body and never substitutes for the source: summaries are navigation only and MUST NOT be cited. '
       + 'Citations still use the original chunk token from kb_search / kb_chunk_get. `indexPath` is the `/nas/kb/index/md/<docId>.INDEX.md` file you may read for the same content.',
     parameters: {
@@ -872,7 +872,7 @@ export const createKnowledgeFileTools = (host: KnowledgeFileToolHost) => [
 
   defineTool({
     name: 'kb_outline_save',
-    description: 'Persist the summary you wrote after reading one document through the `kb-summarize` skill. '
+    description: 'Persist the summary you wrote after reading one document through the knowledge-base summarize flow. '
       + 'This is the ONLY path that creates document/section summaries; upload and extraction deliberately leave them empty. '
       + 'Pass the document summary, the section summaries keyed by the `sectionId` values returned by `kb_outline`, and key facts with the exact `chunkId` they came from. '
       + 'Every number, ratio, clause number and responsible body in `summary`/`keyFacts` is checked against the cited source chunks; a mismatch is refused and nothing is written. '

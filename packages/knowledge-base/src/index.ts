@@ -401,7 +401,7 @@ export interface Config {
    * Outline generation policy.
    *
    * `autoGenerate: false` (the default) means upload/extraction build only the TOC and
-   * section structure. Summaries are written later by the `kb-summarize` skill through
+   * section structure. Summaries are written later by the knowledge-base summarize flow through
    * `kb_outline_save`. `true` restores the legacy deterministic extractive summaries.
    */
   outline: { autoGenerate: boolean }
@@ -543,7 +543,7 @@ export const Config: z<Config> = z.object({
   }),
   // Summaries are model work, not an upload side effect. Keep the structure (TOC and
   // section ids) automatic so navigation and citations work immediately; leave the
-  // prose empty until `kb-summarize` calls `kb_outline_save`.
+  // prose empty until the knowledge-base summarize flow calls `kb_outline_save`.
   outline: z.object({
     autoGenerate: z.boolean().default(false),
   }).default({ autoGenerate: false }),
@@ -3431,13 +3431,11 @@ export const KNOWLEDGE_SKILL_PROVIDER = 'dsh-knowledge-base'
 /** Name the model sees in the skill catalog. */
 export const KNOWLEDGE_SKILL_NAME = 'knowledge-base'
 
-/** Second bundled skill: the explicit, model-authored summarisation workflow. */
-export const KB_SUMMARIZE_SKILL_NAME = 'kb-summarize'
-
-/** Third bundled skill: explicit document/directory vectorization. */
-export const KB_VECTORIZE_SKILL_NAME = 'kb-vectorize'
-export const KNOWLEDGE_GRAPH_SKILL_NAME = 'knowledge-graph'
-export const KNOWLEDGE_GRAPH_SKILL_DESCRIPTION = '读写团队知识库里的知识图谱：主题卡、关系文档与四个动作。'
+/**
+ * One bundled memory skill: the guardian, extraction subagent, and SOP evaluation
+ * subagent rules moved into `references/` under this single catalog entry.
+ */
+export const MEMORY_SKILL_NAME = 'memory'
 
 /**
  * Short description shown in the skill list.
@@ -3447,25 +3445,8 @@ export const KNOWLEDGE_GRAPH_SKILL_DESCRIPTION = '读写团队知识库里的知
  * be available before the file is opened.
  */
 export const KNOWLEDGE_SKILL_DESCRIPTION =
-  'Read and change the shared knowledge base: browse, search, create, upload, rename, move and delete documents in the 全局 / 部门 / 个人 trees. '
+  '知识库统一入口：检索、浏览、新建、上传、改名、移动、删除全局 / 部门 / 个人文档；需要整理归档、生成文档摘要、定向向量化或读写知识图谱时，按需加载 references 中的对应流程。'
   + 'Cite with the stable kb://doc/<docId>/chunk/<key> token, never with line or block numbers.'
-
-/**
- * Short description of the explicit summary skill.
- *
- * Upload and extraction never write summaries. This skill is the only documented way to
- * turn source chunks into document/section summaries and key facts, and it does so through
- * the model's own reading plus `kb_outline_save` -- never through a hidden LLM call inside
- * the plugin.
- */
-export const KB_SUMMARIZE_SKILL_DESCRIPTION =
-  '为知识库文档显式生成摘要：先 kb_outline 拿目录，逐章读原文 chunk，再由 agent 生成 doc/section summary + keyFacts，'
-  + '最后用 kb_outline_save 落库。摘要只作导航，引用仍用原文 chunk token；上传/抽取不会自动生成摘要。'
-
-/** Short description of the explicit vectorization skill. */
-export const KB_VECTORIZE_SKILL_DESCRIPTION =
-  '为指定文档或目录显式建立/补齐向量索引：kb_vectorize 可 dryRun 预估，默认只补缺失/过期向量，目录递归且跳过无权文档；'
-  + '不要自动对全库执行。向量只影响召回，不改变 citation/token/摘要。'
 
 /**
  * Where this package's SKILL.md lives, from either build layout.
@@ -3481,55 +3462,15 @@ export function knowledgeSkillPath(): string {
   return join(moduleDirectory, '..', 'SKILL.md')
 }
 
-/**
- * Where the bundled `kb-summarize` skill lives.
- *
- * Same layout reasoning as {@link knowledgeSkillPath}: both `lib/index.js` and a source
- * run from `src/` sit one level below the package root.
- *
- * @returns absolute path of the kb-summarize SKILL.md.
- */
-export function kbSummarizeSkillPath(): string {
+/** Where the bundled one-entry `memory` skill lives. */
+export function memorySkillPath(): string {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url))
-  return join(moduleDirectory, '..', 'skills', KB_SUMMARIZE_SKILL_NAME, 'SKILL.md')
+  return join(moduleDirectory, '..', 'skills', MEMORY_SKILL_NAME, 'SKILL.md')
 }
 
-/** Where the bundled `kb-vectorize` skill lives. */
-export function kbVectorizeSkillPath(): string {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
-  return join(moduleDirectory, '..', 'skills', KB_VECTORIZE_SKILL_NAME, 'SKILL.md')
-}
-
-/** Where the bundled `knowledge-graph` skill lives. */
-export function knowledgeGraphSkillPath(): string {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
-  return join(moduleDirectory, '..', 'skills', KNOWLEDGE_GRAPH_SKILL_NAME, 'SKILL.md')
-}
-
-/** The guardian's own operating skill. */
-export const MEMORY_GUARDIAN_SKILL_NAME = 'memory-guardian'
-/** The extraction subagent's skill. */
-export const MEMORY_EXTRACT_SKILL_NAME = 'memory-extract'
-/** The SOP evaluation subagent's skill. */
-export const MEMORY_SOP_EVALUATE_SKILL_NAME = 'memory-sop-evaluate'
-
-/** Where the bundled `memory-guardian` skill lives. */
-export function memoryGuardianSkillPath(): string {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
-  return join(moduleDirectory, '..', 'skills', MEMORY_GUARDIAN_SKILL_NAME, 'SKILL.md')
-}
-
-/** Where the bundled `memory-extract` skill lives. */
-export function memoryExtractSkillPath(): string {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
-  return join(moduleDirectory, '..', 'skills', MEMORY_EXTRACT_SKILL_NAME, 'SKILL.md')
-}
-
-/** Where the bundled `memory-sop-evaluate` skill lives. */
-export function memorySopEvaluateSkillPath(): string {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url))
-  return join(moduleDirectory, '..', 'skills', MEMORY_SOP_EVALUATE_SKILL_NAME, 'SKILL.md')
-}
+/** Short description of the unified memory skill. */
+export const MEMORY_SKILL_DESCRIPTION =
+  '个人记忆系统的统一入口：记忆守护会话、记忆抽取子代理与 SOP 评估子代理都先读它，再按角色加载 references 中的对应准则。'
 
 /**
  * Where this package's tutorial document lives, from either build layout.
@@ -3557,10 +3498,8 @@ export function tutorialTemplatePath(): string {
  */
 export const KNOWLEDGE_SKILL_RANK = 640
 
-/** The summary skill is more specialised, so it sorts after the general KB skill. */
-export const KB_SUMMARIZE_SKILL_RANK = 650
-/** Vectorization is another explicit, specialised action. */
-export const KB_VECTORIZE_SKILL_RANK = 660
+/** The memory skill is a specialised role bundle, so it sorts after the general KB skill. */
+export const MEMORY_SKILL_RANK = 670
 
 /** Both a human and the model may invoke this skill. */
 export const KNOWLEDGE_SKILL_INVOCATION = { modelInvocable: true, userInvocable: true } as const
@@ -3596,70 +3535,15 @@ export function knowledgeBaseSkillProvider(): {
       locator: knowledgeSkillPath(),
     },
     {
-      name: KB_SUMMARIZE_SKILL_NAME,
-      description: KB_SUMMARIZE_SKILL_DESCRIPTION,
+      name: MEMORY_SKILL_NAME,
+      description: MEMORY_SKILL_DESCRIPTION,
       invocation: KNOWLEDGE_SKILL_INVOCATION,
       source: 'bundled',
       provider: KNOWLEDGE_SKILL_PROVIDER,
-      path: kbSummarizeSkillPath(),
-      resourceBase: { kind: 'directory', path: dirname(kbSummarizeSkillPath()) },
-      rank: KB_SUMMARIZE_SKILL_RANK,
-      locator: kbSummarizeSkillPath(),
-    },
-    {
-      name: KB_VECTORIZE_SKILL_NAME,
-      description: KB_VECTORIZE_SKILL_DESCRIPTION,
-      invocation: KNOWLEDGE_SKILL_INVOCATION,
-      source: 'bundled',
-      provider: KNOWLEDGE_SKILL_PROVIDER,
-      path: kbVectorizeSkillPath(),
-      resourceBase: { kind: 'directory', path: dirname(kbVectorizeSkillPath()) },
-      rank: KB_VECTORIZE_SKILL_RANK,
-      locator: kbVectorizeSkillPath(),
-    },
-    {
-      name: KNOWLEDGE_GRAPH_SKILL_NAME,
-      description: KNOWLEDGE_GRAPH_SKILL_DESCRIPTION,
-      invocation: KNOWLEDGE_SKILL_INVOCATION,
-      source: 'bundled',
-      provider: KNOWLEDGE_SKILL_PROVIDER,
-      path: knowledgeGraphSkillPath(),
-      resourceBase: { kind: 'directory', path: dirname(knowledgeGraphSkillPath()) },
-      rank: 36,
-      locator: knowledgeGraphSkillPath(),
-    },
-    {
-      name: MEMORY_GUARDIAN_SKILL_NAME,
-      description: '记忆守护会话的唯一写入者准则：串行处理空闲、压缩与 dream 消息，派抽取和 SOP 评估子代理，维护日文档与偏好、踩坑、事实、SOP，评估并晋升 SOP，处理隐私与 dream 快照。',
-      invocation: KNOWLEDGE_SKILL_INVOCATION,
-      source: 'bundled',
-      provider: KNOWLEDGE_SKILL_PROVIDER,
-      path: memoryGuardianSkillPath(),
-      resourceBase: { kind: 'directory', path: dirname(memoryGuardianSkillPath()) },
-      rank: 670,
-      locator: memoryGuardianSkillPath(),
-    },
-    {
-      name: MEMORY_EXTRACT_SKILL_NAME,
-      description: '记忆抽取子代理的工作准则：读一次会话的新增消息和工具轨迹，只提取可长期复用的偏好、踩坑、情景、事实与 SOP 候选，给出证据并避开秘密与闲聊。',
-      invocation: KNOWLEDGE_SKILL_INVOCATION,
-      source: 'bundled',
-      provider: KNOWLEDGE_SKILL_PROVIDER,
-      path: memoryExtractSkillPath(),
-      resourceBase: { kind: 'directory', path: dirname(memoryExtractSkillPath()) },
-      rank: 680,
-      locator: memoryExtractSkillPath(),
-    },
-    {
-      name: MEMORY_SOP_EVALUATE_SKILL_NAME,
-      description: 'SOP 评估子代理的工作准则：对照活跃 SOP 与当天会话轨迹，判断是否被使用、是否有效、证据是什么，给出修订、晋升、保留或淘汰建议。',
-      invocation: KNOWLEDGE_SKILL_INVOCATION,
-      source: 'bundled',
-      provider: KNOWLEDGE_SKILL_PROVIDER,
-      path: memorySopEvaluateSkillPath(),
-      resourceBase: { kind: 'directory', path: dirname(memorySopEvaluateSkillPath()) },
-      rank: 690,
-      locator: memorySopEvaluateSkillPath(),
+      path: memorySkillPath(),
+      resourceBase: { kind: 'directory', path: dirname(memorySkillPath()) },
+      rank: MEMORY_SKILL_RANK,
+      locator: memorySkillPath(),
     },
   ]
   return {
@@ -7414,7 +7298,7 @@ export function apply(ctx: Context, deploymentConfig: Config): void {
         summaryKind: outline.summaryKind ?? (outline.summary.trim() === '' ? 'none' : 'extractive'),
         summaryStatus: outline.summaryStatus ?? (outline.summary.trim() === '' ? 'missing' : 'ready'),
         ...((outline.summaryStatus ?? (outline.summary.trim() === '' ? 'missing' : 'ready')) === 'missing'
-          ? { hint: '调用 kb-summarize 技能生成摘要' }
+          ? { hint: '按 knowledge-base 技能的摘要流程生成摘要' }
           : {}),
         ...(outline.summaryVersion === undefined ? {} : { summaryVersion: outline.summaryVersion }),
         sourceChunkIds: outline.sourceChunkIds,

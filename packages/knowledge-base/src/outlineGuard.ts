@@ -2,7 +2,7 @@
  * Grounding checks for model-written document summaries.
  *
  * Uploading and extraction never create prose. A summary only enters the index when the
- * `kb-summarize` skill has read the original chunks and the model submits it through
+ * knowledge-base summarize flow has read the original chunks and the model submits it through
  * `kb_outline_save`; this module is the gate between that submission and the database.
  *
  * The gate is deliberately mechanical. It does not judge whether a sentence is a good
@@ -392,7 +392,7 @@ export function planOutlineSave(input: {
   const submittedSections = Array.isArray(input.submission.sections) ? input.submission.sections : []
 
   if (summary === '') {
-    rejected.push(rejection('summary', '文档摘要不能为空；摘要应由 kb-summarize 技能阅读原文后生成'))
+    rejected.push(rejection('summary', '文档摘要不能为空；摘要应由 knowledge-base 技能的摘要流程（references/summarize.md）阅读原文后生成'))
   } else if (summary.length > MAX_DOC_SUMMARY_CHARS) {
     rejected.push(rejection('summary', `文档摘要超过 ${String(MAX_DOC_SUMMARY_CHARS)} 字符`, { value: preview(summary) }))
   } else if (input.chunks.length === 0) {
