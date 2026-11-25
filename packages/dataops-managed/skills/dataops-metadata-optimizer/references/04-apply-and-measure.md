@@ -2,7 +2,7 @@
 
 ## 应用
 
-- 资源/列/血缘：`metadata-governance` + `govern_metadata`，preview → 用户确认 → apply。
+- 资源/列/血缘：`metadata-governance` + `govern_metadata`，模型生成 preview → 用户确认 → govern_metadata apply。
 - 指标：当前无 `govern_metric`；只能走 Metrics API 或记录 `GAP-METRIC-WRITE`，禁止 SQL 直写。
 - 指标只写 SQL 片段：`name`、`displayName`、`description`、`sqlFragment`、`enabled`、`accessLevel`、`aiVisible`。
 - 失败按错误合同停止，不重试写操作。

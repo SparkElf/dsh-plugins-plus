@@ -18,7 +18,7 @@ description: 管理员/超管使用的正常数据治理技能：导入资源、
 
 ## 硬规则
 
-1. **写元数据只走 `govern_metadata`**：先 `search_resources` 查真实事实，再 `preview`，用户确认后 `apply`；禁止 shell/SQL/Prisma 直写。
+1. **写元数据只走 `govern_metadata`（apply-only）**：先 `search_resources` 查真实事实，由模型生成 preview，用户确认后调用 `govern_metadata`（`confirmed=true`）；禁止 shell/SQL/Prisma 直写。
 2. **指标只写 SQL 片段**：`name`、`displayName`、`description`、`sqlFragment`、`enabled`、`accessLevel`、`aiVisible`；不写 aggregation/grain/dimension/aliases/MetricColumn。
 3. **没有 `govern_metric` 就只提案**：不要用 SQL 直写 `metrics`；记录 `GAP-METRIC-WRITE`。
 4. **导入与治理分开**：文件导入读 `01-file-import`；接口导入读 `02-api-import`。
@@ -28,7 +28,7 @@ description: 管理员/超管使用的正常数据治理技能：导入资源、
 
 1. 判断意图：导入文件 / 导入接口 / 写元数据 / 读元数据。
 2. 读对应 reference。
-3. 写操作必须 preview + 用户确认 + apply。
+3. 写操作必须由模型生成 preview + 用户确认 + 调用 `govern_metadata` apply（`confirmed=true`）。
 4. 完成后回读并汇报结果；失败按错误合同停止。
 
 ## Reference 路由
