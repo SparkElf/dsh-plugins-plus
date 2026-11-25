@@ -29,4 +29,4 @@
 
 ## 写入顺序
 
-`search_resources` 查真值 → `govern_metadata preview` → 用户确认 → `apply`（带 confirmationToken）→ 回读汇报。
+`search_resources` 查真值 → 模型生成 preview → 用户确认 → `govern_metadata` apply（`confirmed=true`）→ 回读汇报。
